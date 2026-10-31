@@ -47,7 +47,8 @@ For a standalone APK: `npx eas build -p android --profile preview` (needs an Exp
 ## 5. Run / install the PC version (Windows etc.)
 ```bash
 npm run web                        # dev server on http://localhost:8081
-npm run build:web -w @sms/mobile   # production static build in apps/mobile/dist
+EXPO_PUBLIC_API_URL=https://<api-host> npm run build:web -w @sms/mobile   # production static build in apps/mobile/dist
+# the build fails if EXPO_PUBLIC_API_URL is missing, loopback or not HTTPS (ALLOW_LOCAL_API=1 overrides)
 npx serve apps/mobile/dist -l 8081 --single   # --single is required: client-side routes
 ```
 Host the static files over HTTPS and rewrite unknown paths to `index.html`, otherwise refreshing on `/stock` or `/login` returns 404. The export includes `manifest.json` and an app-shell service worker; it never caches `/auth`, `/sync`, `/reports` or any other API response. Set `COOKIE_SECURE=true` on the API when it is served over HTTPS (the refresh cookie is `HttpOnly; SameSite=Strict`).

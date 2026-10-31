@@ -2,11 +2,12 @@
 
 **Project:** Shop Management System (npm workspaces: `apps/api`, `apps/mobile`, `packages/shared`)
 **Last updated:** 31 October 2026
-**Status: NOT YET DEPLOYED.** GitHub + CI are done. Neon project `iduka-prod` exists, both
-connection strings verify, `schema_migrations` is absent (0 of 9 migrations applied — awaiting your
-go-ahead). The Render Web Service exists but its first deploy **failed** with `nest: not found`
-(exit 127); the cause is diagnosed and the one-field dashboard fix is in §6.2. Vercel is not created
-yet (§6.3). See §9 for the exact actions only you can perform.
+**Status: NOT YET DEPLOYED.** GitHub + CI are done. Neon production `iduka-prod` is **migrated**:
+9/9 migrations recorded, 28 tables, 0 rows of data (no demo seed) — §8.1. The Render Web Service
+exists but its first deploy **failed** with `nest: not found` (exit 127); the one-field dashboard fix
+is in §6.2 and has not been applied yet. Vercel is not created (§6.3). The web export now refuses to
+build without a usable `EXPO_PUBLIC_API_URL`. Live verification (§8) cannot run until both services
+exist — `scripts/verify-deployment.mjs` automates its machine-checkable half.
 
 This file is the resume point for the next session: read §1 (what was already done), §3 (what this
 session changed), and §9 (what is still blocked on you). Never commit real secrets to this file —
@@ -24,7 +25,7 @@ Investigated on 31 Oct 2026 by inspecting the workspace for evidence, not plans:
 | Git repository | **No `.git` directory anywhere**; no remote; no branch | NOT STARTED |
 | `.gitignore` | Existed but only covered `node_modules`, `dist`, `.env`, `.expo`, `*.log`, `backups/` | NEEDS VERIFICATION → hardened this session |
 | GitHub remote | `git remote -v` empty; no `gh` CLI; no credentials | BLOCKED at investigation → **COMPLETE this session (§5)** |
-| Neon production database | Project `iduka-prod` (`hidden-pine-19642939`, `aws-eu-central-1`, branch `production`, db `neondb`) found in the authenticated Neon org; both `.env.production` strings connect read-only, TLS confirmed at the socket | CONFIGURED this session (0/9 migrations — pending approval) |
+| Neon production database | Project `iduka-prod` (`hidden-pine-19642939`, `aws-eu-central-1`, branch `production`, db `neondb`) found in the authenticated Neon org; both `.env.production` strings connect read-only, TLS confirmed at the socket | MIGRATED this session: 9/9 applied, 28 tables, 0 rows (§8.1) |
 | Render API service | Service exists on the repo (first deploy 31 Oct 12:06); no `render.yaml` in the repo, so all settings live in the dashboard | DEPLOY FAILED (exit 127, devDependencies) → fix in §6.2 |
 | Vercel frontend | No `vercel.json`, no Vercel notes | NOT STARTED → configured this session (§6) |
 | Deployment progress record | This file did not exist | NOT STARTED → created now |
@@ -276,6 +277,12 @@ grep -ro "https://[a-z0-9.-]*onrender\\.com" dist | head -3   # API URL baked in
 grep -rlo "localhost:3000" dist | head -3                    # must be empty
 ```
 
+**Build guard (added 31 Oct 2026):** `npm run build:web` runs `apps/mobile/scripts/check-api-url.mjs`
+before `expo export`, so the build **fails** when `EXPO_PUBLIC_API_URL` is unset, loopback
+(`localhost`, `127.0.0.1`, `[::1]`), non-HTTPS, carries a path/query, or ends with a trailing slash.
+Verified: 6/6 cases behave as intended and a valid HTTPS origin exports with the URL inlined.
+`ALLOW_LOCAL_API=1` is the deliberate escape hatch for LAN/loopback exports.
+
 **Two settings that must agree with the Vercel domain (set on Render, not Vercel):**
 `CORS_ORIGINS=https://<vercel-domain>` (exact origin, no trailing slash, comma-separated for
 preview domains) and `PASSWORD_RESET_URL` / `STAFF_INVITE_URL`, which are built from the same web
@@ -324,17 +331,34 @@ first — never drop tables to “undo” a migration.
 
 ---
 
+## 8.1 Executed against production (31 Oct 2026) — verified
+
+| Step | Result |
+|---|---|
+| Neon migrations | **9/9 applied** through `apps/api/src/db/migrate.ts` over `DIRECT_URL` (direct, non-pooled endpoint), each file in its own transaction |
+| `schema_migrations` | 9 rows, names identical to the 9 files in `apps/api/migrations/` |
+| Schema produced | 28 public tables, 69 indexes, 325 constraints |
+| Demo data | `users`, `shops`, `products`, `sales`, `purchases`, `expenses`, `stock_movements` → **0 rows**; the seed script was never run |
+| Re-run safety | The runner skips names already in `schema_migrations`, so Render's Pre-Deploy `npm run migrate` will apply nothing |
+| Web build guard | 6/6 cases correct (unset, loopback, non-HTTPS, trailing slash, path suffix → exit 1; valid HTTPS origin → exit 0, URL inlined, no `localhost:3000` in `dist/`) |
+| Live HTTP checks | **blocked** — no Render or Vercel URL exists yet; `scripts/verify-deployment.mjs` runs them in one command once they do |
+
+---
+
 ## 9. What remains blocked on you (exact actions)
 
 1. ~~**GitHub**~~ — **done**: pushed to `MonicaMutoni-devoloper/Idukaa`, CI run #1 green (§5).
-2. **Neon:** create the production project (§6.1); keep the pooled and direct URLs for Render —
-   put them in Render's environment settings yourself, never in chat or in a commit.
+2. **Neon:** done — `iduka-prod` exists and is fully migrated (§8.1). Two follow-ups: (i) **rotate the
+   `neondb_owner` password** if a connection string was ever pasted into a chat or echoed into a
+   terminal log (one was, on 31 Oct), then re-fill `apps/api/.env.production` and Render's
+   `DATABASE_URL` / `DIRECT_URL` with the fresh strings; (ii) keep the pooled string for Render's
+   runtime and the direct string for the Pre-Deploy migration.
 3. **Render:** the Web Service already exists on the repo (first deploy 31 Oct 2026, 12:06 — **failed**).
    **Change Settings → Build Command to `npm install --include=dev && npm run build -w @sms/api`**
    (§6.2), then **Manual Deploy → Clear build cache & deploy**. Nothing else about the service
    changes: Start `npm run start -w @sms/api`, Pre-Deploy `npm run migrate`, Health `/health`.
 4. **Vercel:** import the repository with root = repository root (§6.3); set `EXPO_PUBLIC_API_URL`
-   for Production **and** Preview.
+   for Production **and** Preview — the build now fails without it.
 5. **Choose option A or B in §7** (custom domains vs `COOKIE_SAMESITE=none`), then set `CORS_ORIGINS`
    on Render to the exact web origin(s).
 6. Run §8 against the live deployment and paste the results back here.
