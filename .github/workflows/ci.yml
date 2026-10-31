@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# Least privilege: this workflow only reads the repository.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # Same major version as infrastructure/docker-compose.yml (PostgreSQL 16).
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: sms_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d sms_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Dedicated throwaway database: the suite DROPs and re-migrates this schema every run.
+      # No secrets are needed — this job uses only the ephemeral service container above.
+      TEST_DATABASE_URL: postgres://ci:ci@localhost:5432/sms_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Reproducible install from the committed lockfile; postinstall builds @sms/shared.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check (all workspaces)
+        run: npm run typecheck
+
+      - name: Shared package tests
+        run: npm run test:shared
+
+      - name: Mobile i18n tests
+        run: npm run test:mobile
+
+      # Full API integration suite (44 tests: sync, security, finance, onboarding) against
+      # the sms_test service above. The onboarding file rebuilds apps/api/dist with plain
+      # tsc inside its before() hook (Nest DI needs emitDecoratorMetadata, which tsx/esbuild
+      # never emits); apps/api/dist is gitignored, so nothing pre-existing is relied on.
+      - name: API integration tests (PostgreSQL)
+        run: npm run test:api

@@ -1,0 +1,28 @@
+{
+  "name": "shop-management-system",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "devDependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "scripts": {
+    "test:shared": "npm run test -w @sms/shared",
+    "test:api": "node scripts/require-test-db.mjs && npm run test -w @sms/api",
+    "test:mobile": "npm run test:i18n -w @sms/mobile",
+    "migrate": "npm run migrate -w @sms/api",
+    "seed": "npm run seed -w @sms/api",
+    "api": "npm run start:dev -w @sms/api",
+    "mobile": "npm run start -w @sms/mobile",
+    "web": "npm run web -w @sms/mobile",
+    "db:up": "docker compose -f infrastructure/docker-compose.yml up -d",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "postinstall": "npm run build -w @sms/shared",
+    "android": "npm run android -w @sms/mobile",
+    "ios": "npm run ios -w @sms/mobile"
+  }
+}

@@ -1,0 +1,107 @@
+import * as SQLite from "expo-sqlite";
+
+/**
+ * Local persistent store. Every operation is saved here in ONE SQLite transaction (with its optimistic stock delta)
+ * before the UI reports success, so it survives app kills and restarts. Rows are only marked synced after the server confirms.
+ * Platform note: this file is the native (Android) adapter. The web build bundles `local.web.ts`
+ * (IndexedDB) instead — Metro resolves the `.web.ts` extension. See docs/OFFLINE.md.
+ */
+let _db: SQLite.SQLiteDatabase | null = null;
+const db = async () => (_db ??= await SQLite.openDatabaseAsync("shop.db"));
+
+export type StorageBackend = "sqlite" | "indexeddb" | "localstorage";
+/** Native builds keep business data in SQLite; the web adapter overrides this. */
+export const storageBackend = (): StorageBackend => "sqlite";
+
+export type OutboxStatus = "pending" | "retry" | "synced" | "conflict" | "rejected" | "pending_approval";
+export interface OutboxRow { seq: number; op_id: string; user_id: string; type: string; payload: string; deltas: string; status: OutboxStatus; attempts: number; next_attempt_at: number; message: string | null; created_at: string; synced_at?: string | null }
+export interface LocalProduct { id: string; code: string; barcode: string | null; name: string; unit: string; category: string | null; selling_price: number; low_threshold: number; on_hand: number; pending_delta: number }
+
+export async function initDb() {
+  const d = await db();
+  await d.execAsync(`PRAGMA journal_mode = WAL;
+    CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, code TEXT, barcode TEXT, name TEXT NOT NULL, category TEXT, unit TEXT, selling_price INTEGER NOT NULL DEFAULT 0, low_threshold INTEGER NOT NULL DEFAULT 0, on_hand INTEGER NOT NULL DEFAULT 0, pending_delta INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1);
+    CREATE TABLE IF NOT EXISTS suppliers (id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT);
+    CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, deltas TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, message TEXT, created_at TEXT NOT NULL, synced_at TEXT);
+    CREATE INDEX IF NOT EXISTS outbox_status ON outbox(status, next_attempt_at);`);
+}
+export const kvGet = async (k: string) => (await (await db()).getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k=?", [k]))?.v ?? null;
+export const kvSet = async (k: string, v: string) => { await (await db()).runAsync("INSERT INTO kv(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", [k, v]); };
+
+/**
+ * Bind the cached catalogue to exactly one shop. Products and suppliers are per-shop data, but
+ * the store itself is shared by every account that signs in on this device, so on each sign-in
+ * and session restore this compares the bound shop against the signed-in user's: a different shop
+ * drops the other shop's cached rows and sync checkpoints (forcing a full re-pull) while the outbox
+ * is left untouched — unsynced work is never deleted. Same shop = no-op, so offline cache survives.
+ */
+export async function bindShop(shopId: string | null) {
+  if (!shopId) return; // platform administrator: no shop data to scope
+  const d = await db();
+  if ((await d.getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k='local.shop'"))?.v === shopId) return;
+  await d.withTransactionAsync(async () => {
+    await d.runAsync("DELETE FROM products");
+    await d.runAsync("DELETE FROM suppliers");
+    await d.runAsync("DELETE FROM kv WHERE k LIKE 'cp:%'"); // checkpoints: next pull starts from scratch for this shop
+    await d.runAsync("INSERT INTO kv(k,v) VALUES ('local.shop',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", [shopId]);
+  });
+}
+
+/** Persist operation + optimistic stock deltas atomically. deltas: productId -> signed milli-units. */
+export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>) {
+  const d = await db();
+  await d.withTransactionAsync(async () => {
+    await d.runAsync("INSERT INTO outbox(op_id,user_id,type,payload,deltas,created_at) VALUES (?,?,?,?,?,?)", [opId, userId, type, JSON.stringify(payload), JSON.stringify(deltas), new Date().toISOString()]);
+    for (const [pid, q] of Object.entries(deltas)) await d.runAsync("UPDATE products SET pending_delta = pending_delta + ? WHERE id=?", [q, pid]);
+    await local?.();
+  });
+}
+export const upsertLocalProduct = async (p: { id: string; code: string; barcode?: string | null; name: string; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number }) =>
+  (await db()).runAsync("INSERT INTO products(id,code,barcode,name,unit,selling_price,low_threshold,pending_delta) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET code=excluded.code,barcode=excluded.barcode,name=excluded.name,unit=excluded.unit,selling_price=excluded.selling_price,low_threshold=excluded.low_threshold", [p.id, p.code, p.barcode ?? null, p.name, p.unit, p.sellingPrice, p.lowStockThreshold, p.initialQty ?? 0]);
+export const upsertLocalSupplier = async (s: { id: string; name: string; phone?: string }) => (await db()).runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name", [s.id, s.name, s.phone ?? null]);
+
+export const dueOps = async (userId: string, limit = 50) => (await db()).getAllAsync<OutboxRow>("SELECT * FROM outbox WHERE user_id=? AND status IN ('pending','retry') AND next_attempt_at<=? ORDER BY seq LIMIT ?", [userId, Date.now(), limit]);
+export const listOutbox = async (userId: string) => (await db()).getAllAsync<OutboxRow>("SELECT * FROM outbox WHERE user_id=? ORDER BY seq DESC LIMIT 200", [userId]);
+export const outboxCounts = async (userId: string) => {
+  const rows = await (await db()).getAllAsync<{ status: string; n: number }>("SELECT status, COUNT(*) n FROM outbox WHERE user_id=? GROUP BY status", [userId]);
+  const g = (s: string) => rows.find(r => r.status === s)?.n ?? 0;
+  return { pending: g("pending") + g("retry"), issues: g("conflict") + g("rejected"), awaitingApproval: g("pending_approval") };
+};
+
+/** Apply server verdicts. Whatever the verdict, the optimistic delta is released (server on_hand is canonical on next pull). */
+export async function applyResults(results: { opId: string; status: string; message?: string }[]) {
+  const d = await db();
+  await d.withTransactionAsync(async () => {
+    for (const r of results) {
+      const row = await d.getFirstAsync<OutboxRow>("SELECT deltas FROM outbox WHERE op_id=?", [r.opId]); if (!row) continue;
+      for (const [pid, q] of Object.entries(JSON.parse(row.deltas) as Record<string, number>)) await d.runAsync("UPDATE products SET pending_delta = pending_delta - ? WHERE id=?", [q, pid]);
+      const st = r.status === "applied" || r.status === "duplicate" ? "synced" : r.status;
+      await d.runAsync("UPDATE outbox SET status=?, message=?, deltas='{}', synced_at=? WHERE op_id=?", [st, r.message ?? null, new Date().toISOString(), r.opId]);
+    }
+  });
+}
+export async function markRetry(opIds: string[], message: string) {
+  const d = await db();
+  await d.withTransactionAsync(async () => {
+    for (const id of opIds) {
+      const r = await d.getFirstAsync<{ attempts: number }>("SELECT attempts FROM outbox WHERE op_id=?", [id]); const n = (r?.attempts ?? 0) + 1;
+      const delay = Math.min(5000 * 2 ** n, 15 * 60_000) * (0.8 + Math.random() * 0.4); // exponential backoff + jitter
+      await d.runAsync("UPDATE outbox SET status='retry', attempts=?, next_attempt_at=?, message=? WHERE op_id=?", [n, Date.now() + delay, message, id]);
+    }
+  });
+}
+export const retryNow = async (userId: string) => (await db()).runAsync("UPDATE outbox SET next_attempt_at=0 WHERE user_id=? AND status='retry'", [userId]);
+
+export async function applyPull(changes: { entity: string; id: string; data: any }[]) {
+  const d = await db();
+  await d.withTransactionAsync(async () => {
+    for (const c of changes) {
+      if (c.entity === "product") { const p = c.data; await d.runAsync("INSERT INTO products(id,code,barcode,name,category,unit,selling_price,low_threshold,on_hand,active) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET code=excluded.code,barcode=excluded.barcode,name=excluded.name,category=excluded.category,unit=excluded.unit,selling_price=excluded.selling_price,low_threshold=excluded.low_threshold,on_hand=excluded.on_hand,active=excluded.active", [p.id, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold, p.onHand, p.active ? 1 : 0]); }
+      if (c.entity === "supplier") await d.runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone", [c.data.id, c.data.name, c.data.phone ?? null]);
+    }
+  });
+}
+export const listProducts = async (q = "") => (await db()).getAllAsync<LocalProduct>("SELECT * FROM products WHERE active=1 AND (name LIKE ? OR code LIKE ? OR COALESCE(barcode,'') LIKE ?) ORDER BY name LIMIT 300", [`%${q}%`, `%${q}%`, `%${q}%`]);
+export const listSuppliers = async () => (await db()).getAllAsync<{ id: string; name: string }>("SELECT id,name FROM suppliers ORDER BY name");

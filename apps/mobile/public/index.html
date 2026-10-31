@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="%LANG_ISO_CODE%">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="theme-color" content="#0F5C4D" />
+    <meta name="description" content="Offline-first shop management for Rwandan shops: sales, stock, purchases and reports." />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <title>%WEB_TITLE%</title>
+    <style id="expo-reset">
+      html, body { height: 100%; background-color: #F4F6F3; }
+      body { overflow: hidden; margin: 0; }
+      #root { display: flex; height: 100%; flex: 1; }
+    </style>
+    <script>
+      /* Only the appearance preference is read here: no tokens, accounts or business data. */
+      (function () {
+        try {
+          var mode = localStorage.getItem('theme_mode') || 'system';
+          var dark = mode === 'dark' || (mode === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+          document.documentElement.style.backgroundColor = dark ? '#0C1210' : '#F4F6F3';
+          document.body.style.backgroundColor = dark ? '#0C1210' : '#F4F6F3';
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+    <script>
+      /* App-shell service worker: installs the PWA and keeps the shell available offline.
+         It never caches /auth, /sync, /reports or any other API response (see public/sw.js). */
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/sw.js').catch(function () { /* not fatal: the app still runs online */ });
+        });
+      }
+    </script>
+  </body>
+</html>
