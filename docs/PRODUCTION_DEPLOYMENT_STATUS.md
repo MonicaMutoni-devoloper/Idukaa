@@ -2,8 +2,11 @@
 
 **Project:** Shop Management System (npm workspaces: `apps/api`, `apps/mobile`, `packages/shared`)
 **Last updated:** 31 October 2026
-**Status: NOT YET DEPLOYED — everything that can be done locally is done; the remaining work needs
-your accounts (GitHub, Neon, Render, Vercel).** See §9 for the exact actions.
+**Status: NOT YET DEPLOYED.** GitHub + CI are done. Neon project `iduka-prod` exists, both
+connection strings verify, `schema_migrations` is absent (0 of 9 migrations applied — awaiting your
+go-ahead). The Render Web Service exists but its first deploy **failed** with `nest: not found`
+(exit 127); the cause is diagnosed and the one-field dashboard fix is in §6.2. Vercel is not created
+yet (§6.3). See §9 for the exact actions only you can perform.
 
 This file is the resume point for the next session: read §1 (what was already done), §3 (what this
 session changed), and §9 (what is still blocked on you). Never commit real secrets to this file —
@@ -21,8 +24,8 @@ Investigated on 31 Oct 2026 by inspecting the workspace for evidence, not plans:
 | Git repository | **No `.git` directory anywhere**; no remote; no branch | NOT STARTED |
 | `.gitignore` | Existed but only covered `node_modules`, `dist`, `.env`, `.expo`, `*.log`, `backups/` | NEEDS VERIFICATION → hardened this session |
 | GitHub remote | `git remote -v` empty; no `gh` CLI; no credentials | BLOCKED at investigation → **COMPLETE this session (§5)** |
-| Neon production database | No connection config, no `DIRECT_URL`, no notes | NOT STARTED (needs you) |
-| Render API service | No `render.yaml`, no `Procfile`, no Render notes | NOT STARTED (needs you) |
+| Neon production database | Project `iduka-prod` (`hidden-pine-19642939`, `aws-eu-central-1`, branch `production`, db `neondb`) found in the authenticated Neon org; both `.env.production` strings connect read-only, TLS confirmed at the socket | CONFIGURED this session (0/9 migrations — pending approval) |
+| Render API service | Service exists on the repo (first deploy 31 Oct 12:06); no `render.yaml` in the repo, so all settings live in the dashboard | DEPLOY FAILED (exit 127, devDependencies) → fix in §6.2 |
 | Vercel frontend | No `vercel.json`, no Vercel notes | NOT STARTED → configured this session (§6) |
 | Deployment progress record | This file did not exist | NOT STARTED → created now |
 | Public health endpoint | Only `/admin/health`, which requires a `system_admin` token | FIXED this session (§3) |
@@ -190,7 +193,7 @@ Create **Web Service** → connect the GitHub repo → settings:
 |---|---|
 | Root Directory | *(leave empty — repository root)* |
 | Runtime | Node |
-| Build Command | `npm run build -w @sms/api` |
+| Build Command | `npm install --include=dev && npm run build -w @sms/api` |
 | Start Command | `npm run start -w @sms/api` |
 | Deploy/Release Command | `npm run migrate` (runs `npm run migrate -w @sms/api`; uses `DIRECT_URL`) |
 | Health Check Path | `/health` |
@@ -202,6 +205,27 @@ Environment variables (**names only**): `NODE_ENV=production`, `DATABASE_URL` (p
 
 Verified locally: the server binds `0.0.0.0`, sets `trust proxy` (so `X-Forwarded-Proto: https` makes
 cookies `Secure`), and startup logs contain no connection strings or secrets.
+
+**Why the build command installs explicitly (first deploy failed, 2026-10-31 12:06):**
+
+```
+> @sms/api@1.0.0 build
+> nest build
+sh: 1: nest: not found            → npm error code 127
+```
+
+Two facts combine here. Render's Node build runs the Build Command *instead of* a separate
+install step, so `npm run build` alone has no `node_modules`. And because `NODE_ENV=production`
+is set on the service, npm's `omit` defaults to `dev` — verified on this machine with
+`NODE_ENV=production npm config get omit` → `dev`. `@nestjs/cli` (the `nest` binary) and `tsx`
+(needed by `npm run migrate` / `npm run seed`) are **devDependencies**, so they are skipped.
+`--include=dev` reverses the omission (`npm config get omit --include=dev` → empty) and installs
+the build tooling; it does not change what the running server loads.
+
+If the build command is changed back to a bare `npm run build`, the deploy fails again with
+exit 127 — the same error also appears in the Pre-Deploy step (`npm run migrate` → `tsx: not found`)
+for the same reason. After editing this field, use **Manual Deploy → Clear build cache & deploy**
+so the stale `node_modules` from the failed build is not reused.
 
 ### 6.3 Vercel — Expo web frontend (not created yet)
 
@@ -218,6 +242,44 @@ cookies `Secure`), and startup logs contain no connection strings or secrets.
 
 Environment variables (**names only**): `EXPO_PUBLIC_API_URL` = the deployed Render API URL
 (baked in at build time; **production** and **preview** scopes must be set separately).
+
+#### Vercel dashboard steps (exact)
+
+1. https://vercel.com/new → **Import Git Repository** → `MonicaMutoni-devoloper/Idukaa`.
+2. **Configure Project** → leave **Root Directory** empty (click *Edit* and confirm it is `./`).
+   Do **not** point it at `apps/mobile`: the install needs the root workspace + the root `postinstall`
+   that builds `@sms/shared`.
+3. **Framework Preset:** `Other`. Leave **Build and Output Settings** untouched — `vercel.json`
+   supplies `installCommand`, `buildCommand`, `outputDirectory` and the SPA rewrite.
+4. **Environment Variables** → add `EXPO_PUBLIC_API_URL` twice, once per scope:
+
+   | Name | Value | Environment |
+   |---|---|---|
+   | `EXPO_PUBLIC_API_URL` | `https://<render-service>.onrender.com` | Production |
+   | `EXPO_PUBLIC_API_URL` | `https://<render-service>-preview.onrender.com` (or the same URL) | Preview |
+
+   Rules for the value: `https://`, **no trailing slash**, no path, no `/api` suffix — the client
+   concatenates paths itself (`${API_URL}${path}`).
+5. **Deploy**.
+
+**What happens if the variable is missing (why this is not optional):** `resolveApiUrl()` in
+`apps/mobile/src/services/api.ts` returns `process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:3000"`
+on the web platform, and Metro inlines `EXPO_PUBLIC_*` at build time. A deploy without the variable
+builds *successfully* but every API call goes to the visitor's own machine and fails. Changing the
+value later requires a **new deployment** — editing the env var does not rewrite an existing bundle.
+
+**Verify after deploy** (should print one hit and no `localhost:3000`):
+
+```bash
+cd apps/mobile
+grep -ro "https://[a-z0-9.-]*onrender\\.com" dist | head -3   # API URL baked in
+grep -rlo "localhost:3000" dist | head -3                    # must be empty
+```
+
+**Two settings that must agree with the Vercel domain (set on Render, not Vercel):**
+`CORS_ORIGINS=https://<vercel-domain>` (exact origin, no trailing slash, comma-separated for
+preview domains) and `PASSWORD_RESET_URL` / `STAFF_INVITE_URL`, which are built from the same web
+origin. A mismatch shows up as a browser CORS error on every request while `/health` stays green.
 
 ---
 
@@ -267,8 +329,10 @@ first — never drop tables to “undo” a migration.
 1. ~~**GitHub**~~ — **done**: pushed to `MonicaMutoni-devoloper/Idukaa`, CI run #1 green (§5).
 2. **Neon:** create the production project (§6.1); keep the pooled and direct URLs for Render —
    put them in Render's environment settings yourself, never in chat or in a commit.
-3. **Render:** create the Web Service with the §6.2 settings and env var **names** filled with your
-   values; first deploy runs `npm run migrate`.
+3. **Render:** the Web Service already exists on the repo (first deploy 31 Oct 2026, 12:06 — **failed**).
+   **Change Settings → Build Command to `npm install --include=dev && npm run build -w @sms/api`**
+   (§6.2), then **Manual Deploy → Clear build cache & deploy**. Nothing else about the service
+   changes: Start `npm run start -w @sms/api`, Pre-Deploy `npm run migrate`, Health `/health`.
 4. **Vercel:** import the repository with root = repository root (§6.3); set `EXPO_PUBLIC_API_URL`
    for Production **and** Preview.
 5. **Choose option A or B in §7** (custom domains vs `COOKIE_SAMESITE=none`), then set `CORS_ORIGINS`
