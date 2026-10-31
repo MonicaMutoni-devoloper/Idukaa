@@ -24,10 +24,24 @@ export const clientMeta = (req: Request) => ({
   ip: req.ip ?? null,
 });
 
-const cookieBase = (req: Request) => ({
-  secure: requestIsHttps(req),
-  sameSite: "strict" as const,
-});
+/**
+ * SameSite policy for the auth cookies (COOKIE_SAMESITE):
+ *  - "strict" (default): strongest — use it when the web app and the API share a registrable
+ *    domain (app.example.rw + api.example.rw).
+ *  - "none": for cross-site deployments (for example *.vercel.app calling *.onrender.com).
+ *    Browsers reject SameSite=None without Secure, so this mode forces Secure; both cookies stay
+ *    behind the double-submit check (`x-csrf-token` must match the readable sms_csrf cookie).
+ * Anything else falls back to "strict".
+ */
+const sameSitePolicy = (): "strict" | "lax" | "none" => {
+  const v = (process.env.COOKIE_SAMESITE ?? "strict").toLowerCase();
+  return v === "lax" || v === "none" ? v : "strict";
+};
+
+const cookieBase = (req: Request) => {
+  const sameSite = sameSitePolicy();
+  return { secure: requestIsHttps(req) || sameSite === "none", sameSite };
+};
 
 /** Matches REFRESH_TOKEN_TTL_DAYS (clamped the same way as the server-side session). */
 export const refreshCookieMaxAge = () => {
@@ -36,7 +50,8 @@ export const refreshCookieMaxAge = () => {
 };
 
 /**
- * Web refresh tokens live in an HttpOnly, SameSite=Strict cookie scoped to /auth. A readable CSRF
+ * Web refresh tokens live in an HttpOnly cookie scoped to /auth (SameSite from COOKIE_SAMESITE,
+ * "strict" by default). A readable CSRF
  * cookie + required `x-csrf-token` header protect the cookie-based refresh/logout calls. Native
  * clients keep the refresh token in the platform keystore and send it in the request body.
  */
