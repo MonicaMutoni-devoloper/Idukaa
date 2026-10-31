@@ -20,7 +20,7 @@ Investigated on 31 Oct 2026 by inspecting the workspace for evidence, not plans:
 | Application code, tests, docs | `docs/STATUS.md` (verified 28 Oct 2026), 62 API tests, 26 shared, 5 i18n, 19-scenario browser E2E, CI workflow | COMPLETE (pre-existing) |
 | Git repository | **No `.git` directory anywhere**; no remote; no branch | NOT STARTED |
 | `.gitignore` | Existed but only covered `node_modules`, `dist`, `.env`, `.expo`, `*.log`, `backups/` | NEEDS VERIFICATION → hardened this session |
-| GitHub remote | `git remote -v` empty; no `gh` CLI; no credentials | BLOCKED (needs you) |
+| GitHub remote | `git remote -v` empty; no `gh` CLI; no credentials | BLOCKED at investigation → **COMPLETE this session (§5)** |
 | Neon production database | No connection config, no `DIRECT_URL`, no notes | NOT STARTED (needs you) |
 | Render API service | No `render.yaml`, no `Procfile`, no Render notes | NOT STARTED (needs you) |
 | Vercel frontend | No `vercel.json`, no Vercel notes | NOT STARTED → configured this session (§6) |
@@ -50,6 +50,7 @@ could be duplicated.
 | Security headers | `curl -D /health` | helmet: CSP, HSTS, X-Content-Type-Options, Referrer-Policy, X-Frame-Options |
 | Cookie policy knob | login response with and without `COOKIE_SAMESITE` | default `SameSite=Strict`; `COOKIE_SAMESITE=none` → `Secure; SameSite=None` |
 | Secret scan before the first commit | pattern search over the whole tree | only placeholder strings (`CHANGE_ME`, `ci:ci`, `user:pass` in docs); no keys, tokens or credentialed URLs |
+| GitHub Actions CI (first ever run) | push of `67d934c` to `main` | run #1 **success** in 1m 2s; all 9 steps green, including the API suite against the `postgres:16` service |
 | Startup logs leak secrets? | grep of API log for `postgres://`, `password`, `secret` | only route names (`/auth/password/…`), no values |
 
 ---
@@ -123,27 +124,30 @@ post-deploy checks in §8 pass against the real deployment.**
 
 ---
 
-## 5. GitHub (Phase 3)
+## 5. GitHub (Phase 3) — **COMPLETE**
 
-- Repository initialized at the project root, branch **`main`** (production branch), first commit
-  `c57d60f` “Prepare repository for production deployment and fix readiness gaps”.
+- Repository initialized at the project root, branch **`main`** (production branch), commits
+  `c57d60f` (readiness fixes) and `67d934c` (Vercel config + this document).
+- **Remote:** `origin` → `https://github.com/MonicaMutoni-devoloper/Idukaa.git`; pushed and verified —
+  `git ls-remote` shows `refs/heads/main` at `67d934c`, identical to the local `HEAD`, and
+  `git status` reports `main...origin/main` with a clean tree.
+- **Push access:** this machine was signed in as `kellyaudace`, which has no permission on that
+  repository (first push rejected with 403). The stored `github.com` credential was cleared and the
+  push completed as `MonicaMutoni-devoloper` — that is now the stored identity for future pushes.
 - `.gitignore` excludes `.env`, `.env.*` (except `.env.example`), `node_modules`, `dist`, `*.log`,
   `backups/`, key material. Both real env files (`apps/api/.env`, `apps/mobile/.env`) are ignored —
   verified with `git check-ignore`.
 - Secret scan of everything staged: clean (placeholders only).
-- **No remote exists yet** — blocked on you. `gh` is not installed and no credentials are available
-  to this session.
 
-**Exact commands once you have created the repository on GitHub** (do this from the project root;
-they will not overwrite anything as long as the repository you create is empty):
+**First CI run on GitHub Actions — PASS (31 Oct 2026):**
+run `#1` on `67d934c`, job `test`, conclusion **success**, 1m 2s. Every step executed and succeeded:
+checkout → setup-node → `npm ci` (16s) → type-check (5s) → shared tests → i18n tests →
+API integration tests against the `postgres:16` service (17s). This closes the “CI has never run”
+item that `docs/STATUS.md` §3 used to list.
 
-```bash
-git remote add origin https://github.com/<your-account>/<your-repo>.git
-git push -u origin main
-```
+Run URL: `https://github.com/MonicaMutoni-devoloper/Idukaa/actions`
 
-Never force-push. CI (`.github/workflows/ci.yml`) runs automatically on push to `main` — watch the
-**CI** workflow; it has never executed on GitHub Actions yet (no repository existed until now).
+Never force-push; CI runs automatically on every push to `main` and every pull request.
 
 ---
 
@@ -260,8 +264,7 @@ first — never drop tables to “undo” a migration.
 
 ## 9. What remains blocked on you (exact actions)
 
-1. **GitHub:** create an empty repository, then (§5) `git remote add origin …` and
-   `git push -u origin main`. Watch the first **CI** run.
+1. ~~**GitHub**~~ — **done**: pushed to `MonicaMutoni-devoloper/Idukaa`, CI run #1 green (§5).
 2. **Neon:** create the production project (§6.1); keep the pooled and direct URLs for Render —
    put them in Render's environment settings yourself, never in chat or in a commit.
 3. **Render:** create the Web Service with the §6.2 settings and env var **names** filled with your
