@@ -1,4 +1,4 @@
 { "expo": { "name": "Shop Management", "slug": "shop-management", "scheme": "shopmgmt", "version": "1.0.0", "orientation": "default", "userInterfaceStyle": "automatic",
-  "android": { "package": "rw.shop.management", "adaptiveIcon": { "backgroundColor": "#0F5C4D" } },
+  "android": { "package": "rw.shop.management", "versionCode": 1, "adaptiveIcon": { "backgroundColor": "#0F5C4D" } },
   "web": { "bundler": "metro", "output": "single", "name": "Shop Management", "themeColor": "#0F5C4D" },
   "plugins": ["expo-router", "expo-secure-store", ["expo-sqlite", {}]], "experiments": { "typedRoutes": false } } }

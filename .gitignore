@@ -11,3 +11,4 @@ backups/
 *.key
 *.p12
 *.keystore
+*.jks
