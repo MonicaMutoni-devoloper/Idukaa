@@ -341,7 +341,8 @@ first — never drop tables to “undo” a migration.
 | Demo data | `users`, `shops`, `products`, `sales`, `purchases`, `expenses`, `stock_movements` → **0 rows**; the seed script was never run |
 | Re-run safety | The runner skips names already in `schema_migrations`, so Render's Pre-Deploy `npm run migrate` will apply nothing |
 | Web build guard | 6/6 cases correct (unset, loopback, non-HTTPS, trailing slash, path suffix → exit 1; valid HTTPS origin → exit 0, URL inlined, no `localhost:3000` in `dist/`) |
-| Live HTTP checks | **blocked** — no Render or Vercel URL exists yet; `scripts/verify-deployment.mjs` runs them in one command once they do |
+| Render pipeline rehearsal (clean clone of `c425e5a`, 31 Oct) | `NODE_ENV=production npm install --include=dev` → exit 0, 917 packages, `nest` + `tsx` present, `@sms/shared` built by the root `postinstall`; `npm run build -w @sms/api` → exit 0, `apps/api/dist/main.js` written; `npm run migrate` → exit 0, nothing re-applied; `node dist/main.js` → `/health` `200 {"status":"ok","db":"ok"}`, `/sync/pull` `401`, no connection string in the log |
+| Live HTTP checks | **blocked** — no Render or Vercel URL exists yet (probed `iduka-api`/`iduka`/`iduka-backend`/`shop-management-api` `.onrender.com`: no such service); `scripts/verify-deployment.mjs` runs them in one command once they do |
 
 ---
 
