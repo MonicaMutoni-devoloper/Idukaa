@@ -7,7 +7,8 @@ Frankfurt) and passed **13/13** live checks — health with real Neon connectivi
 every protected route, no cookie on a failed login, foreign-origin CORS refused (§8.2). GitHub + CI are
 done, Neon `iduka-prod` is migrated 9/9 with 0 rows of data (§8.1). **Not ready for real users yet:**
 no Vercel deployment exists, `CORS_ORIGINS` is therefore still unset (so the web app cannot call the API
-from a browser), and there is **no `system_admin` account** to approve owner applications (§8.3).
+from a browser). The platform administrator account now exists (§8.3), so owner applications can be
+approved as soon as there is a browser front end to reach the admin screens.
 
 This file is the resume point for the next session: read §1 (what was already done), §3 (what this
 session changed), and §9 (what is still blocked on you). Never commit real secrets to this file —
@@ -434,6 +435,15 @@ intended path, per `docs/DEPLOYMENT.md`, is one deliberate INSERT for the platfo
    `system_admin` out of shop screens, and the API enforces the same boundary with `@Roles`).
 4. Approve the first owner application from **Admin → Applications**.
 
+**Executed 1 Nov 2026 — done.** The profile returned by `RETURNING` was
+`id 7a4e4457-6e88-414c-806a-5d2e6920574b`, `role system_admin`, `account_status active`. A read-only
+check afterwards confirmed the stored hash is `$2a$12$` (60 chars), `shop_id` is `NULL`, `active` is
+true, `token_version` 0, and `users` now holds exactly that one row. The administrator's e-mail is
+**deliberately not recorded in this file** — it is a personal address and this repository is public.
+Signing in has not been exercised yet: it needs a browser front end, which does not exist until Vercel
+is connected. Nothing about the application changed to achieve this — it is one data row, created with
+the existing schema and the API's own bcrypt parameters.
+
 Why this cannot be abused by the public: `POST /applications` and `POST /admin/users` strip/reject a
 caller-supplied role, so registration always produces an `owner` application — asserted by
 `registration.integration.test.ts` (`role: "system_admin"` is stripped and the service assigns `owner`).
@@ -454,8 +464,8 @@ Do **not** share this account. Create per-person admin accounts later from `POST
    13/13 live checks (§8.2). Two optional follow-ups: set **Pre-Deploy Command** to `npm run migrate`
    before the next schema change (all 9 migrations are already applied, so nothing is pending today),
    and switch the Neon strings to `?sslmode=verify-full` to silence the pg warning in the log.
-4. **Create the first `system_admin`** in the Neon SQL Editor (§8.3). Without it no owner application
-   can ever be approved.
+4. ~~**Create the first `system_admin`**~~ — **done** 1 Nov 2026 in the Neon SQL Editor (§8.3).
+   Once the web app exists, sign in with it and confirm the approval queue is reachable.
 5. **Vercel:** import the repository with root = repository root (§6.3); set `EXPO_PUBLIC_API_URL`
    for Production **and** Preview to `https://idukaa-qqk2.onrender.com` — the build now fails without it.
 6. **Then, on Render, set the three web-dependent variables** to the Vercel origin:
