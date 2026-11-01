@@ -17,8 +17,7 @@ two-shop isolation and offline sync have **not** been run here — they need cre
 not hold. Treat that list as the gate before real users (§8, step 2 onward).
 
 **Visual regression:** diagnosed 1 Nov 2026 — near-black hero text on the navy sign-in panel, visible
-whenever the OS/browser prefers dark. Fixed and verified locally; **not deployed, awaiting approval**
-(§8.6).
+whenever the OS/browser prefers dark. Fixed, deployed and verified against the live site (§8.6).
 
 This file is the resume point for the next session: read §1 (what was already done), §3 (what this
 session changed), and §9 (what is still blocked on you). Never commit real secrets to this file —
@@ -554,7 +553,7 @@ and the three bullets were effectively unreadable. Light mode was unaffected bec
 
 Screenshots were captured for both schemes at 1440×960 and at 390×844 (phone).
 
-### Changes made (local only, not deployed)
+### Changes made (deployed 1 Nov 2026, commit `a220ae6`)
 
 | File | Change | Why |
 |---|---|---|
@@ -581,6 +580,27 @@ was deliberately left at `#0F5C4D` — that is icon artwork, a separate decision
 | No localhost fallback | `grep -rl localhost:3000 apps/mobile/dist` | **PASS** — 0 files |
 | API integration suite (62 tests) | needs `TEST_DATABASE_URL` | **NOT TESTED** — the change is presentational (inline style values in one screen plus static HTML meta), so the database suite was not re-run |
 | Browser E2E (19 scenarios) | `node apps/mobile/tests/e2e-web.mjs` | **NOT TESTED** — needs a seeded development database and a local API; it writes demo records and must never point at production |
+
+### Deployed and verified live (1 Nov 2026)
+
+`c8d2def` (fix) and `a220ae6` (this runbook) were pushed to `main`; Vercel picked the commit up
+automatically and the new bundle was being served **within ~60 s** (confirmed by polling `/` for the
+marker `0F5C4D` until it disappeared — the old palette was the one thing uniquely present in the
+superseded build).
+
+| Check against the live site after the deploy | Result |
+|---|---|
+| `scripts/verify-deployment.mjs --api=… --web=https://idukaa-api.vercel.app` | **PASS — 23/23, exit 0** |
+| `theme-color` metas in the served HTML | **PASS** — both read `#172B4D`; no `0F5C4D` anywhere |
+| Boot background in the served HTML | **PASS** — `#F6F8FA` (old `#F4F6F3` gone) |
+| Dark scheme, 1440×960, `prefers-color-scheme: dark` | **PASS** — hero headline and bullets near-white, legible; navy panel and teal accents intact |
+| Dark scheme, 390×844 | **PASS** — phone layout carries no hero panel and is unaffected |
+| Light scheme, 1440×960 | **PASS** — unchanged from the approved appearance |
+| API `/health` | **PASS** — `200` in 0.69 s (warm), `db: ok` |
+
+The sign-in screen is now readable in both schemes and the deploy introduced no regression elsewhere:
+every protected route still answers `401`, the CORS allow-list still matches the web origin, and the
+bundle still carries `idukaa-qqk2.onrender.com` with no `localhost` fallback.
 
 ### Defect found and deliberately NOT changed
 
