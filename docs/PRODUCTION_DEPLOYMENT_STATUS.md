@@ -1,13 +1,13 @@
 # Production deployment status
 
 **Project:** Shop Management System (npm workspaces: `apps/api`, `apps/mobile`, `packages/shared`)
-**Last updated:** 31 October 2026
-**Status: NOT YET DEPLOYED.** GitHub + CI are done. Neon production `iduka-prod` is **migrated**:
-9/9 migrations recorded, 28 tables, 0 rows of data (no demo seed) — §8.1. The Render Web Service
-exists but its first deploy **failed** with `nest: not found` (exit 127); the one-field dashboard fix
-is in §6.2 and has not been applied yet. Vercel is not created (§6.3). The web export now refuses to
-build without a usable `EXPO_PUBLIC_API_URL`. Live verification (§8) cannot run until both services
-exist — `scripts/verify-deployment.mjs` automates its machine-checkable half.
+**Last updated:** 1 November 2026
+**Status: API DEPLOYED AND VERIFIED.** `https://idukaa-qqk2.onrender.com` is live on Render (Free,
+Frankfurt) and passed **13/13** live checks — health with real Neon connectivity, helmet headers, 401 on
+every protected route, no cookie on a failed login, foreign-origin CORS refused (§8.2). GitHub + CI are
+done, Neon `iduka-prod` is migrated 9/9 with 0 rows of data (§8.1). **Not ready for real users yet:**
+no Vercel deployment exists, `CORS_ORIGINS` is therefore still unset (so the web app cannot call the API
+from a browser), and there is **no `system_admin` account** to approve owner applications (§8.3).
 
 This file is the resume point for the next session: read §1 (what was already done), §3 (what this
 session changed), and §9 (what is still blocked on you). Never commit real secrets to this file —
@@ -365,7 +365,80 @@ first — never drop tables to “undo” a migration.
 | Re-run safety | The runner skips names already in `schema_migrations`, so Render's Pre-Deploy `npm run migrate` will apply nothing |
 | Web build guard | 6/6 cases correct (unset, loopback, non-HTTPS, trailing slash, path suffix → exit 1; valid HTTPS origin → exit 0, URL inlined, no `localhost:3000` in `dist/`) |
 | Render pipeline rehearsal (clean clone of `c425e5a`, 31 Oct) | `NODE_ENV=production npm install --include=dev` → exit 0, 917 packages, `nest` + `tsx` present, `@sms/shared` built by the root `postinstall`; `npm run build -w @sms/api` → exit 0, `apps/api/dist/main.js` written; `npm run migrate` → exit 0, nothing re-applied; `node dist/main.js` → `/health` `200 {"status":"ok","db":"ok"}`, `/sync/pull` `401`, no connection string in the log |
-| Live HTTP checks | **blocked** — no Render or Vercel URL exists yet (probed `iduka-api`/`iduka`/`iduka-backend`/`shop-management-api` `.onrender.com`: no such service); `scripts/verify-deployment.mjs` runs them in one command once they do |
+| Live HTTP checks | **blocked at the time** — no Render or Vercel URL existed yet. Superseded by §8.2. |
+
+---
+
+## 8.2 Render API — deployed and verified (1 Nov 2026, 20:12 GMT+2)
+
+Deploy `dep-dbjo26dh3lcs738ja830`, commit `6904bec`, trigger **Start command updated**, duration
+1m12s, **Status: Deploy succeeded / Live**. Startup log ended with
+`Nest application successfully started` and `Available at your primary URL https://idukaa-qqk2.onrender.com`;
+all 12 controllers and their routes mapped; **no connection string, password or JWT value in the log**.
+
+`node scripts/verify-deployment.mjs --api=https://idukaa-qqk2.onrender.com` → **13/13 checks passed**:
+
+| Check | Live result |
+|---|---|
+| `/health` | `200`, body `{"status":"ok","db":"ok"}` — the API really reached Neon, not just a liveness stub |
+| Response body leaks | no database URL in the health body |
+| helmet | `X-Content-Type-Options: nosniff`, CSP present, `Strict-Transport-Security: max-age=15552000; includeSubDomains` |
+| Unauthenticated access | `/sync/pull`, `/reports/summary`, `/shop/settings`, `/notifications`, `/admin/health` → **401 each** (global default-deny guard) |
+| Failed login | `401` and **no `sms_rt` cookie issued** |
+| CORS preflight, foreign origin (`https://evil.example`) | `204` but **no `Access-Control-Allow-Origin`** — refused |
+| CORS preflight, tentative web origin | also absent, because `CORS_ORIGINS` is still unset — **must be set once Vercel exists** |
+
+Notes carried from the deploy log:
+
+- `NODE_ENV=production` + `--include=dev` install worked: `postinstall` built `@sms/shared`, `nest build`
+  succeeded, `npm run start -w @sms/api` → `node dist/main.js`.
+- **Pre-Deploy Command is still empty.** All 9 migrations were applied on 31 Oct (§8.1), so nothing is
+  missing today — but a future migration will need that field set to `npm run migrate`.
+- Nine minutes after start, `node-postgres` printed a **security warning**: `sslmode=require` is
+  currently treated as `verify-full`, and pg v9 will weaken that. Convenient today (Neon verifies the
+  certificate), but for a warning-free, explicitly-safe configuration change the pooled/direct strings
+  to `?sslmode=verify-full` once Neon supplies its CA, or accept the current behaviour.
+- `WEB_CONCURRENCY=1` set by Render (Free instance, 1 CPU).
+- Render Free spins down when idle: **the first request after ~15 min costs 50 s or more** (banner in the
+  dashboard). `scripts/verify-deployment.mjs` warms the API before asserting, but real shop owners
+  will see that delay on a cold start — the web client shows its offline/last-cached state instead.
+
+---
+
+## 8.3 First `system_admin` — required before any owner can be approved
+
+Production has **0 users** (§8.1), and owner registration is deliberately not self-activating: an
+owner submits an application and a `system_admin` approves it. With no admin, that queue can never be
+cleared — so this is a hard prerequisite for real users, not a nicety.
+
+The `seed` script is unusable by design (`NODE_ENV=production` is refused) and must stay that way. The
+intended path, per `docs/DEPLOYMENT.md`, is one deliberate INSERT for the platform administrator.
+`001_init.sql` already runs `CREATE EXTENSION IF NOT EXISTS pgcrypto`, so no tooling is needed:
+
+1. Neon console → project `iduka-prod` → **SQL Editor** (branch `main`, database `neondb`).
+2. Run this, replacing the e-mail and choosing a strong password **in the editor itself** (never paste
+   it into a chat or a terminal — the hash is all that is stored):
+
+   ```sql
+   INSERT INTO users (shop_id, email, full_name, password_hash, role)
+   VALUES (NULL, 'admin@your-domain.rw', 'Platform Admin',
+           crypt('<choose-a-strong-password>', gen_salt('bf', 12)), 'system_admin')
+   RETURNING id, email, role, account_status;
+   ```
+
+   `shop_id` must be `NULL` for this role — the table's `CHECK ((role = 'system_admin') = (shop_id IS NULL))`
+   enforces it. `account_status` defaults to `'active'`, `active` to `true`, so the account can sign in
+   immediately. `gen_salt('bf', 12)` yields a `$2a$12$…` hash, which `bcryptjs` (used by the API)
+   verifies; the 12 rounds match the `NODE_ENV=production` seed path.
+3. Sign in with that account on the deployed web app. It is routed to `/admin` (the client redirects
+   `system_admin` out of shop screens, and the API enforces the same boundary with `@Roles`).
+4. Approve the first owner application from **Admin → Applications**.
+
+Why this cannot be abused by the public: `POST /applications` and `POST /admin/users` strip/reject a
+caller-supplied role, so registration always produces an `owner` application — asserted by
+`registration.integration.test.ts` (`role: "system_admin"` is stripped and the service assigns `owner`).
+
+Do **not** share this account. Create per-person admin accounts later from `POST /admin/users`.
 
 ---
 
@@ -377,19 +450,24 @@ first — never drop tables to “undo” a migration.
    terminal log (one was, on 31 Oct), then re-fill `apps/api/.env.production` and Render's
    `DATABASE_URL` / `DIRECT_URL` with the fresh strings; (ii) keep the pooled string for Render's
    runtime and the direct string for the Pre-Deploy migration.
-3. **Render:** the Web Service exists — `Idukaa`, `https://idukaa-qqk2.onrender.com`, Frankfurt, Free,
-   root directory empty, branch `main`. Build Command is **now correct**
-   (`npm install --include=dev && npm run build -w @sms/api`) but the last deploy (`252a3e0`) still
-   failed, because **Start Command was `npm run build -w @sms/api`** and **Pre-Deploy was empty** (§6.2).
-   Fix those two fields — Start → `npm run start -w @sms/api`, Pre-Deploy → `npm run migrate` — keep
-   Health Check Path `/health`, then **Manual Deploy → Clear build cache & deploy**.
-   *Free plan:* if Pre-Deploy is greyed out, skip it — all 9 migrations are already applied (§8.1), so
-   nothing needs to run before the server starts.
-4. **Vercel:** import the repository with root = repository root (§6.3); set `EXPO_PUBLIC_API_URL`
-   for Production **and** Preview — the build now fails without it.
-5. **Choose option A or B in §7** (custom domains vs `COOKIE_SAMESITE=none`), then set `CORS_ORIGINS`
-   on Render to the exact web origin(s).
-6. Run §8 against the live deployment and paste the results back here.
+3. ~~**Render**~~ — **done**: `Idukaa`, `https://idukaa-qqk2.onrender.com`, deploy `6904bec` **live**,
+   13/13 live checks (§8.2). Two optional follow-ups: set **Pre-Deploy Command** to `npm run migrate`
+   before the next schema change (all 9 migrations are already applied, so nothing is pending today),
+   and switch the Neon strings to `?sslmode=verify-full` to silence the pg warning in the log.
+4. **Create the first `system_admin`** in the Neon SQL Editor (§8.3). Without it no owner application
+   can ever be approved.
+5. **Vercel:** import the repository with root = repository root (§6.3); set `EXPO_PUBLIC_API_URL`
+   for Production **and** Preview to `https://idukaa-qqk2.onrender.com` — the build now fails without it.
+6. **Then, on Render, set the three web-dependent variables** to the Vercel origin:
+   `CORS_ORIGINS=https://<project>.vercel.app`, `PASSWORD_RESET_URL=https://<project>.vercel.app/reset-password`,
+   `STAFF_INVITE_URL=https://<project>.vercel.app/invite`. Until `CORS_ORIGINS` matches, the browser app
+   cannot call the API at all (verified: no `Access-Control-Allow-Origin` is sent today).
+7. **Choose option A or B in §7.** Staying on `*.vercel.app` → `*.onrender.com` means the refresh
+   cookie is cross-site, so set `COOKIE_SAMESITE=none` (keeping `COOKIE_SECURE=true`); otherwise every
+   page reload asks for the password again.
+8. Run `node scripts/verify-deployment.mjs --api=https://idukaa-qqk2.onrender.com --web=https://<project>.vercel.app`
+   once the web app exists, then walk the interactive half of §8 (registration → approval → two-shop
+   isolation → offline sync).
 
 **Not started by design (recorded as a follow-up task, per instructions):** Android APK/AAB packaging
 via Expo EAS and the Windows native target — the repository contains the Expo/Android project but no
