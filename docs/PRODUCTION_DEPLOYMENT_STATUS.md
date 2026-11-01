@@ -2,15 +2,19 @@
 
 **Project:** Shop Management System (npm workspaces: `apps/api`, `apps/mobile`, `packages/shared`)
 **Last updated:** 1 November 2026
-**Status: API AND WEB BOTH DEPLOYED — ONE SETTING SHORT OF USABLE.** API
+**Status: DEPLOYED AND FULLY VERIFIED BY SCRIPT — 23/23. Interactive UAT still owed.** API
 `https://idukaa-qqk2.onrender.com` (Render, Free, Frankfurt) and web `https://idukaa-api.vercel.app`
-(Vercel) are both live; the combined run of `scripts/verify-deployment.mjs` scores **22/23** (§8.4).
-The single failure is `CORS allow-list contains the web origin`: `CORS_ORIGINS` is still unset on
-Render, so no `Access-Control-Allow-Origin` is sent and **every browser call from the deployed web app
-is refused** — the build itself is correct (the bundle carries `idukaa-qqk2.onrender.com` and no
-`localhost`). GitHub + CI are done, Neon `iduka-prod` is migrated 9/9 with no demo data (§8.1), the API
-passed 13/13 (§8.2) and the platform administrator exists (§8.3). Set the three Render web-origin
-variables in §9.6 and the app is reachable in a browser.
+(Vercel) are both live, and `scripts/verify-deployment.mjs` now passes **23/23** (§8.4), including
+`CORS allow-list contains the web origin` — `CORS_ORIGINS` was set on Render and the preflight returns
+`access-control-allow-origin: https://idukaa-api.vercel.app` with `allow-credentials: true`. The web
+bundle carries `idukaa-qqk2.onrender.com` and no `localhost`. GitHub + CI done, Neon `iduka-prod`
+migrated 9/9 with no demo data (§8.1), platform administrator exists (§8.3).
+
+**What is still unproven:** no signed-in session has ever been exercised against this deployment. The
+public landing/sign-in page renders and every unauthenticated boundary rejects correctly, but
+sign-in, owner registration, admin approval, manager login, product/stock/sale entry, reports,
+two-shop isolation and offline sync have **not** been run here — they need credentials a script does
+not hold. Treat that list as the gate before real users (§8, step 2 onward).
 
 This file is the resume point for the next session: read §1 (what was already done), §3 (what this
 session changed), and §9 (what is still blocked on you). Never commit real secrets to this file —
@@ -474,7 +478,7 @@ and a deep route (`/inventory/products`) returns the SPA shell.
 |---|---|
 | API (13) | all pass — `/health` 200 `{"status":"ok","db":"ok"}`, helmet headers, 5× 401, failed login 401 with no cookie, foreign-origin CORS refused |
 | Web (6) | all pass — HTML 200, `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload`, SPA fallback 200, 3 script tags, 1388 KB bundle fetched, **bundle contains `idukaa-qqk2.onrender.com`** and **no `localhost:3000`** |
-| CORS (3) | **1 fail** — `allow-origin=none` for `https://idukaa-api.vercel.app` (status 204); `allow-credentials: true`; foreign origin still refused |
+| CORS (3) | all pass after `CORS_ORIGINS` was set on Render — `allow-origin=https://idukaa-api.vercel.app`, `allow-credentials: true`, foreign origin refused |
 
 So the deployed bundle **is** wired to the real API; only the server-side allow-list entry is missing.
 `apps/api/src/main.ts` does `(process.env.CORS_ORIGINS ?? "").split(",").filter(Boolean)` — unset yields
@@ -485,6 +489,35 @@ green while the app cannot sign in. Fix: §9.6.
 **Cold start measured:** the first `/health` after ~20 min idle took **11.2 s** (Free plan sleeps), which
 exceeds the script's 15 s per-request timeout and shows up as `FAIL GET /health reachable [timeout]` —
 not an outage. Warm it first (`curl -m 120 https://idukaa-qqk2.onrender.com/health`) or simply re-run.
+
+---
+
+## 8.5 Re-run after `CORS_ORIGINS` was set — 23/23 (1 Nov 2026, 22:05 GMT+2)
+
+Render → `Idukaa` → Environment was updated with the web origin, and the verification was re-run
+against the live services. **`node scripts/verify-deployment.mjs --api=https://idukaa-qqk2.onrender.com --web=https://idukaa-api.vercel.app`
+→ 23/23 checks passed, exit 0.**
+
+Explicit preflight, `OPTIONS /auth/login` with `Origin: https://idukaa-api.vercel.app`:
+
+```
+HTTP/1.1 204 No Content
+access-control-allow-origin: https://idukaa-api.vercel.app
+access-control-allow-credentials: true
+access-control-allow-methods: GET,HEAD,PUT,PATCH,POST,DELETE
+access-control-allow-headers: content-type
+vary: Origin, Access-Control-Request-Headers
+```
+
+`vary: Origin` means the allow-list is evaluated per request rather than cached across origins, which is
+the correct behaviour for a credential-bearing API. `/health` answered in **0.59 s** (instance warm from
+the preceding request), confirming the earlier 11 s figure was cold-start, not degradation.
+
+**Still manual:** `COOKIE_SAMESITE` could not be confirmed from outside — the `SameSite` attribute only
+appears on a *successful* login response, and this script deliberately never succeeds at login. Verify it
+in DevTools → Application → Cookies on `onrender.com` after the first real sign-in: it must read
+`Secure; HttpOnly; SameSite=None`. If it reads `Strict`, reloading the page will silently sign the user
+out and `COOKIE_SAMESITE=none` is still missing (or Render has not finished redeploying).
 
 ---
 
@@ -504,21 +537,17 @@ not an outage. Warm it first (`curl -m 120 https://idukaa-qqk2.onrender.com/heal
    Once the web app exists, sign in with it and confirm the approval queue is reachable.
 5. ~~**Vercel**~~ — **done**: project `idukaa-api`, `https://idukaa-api.vercel.app`, serving the Expo
    export with `EXPO_PUBLIC_API_URL=https://idukaa-qqk2.onrender.com` baked in (§8.4).
-6. **← THE ONE REMAINING BLOCKER.** Render → `Idukaa` → **Environment** → add these three, then save
-   (Render redeploys automatically; they are read at runtime, no rebuild needed):
-   `CORS_ORIGINS=https://idukaa-api.vercel.app`,
-   `PASSWORD_RESET_URL=https://idukaa-api.vercel.app/reset-password`,
-   `STAFF_INVITE_URL=https://idukaa-api.vercel.app/invite`.
-   No trailing slashes, no path on `CORS_ORIGINS`, comma-separate if a preview domain is added later.
-   Verified today: without it the preflight answers `204` with **no** `Access-Control-Allow-Origin`.
+6. ~~**Set the Render web-origin variables**~~ — **done** (1 Nov 2026): the preflight now returns
+   `allow-origin: https://idukaa-api.vercel.app` and the script passes 23/23 (§8.5). Confirm
+   `COOKIE_SAMESITE=none` was included in the same save — it cannot be checked without a successful
+   login, and without it every page reload asks for the password again.
 7. **Option B applies on these hosts (§7):** add `COOKIE_SAMESITE=none`, keep `COOKIE_SECURE=true` —
    `vercel.app` → `onrender.com` is a cross-site request, so `Strict` would ask for the password again
    on every reload. Move to option A (custom `app.`/`api.` domains) later if you want `Strict` back.
-8. **Re-run the check after Render redeploys:**
-   `node scripts/verify-deployment.mjs --api=https://idukaa-qqk2.onrender.com --web=https://idukaa-api.vercel.app`
-   → expect **23/23** (warm the API first if it slept; §8.4). Then walk the interactive half of §8:
-   sign in as the administrator, submit an owner application, approve it, create a second shop, and run
-   the offline-sale → reload → sync → retry pass.
+8. **Done once (§8.5, 23/23).** Now walk the interactive half of §8, in this order: sign in as the
+   administrator → submit an owner application → approve it → create a second shop → run the
+   offline-sale → reload → sync → retry pass. Until that runs, "works" is limited to what a credential-less
+   script can prove.
 
 **Not started by design (recorded as a follow-up task, per instructions):** Android APK/AAB packaging
 via Expo EAS and the Windows native target — the repository contains the Expo/Android project but no
