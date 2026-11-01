@@ -71,7 +71,12 @@ export default function AppLayout() {
   // Server access is still refused by the API until a fresh token is issued.
   if (!user) return <Redirect href="/login" />;
   // Role boundary: administrators only see the administration area; shop users never see it.
-  if (user.role === "system_admin" && path !== "/settings" && !path.startsWith("/admin")) return <Redirect href="/admin" />;
+  // The phone tab bar puts the fifth slot on /more, and that screen links to /notifications,
+  // /security and /settings, so those destinations must be reachable too — otherwise tapping More
+  // (or an item on it) silently bounces back to the admin overview.
+  const reachable =
+    path.startsWith("/admin") || path === "/more" || allNav(user.role).some((i) => activeNav(i.href, path));
+  if (user.role === "system_admin" && !reachable) return <Redirect href="/admin" />;
   if (user.role !== "system_admin" && path.startsWith("/admin")) return <Redirect href="/" />;
 
   const groups = NAV[user.role] ?? [];
