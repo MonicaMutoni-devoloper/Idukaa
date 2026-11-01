@@ -228,6 +228,29 @@ exit 127 — the same error also appears in the Pre-Deploy step (`npm run migrat
 for the same reason. After editing this field, use **Manual Deploy → Clear build cache & deploy**
 so the stale `node_modules` from the failed build is not reused.
 
+**Service identity (confirmed from the dashboard, 31 Oct 2026):** name `Idukaa`, ID `srv-dbirr8gae00c73ch5apg`,
+URL `https://idukaa-qqk2.onrender.com`, region Frankfurt (EU Central), plan **Free**, root directory
+empty, branch `main`, auto-deploy on commit.
+
+**Second failure — Start Command was set to the build command (deploy `252a3e0`, 1m59s, failed):**
+
+| Field | Dashboard had | Must be |
+|---|---|---|
+| Build Command | `npm install --include=dev && npm run build -w @sms/api` | unchanged — **this part is correct now** |
+| Start Command | `npm run build -w @sms/api` ❌ | `npm run start -w @sms/api` |
+| Pre-Deploy Command | *(empty)* | `npm run migrate` |
+
+The build succeeded (install + `nest build`, which is why the deploy lasted ~2 min instead of 2 s) and
+then Render ran `npm run build` a second time as the **start** command. `nest build` exits 0 and no
+long-running process is left, so nothing ever bound the injected `PORT`, the port scan failed, and the
+deploy was marked Failed. `apps/api` `start` is `node dist/main.js`; the workspace-qualified
+`npm run start -w @sms/api` invokes it from the repository root.
+
+Probed after that failure (31 Oct): `GET /health`, `/` and `/sync/pull` on `idukaa-qqk2.onrender.com`
+all **timed out after 25 s** with no bytes — expected, since a failed deploy leaves no live instance
+(and the Free plan sleeps when idle, so the first request after a successful deploy may take ~50 s
+to wake).
+
 ### 6.3 Vercel — Expo web frontend (not created yet)
 
 `vercel.json` at the repository root already pins the build:
@@ -354,10 +377,14 @@ first — never drop tables to “undo” a migration.
    terminal log (one was, on 31 Oct), then re-fill `apps/api/.env.production` and Render's
    `DATABASE_URL` / `DIRECT_URL` with the fresh strings; (ii) keep the pooled string for Render's
    runtime and the direct string for the Pre-Deploy migration.
-3. **Render:** the Web Service already exists on the repo (first deploy 31 Oct 2026, 12:06 — **failed**).
-   **Change Settings → Build Command to `npm install --include=dev && npm run build -w @sms/api`**
-   (§6.2), then **Manual Deploy → Clear build cache & deploy**. Nothing else about the service
-   changes: Start `npm run start -w @sms/api`, Pre-Deploy `npm run migrate`, Health `/health`.
+3. **Render:** the Web Service exists — `Idukaa`, `https://idukaa-qqk2.onrender.com`, Frankfurt, Free,
+   root directory empty, branch `main`. Build Command is **now correct**
+   (`npm install --include=dev && npm run build -w @sms/api`) but the last deploy (`252a3e0`) still
+   failed, because **Start Command was `npm run build -w @sms/api`** and **Pre-Deploy was empty** (§6.2).
+   Fix those two fields — Start → `npm run start -w @sms/api`, Pre-Deploy → `npm run migrate` — keep
+   Health Check Path `/health`, then **Manual Deploy → Clear build cache & deploy**.
+   *Free plan:* if Pre-Deploy is greyed out, skip it — all 9 migrations are already applied (§8.1), so
+   nothing needs to run before the server starts.
 4. **Vercel:** import the repository with root = repository root (§6.3); set `EXPO_PUBLIC_API_URL`
    for Production **and** Preview — the build now fails without it.
 5. **Choose option A or B in §7** (custom domains vs `COOKIE_SAMESITE=none`), then set `CORS_ORIGINS`
