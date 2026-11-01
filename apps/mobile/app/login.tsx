@@ -11,10 +11,10 @@ function Bullet({ text }: { text: string }) {
   const c = useTheme();
   return (
     <View style={{ flexDirection: "row", gap: 10, alignItems: "flex-start" }}>
-      <View style={{ width: 16, height: 16, borderRadius: 8, borderWidth: 1.5, borderColor: c.onPrimary, opacity: 0.7, alignItems: "center", justifyContent: "center", marginTop: 2 }}>
-        <View style={{ width: 4, height: 7, borderRadius: 1, borderRightWidth: 1.5, borderBottomWidth: 1.5, borderColor: c.onPrimary, transform: [{ rotate: "40deg" }], marginTop: -2 }} />
+      <View style={{ width: 16, height: 16, borderRadius: 8, borderWidth: 1.5, borderColor: c.sidebarInk, opacity: 0.7, alignItems: "center", justifyContent: "center", marginTop: 2 }}>
+        <View style={{ width: 4, height: 7, borderRadius: 1, borderRightWidth: 1.5, borderBottomWidth: 1.5, borderColor: c.sidebarInk, transform: [{ rotate: "40deg" }], marginTop: -2 }} />
       </View>
-      <Text style={{ color: c.onPrimary, opacity: 0.92, fontSize: 14, lineHeight: 20, flex: 1 }}>{text}</Text>
+      <Text style={{ color: c.sidebarInk, opacity: 0.92, fontSize: 14, lineHeight: 20, flex: 1 }}>{text}</Text>
     </View>
   );
 }
@@ -143,19 +143,19 @@ export default function Login() {
             <Text style={{ color: c.onPrimary, fontWeight: "800", fontSize: 16 }}>S</Text>
           </View>
           <View>
-            <Text style={{ color: c.onPrimary, fontWeight: "800", fontSize: 15 }}>{t("app.name")}</Text>
-            <Text style={{ color: c.onPrimary, opacity: 0.7, fontSize: 11 }}>{t("brand.tagline")}</Text>
+            <Text style={{ color: c.sidebarInk, fontWeight: "800", fontSize: 15 }}>{t("app.name")}</Text>
+            <Text style={{ color: c.sidebarMuted, fontSize: 11 }}>{t("brand.tagline")}</Text>
           </View>
         </View>
         <View style={{ gap: space.lg, maxWidth: 400 }}>
-          <Text style={{ color: c.onPrimary, fontSize: 34, lineHeight: 42, fontWeight: "800", letterSpacing: -0.6 }}>{t("login.hero")}</Text>
+          <Text style={{ color: c.sidebarInk, fontSize: 34, lineHeight: 42, fontWeight: "800", letterSpacing: -0.6 }}>{t("login.hero")}</Text>
           <View style={{ gap: 12, marginTop: 4 }}>
             <Bullet text={t("login.pitch1")} />
             <Bullet text={t("login.pitch2")} />
             <Bullet text={t("login.pitch3")} />
           </View>
         </View>
-        <Text style={{ color: c.onPrimary, opacity: 0.65, fontSize: 12 }}>{t("login.localFirst")}</Text>
+        <Text style={{ color: c.sidebarMuted, fontSize: 12 }}>{t("login.localFirst")}</Text>
       </View>
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, alignItems: "center", justifyContent: "center", padding: space.xxxl }}>
         {form}

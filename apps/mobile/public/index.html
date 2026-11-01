@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
-    <meta name="theme-color" content="#0F5C4D" />
+    <meta name="theme-color" content="#172B4D" />
     <meta name="description" content="Offline-first shop management for Rwandan shops: sales, stock, purchases and reports." />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -13,7 +13,7 @@
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <title>%WEB_TITLE%</title>
     <style id="expo-reset">
-      html, body { height: 100%; background-color: #F4F6F3; }
+      html, body { height: 100%; background-color: #F6F8FA; }
       body { overflow: hidden; margin: 0; }
       #root { display: flex; height: 100%; flex: 1; }
     </style>
@@ -24,8 +24,8 @@
           var mode = localStorage.getItem('theme_mode') || 'system';
           var dark = mode === 'dark' || (mode === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
           document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
-          document.documentElement.style.backgroundColor = dark ? '#0C1210' : '#F4F6F3';
-          document.body.style.backgroundColor = dark ? '#0C1210' : '#F4F6F3';
+          document.documentElement.style.backgroundColor = dark ? '#0D1520' : '#F6F8FA';
+          document.body.style.backgroundColor = dark ? '#0D1520' : '#F6F8FA';
         } catch (e) {}
       })();
     </script>

@@ -16,6 +16,10 @@ sign-in, owner registration, admin approval, manager login, product/stock/sale e
 two-shop isolation and offline sync have **not** been run here — they need credentials a script does
 not hold. Treat that list as the gate before real users (§8, step 2 onward).
 
+**Visual regression:** diagnosed 1 Nov 2026 — near-black hero text on the navy sign-in panel, visible
+whenever the OS/browser prefers dark. Fixed and verified locally; **not deployed, awaiting approval**
+(§8.6).
+
 This file is the resume point for the next session: read §1 (what was already done), §3 (what this
 session changed), and §9 (what is still blocked on you). Never commit real secrets to this file —
 names only.
@@ -521,6 +525,75 @@ out and `COOKIE_SAMESITE=none` is still missing (or Render has not finished rede
 
 ---
 
+## 8.6 Visual regression — diagnosis and fix (1 Nov 2026)
+
+### Cause
+
+No styling code changed after deployment. `git diff c57d60f..HEAD -- apps/mobile/src/theme apps/mobile/app apps/mobile/public apps/mobile/src/components`
+returns **only** `apps/mobile/scripts/check-api-url.mjs` (a build-time guard, no styles), and
+the last commit touching the visual layer is `c57d60f` — the pre-deployment commit. The appearance
+therefore could not have been altered by the deploy itself. What does change per visitor is the
+**colour scheme**: `useEffectiveScheme()` defaults to the OS preference, so a browser/OS in dark mode
+receives the `dark` palette instead of the `light` one the app was reviewed in.
+
+That exposed a real token misuse, not a palette change. `apps/mobile/app/login.tsx` painted the whole
+hero panel — headline, bullet list, wordmark, footer — with `c.onPrimary` while its background was
+`c.sidebar`. `onPrimary` is the *foreground for teal-filled buttons*, and in the dark palette it is
+`#04211F`: near-black text on a `#101E36` panel. Measured from the live site with Chrome
+(`Emulation.setEmulatedMedia { prefers-color-scheme: dark }`), the headline rendered dark green on navy,
+and the three bullets were effectively unreadable. Light mode was unaffected because `onPrimary` is
+`#FFFFFF` there — which is why it looked correct before anyone opened it in dark mode.
+
+### Evidence (live deployment, before the fix)
+
+| Probe | Light | Dark |
+|---|---|---|
+| `document.documentElement.colorScheme` | `light` | `dark` |
+| body background | `rgb(246,248,250)` = `#F6F8FA` | `rgb(13,21,32)` = `#0D1520` |
+| hero headline | white on navy — readable | dark on navy — **unreadable** |
+
+Screenshots were captured for both schemes at 1440×960 and at 390×844 (phone).
+
+### Changes made (local only, not deployed)
+
+| File | Change | Why |
+|---|---|---|
+| `apps/mobile/app/login.tsx` | hero headline, wordmark and bullet markers: `c.onPrimary` → `c.sidebarInk`; tagline and footer: → `c.sidebarMuted`; redundant `opacity` dropped | text is drawn on `c.sidebar`, so it needs the sidebar foreground tokens, which are correct in both palettes by construction |
+| `apps/mobile/public/index.html` | boot background `#F4F6F3` → `#F6F8FA`, `#0C1210` → `#0D1520`; `theme-color` `#0F5C4D` → `#172B4D` | this file is the template actually served (its `%LANG_ISO_CODE%` placeholders appear substituted in the deployed HTML), and it still carried the superseded green palette, causing a green flash before hydration |
+| `apps/mobile/app.json` | web `themeColor` `#0F5C4D` → `#172B4D` | Expo emits a second `theme-color` meta from here; it kept the old green in the export |
+
+Light mode is visually unchanged (`sidebarInk` `#E7ECF4` replaces white on navy). No palette value, type
+scale, spacing token, layout or component was redesigned. `app.json`'s **Android** `adaptiveIcon.backgroundColor`
+was deliberately left at `#0F5C4D` — that is icon artwork, a separate decision from the web chrome.
+
+### Verification (local build, same export pipeline as Vercel)
+
+| Check | Command | Result |
+|---|---|---|
+| TypeScript | `npm run typecheck` | **PASS**, exit 0 |
+| Lint | `npm run lint --if-present` | **PASS** — the workspace defines no `lint` script, so nothing was executed; this row reports the absence, not a clean lint |
+| Mobile unit tests | `npm run test:mobile` | **PASS**, exit 0 |
+| Web export | `EXPO_PUBLIC_API_URL=https://idukaa-qqk2.onrender.com npm run build:web -w @sms/mobile` | **PASS**, exit 0, guard passed, `Exported: dist` |
+| Dark-mode hero | Chrome CDP, `prefers-color-scheme: dark` at 1440×960 and 390×844 | **PASS** — headline and bullets render near-white and legible |
+| Light-mode regression | same capture, `prefers-color-scheme: light` | **PASS** — unchanged |
+| Old palette gone | `grep -c 0F5C4D apps/mobile/dist/index.html` | **PASS** — 0 occurrences; both `theme-color` metas read `#172B4D` |
+| Production API baked in | `grep -ro idukaa-qqk2.onrender.com dist/_expo/static/js/web/` | **PASS** — 1 hit |
+| No localhost fallback | `grep -rl localhost:3000 apps/mobile/dist` | **PASS** — 0 files |
+| API integration suite (62 tests) | needs `TEST_DATABASE_URL` | **NOT TESTED** — the change is presentational (inline style values in one screen plus static HTML meta), so the database suite was not re-run |
+| Browser E2E (19 scenarios) | `node apps/mobile/tests/e2e-web.mjs` | **NOT TESTED** — needs a seeded development database and a local API; it writes demo records and must never point at production |
+
+### Defect found and deliberately NOT changed
+
+On the sign-in card the two fields occupy ~150 px each, leaving a large blank band under every input
+(visible in both light and dark captures). Cause: `Field` in `src/components/ui.tsx` sets
+`flexBasis: 150` on its wrapper, which is a **width** basis where fields sit in a wrapping row — the
+normal case in every form — but becomes a **height** basis in the card's column, so each field is
+stretched. It is pre-existing (it predates the deploy and is identical in both schemes) and fixing it
+would change the density of every form in the app, so it is recorded here instead of being swept into
+this fix. Say the word and it becomes its own reviewed change with before/after captures per screen.
+
+---
+
 ## 9. What remains blocked on you (exact actions)
 
 1. ~~**GitHub**~~ — **done**: pushed to `MonicaMutoni-devoloper/Idukaa`, CI run #1 green (§5).
@@ -547,7 +620,13 @@ out and `COOKIE_SAMESITE=none` is still missing (or Render has not finished rede
 8. **Done once (§8.5, 23/23).** Now walk the interactive half of §8, in this order: sign in as the
    administrator → submit an owner application → approve it → create a second shop → run the
    offline-sale → reload → sync → retry pass. Until that runs, "works" is limited to what a credential-less
-   script can prove.
+   script can prove. **BLOCKED:** this needs a signed-in session, and no password may be pasted into
+   this chat. Options: (a) you sign in and read back what each screen shows, or (b) you export the
+   credentials into your own shell (`ADMIN_EMAIL=… ADMIN_PASSWORD=…` — never into a file in the repo)
+   and a driver script performs the flows.
+9. **Approve the visual fix before it is pushed.** The change is committed locally only. Pushing to
+   `main` auto-deploys to Vercel, so the deploy is the approval. Light mode is unchanged; dark mode
+   goes from unreadable hero text to legible (§8.6).
 
 **Not started by design (recorded as a follow-up task, per instructions):** Android APK/AAB packaging
 via Expo EAS and the Windows native target — the repository contains the Expo/Android project but no
