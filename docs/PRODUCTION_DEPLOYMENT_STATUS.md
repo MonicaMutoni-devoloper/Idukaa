@@ -594,6 +594,99 @@ this fix. Say the word and it becomes its own reviewed change with before/after 
 
 ---
 
+## 8.7 Manual runbook — two-shop isolation and offline sync (live)
+
+Run this in a browser against `https://idukaa-api.vercel.app`. It is the half of §8 that needs a
+signed-in session. Test data only: names prefixed `TEST`, never real shop money.
+
+**Starting state:** production holds **0 shops, 0 owners, 1 `system_admin`** (§8.3). Everything below
+begins with registration because there is no shop to sign in to yet.
+
+### Stage 1 — two independent shops
+
+| # | Do this | Expect |
+|---|---|---|
+| 1 | Sign in as the administrator | Redirected straight to `/admin`; shop screens are unreachable (`_layout.tsx` bounces a `system_admin` out of `/`) |
+| 2 | `/admin/applications` → *Request information* on nothing yet: instead open `/login` → **Create a Shop** | Five fields only: username, shop, e-mail, password, phone |
+| 3 | Register **TEST Shop A** with `owner-a@…` | "awaiting administrator approval"; sign-in with this address is refused while pending |
+| 4 | Register **TEST Shop B** with `owner-b@…` | Same pending state, separate application |
+| 5 | `/admin/applications` → approve A | Row flips to approved; A appears in `/admin/shops` |
+| 6 | Approve B | A second, distinct shop id |
+| 7 | Sign in as owner A | Lands on `/` with **Shop A** as context; `/stock` is **empty** |
+| 8 | `/stock` → *Add product*: `TEST Rice A`, code `RICE-A`, qty `20`, cost `900`, price `1200` | "Product saved"; stock shows 20 |
+| 9 | Sign out, sign in as owner B, open `/stock` | **Empty.** `TEST Rice A` must not appear — this is the `bindShop()` cache wipe plus the server's `shop_id` scoping |
+| 10 | Add `TEST Rice B`, code `RICE-B`, qty `35` | Stock shows 35 |
+| 11 | Sign back in as A, `/stock` | Rice A present, **Rice B absent**; then the reverse for B |
+
+API-level proof (run in your own terminal — never paste the token into chat). Take `token` from the
+`POST /auth/login` response in DevTools → Network, then:
+
+```bash
+curl -s https://idukaa-qqk2.onrender.com/sync/pull -H "Authorization: Bearer $TOKEN_A" \
+  | grep -o 'TEST Rice [AB]' | sort -u          # must print only "TEST Rice A"
+```
+
+Cross-shop attempt — a product id from the other shop must be rejected, not silently accepted:
+
+```bash
+curl -s -X POST https://idukaa-qqk2.onrender.com/sync/push \
+  -H "Authorization: Bearer $TOKEN_A" -H "Content-Type: application/json" \
+  -d '{"operations":[{"opId":"11111111-1111-4111-8111-111111111111","deviceId":"probe","createdAt":"2026-11-01T12:00:00.000Z","type":"sale.create","payload":{"saleId":"22222222-2222-4222-8222-222222222222","productId":"<PRODUCT_ID_FROM_SHOP_B>"}}]}'
+```
+
+Expect a per-operation error/rejection (`rejected` or `conflict`), and **no** stock movement in shop B.
+
+### Stage 2 — a manager account (needed for the offline pass)
+
+Either path works; B is fewer clicks for a test:
+
+- **A — owner invites:** sign in as owner A → `/team` → invite a manager → the one-time link appears in
+  `team-invite-url` → open it → `/invite` → set a password → sign in.
+- **B — admin creates:** `/admin/users` → name, e-mail, password, role **manager**, pick **Shop A**.
+  (The create button is disabled until at least one shop exists — hence Stage 1 first.)
+
+Sign in as that manager: the sidebar shows **Home · Sell · Stock · Reports · Expense · Sync ·
+Notifications · Security · Settings** — no `/approvals`, no `/team`, no `/admin`. Visiting `/admin` by
+URL redirects to `/`.
+
+### Stage 3 — offline sale, restart, sync, retry
+
+| # | Do this | Expect |
+|---|---|---|
+| 1 | Signed in as the manager, open `/stock`, note Rice A's on-hand | e.g. 20 |
+| 2 | DevTools → **Network → Offline** (this is the same thing the E2E does via `Network.setBlockedURLs`) | Top-bar badge switches to offline within a few seconds |
+| 3 | `/sell` → search `RICE-A` → qty `2` → save | "Sale saved" — local only; **no** server confirmation is claimed |
+| 4 | `/stock` | Shows 18 locally — the optimistic decrement |
+| 5 | `/sync` | Pending count ≥ 1, queue row `sale.create` with status *pending*, attempts 0; a progress bar marked *waiting to sync* |
+| 6 | **Reload the page while still offline** | App shell loads (service worker), you land signed in, the sale and the queue row are still there — IndexedDB survived |
+| 7 | DevTools → **Online** | The engine syncs automatically; to force it immediately press **Sync now** (`sync-now`, which also clears the retry backoff) |
+| 8 | Watch `/sync` | Row goes *synced*, pending → 0, attempts 1 |
+| 9 | `/stock` and `/reports` → *Sales* | On-hand 18 in the shop header, **exactly one** `TEST Rice A` sale row of 2 units |
+| 10 | Press **Sync now** again | Nothing moves: pending stays 0, on-hand stays 18, still one sale row — the same `op_id` is not replayed as a second sale |
+| 11 | Sign in as owner B, `/reports` | None of shop A's sale appears |
+
+Why step 10 is the real idempotency proof: every operation carries a client-generated `op_id`, the
+server records it in `operations` with a uniqueness constraint per shop, and a replay answers
+`duplicate` instead of applying again. A second deduction would show up as on-hand 16 or two sale rows.
+
+### Recording the result
+
+Fill this in as you go and the numbers become the evidence for §9:
+
+| Test | Status | Evidence |
+|---|---|---|
+| Admin reaches only `/admin` | NOT TESTED | |
+| Owner A sees only shop A | NOT TESTED | |
+| Owner B sees only shop B | NOT TESTED | |
+| Manager confined to its shop | NOT TESTED | |
+| Cross-shop product id rejected | NOT TESTED | |
+| Offline sale persisted + survives reload | NOT TESTED | |
+| Auto-sync on reconnect | NOT TESTED | |
+| Re-sync creates no duplicate | NOT TESTED | |
+| Stock deducted exactly once | NOT TESTED | |
+
+---
+
 ## 9. What remains blocked on you (exact actions)
 
 1. ~~**GitHub**~~ — **done**: pushed to `MonicaMutoni-devoloper/Idukaa`, CI run #1 green (§5).
