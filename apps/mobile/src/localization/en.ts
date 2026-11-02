@@ -182,6 +182,8 @@ export const en = {
 
   "more.title": "More", "more.subtitle": "Other tools for your shop.", "more.footer": "Saved work syncs automatically whenever you are online.",
 
+  "update.title": "New version available", "update.text": "A newer version of the app was downloaded. Nothing you saved was lost.", "update.action": "Reload now",
+
   "role.owner": "Owner", "role.manager": "Manager", "role.system_admin": "System administrator",
   "v.required": "This field is required", "v.positive": "Enter a number greater than zero", "v.invalid": "Invalid number",
 

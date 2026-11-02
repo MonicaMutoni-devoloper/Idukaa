@@ -187,6 +187,8 @@ export const rw: Record<Key, string> = {
 
   "more.title": "Ibindi", "more.subtitle": "Izindi nzira z'iduka ryawe.", "more.footer": "Ibikorwa byabitswe bihuzwa yonyine igihe interineti ihari.",
 
+  "update.title": "Versiyo nshya iratunganye", "update.text": "Versiyo nshya ya porozaramu yatanze. Ibyabitswe ntibihinduka.", "update.action": "Kurura ubu",
+
   "role.owner": "Nyir'iduka", "role.manager": "Umuyobozi w'iduka", "role.system_admin": "Umuyobozi wa sisitemu",
   "v.required": "Iki gice ni ngombwa", "v.positive": "Shyiramo umubare urenze zero", "v.invalid": "Umubare si wo",
 
