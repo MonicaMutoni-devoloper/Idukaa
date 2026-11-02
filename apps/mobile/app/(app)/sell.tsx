@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
-import { formatQty, formatRwf, lineAmount, type PaymentMethod } from "@sms/shared";
+import { formatQty, formatRwf, lineAmount, toBaseQty, type PaymentMethod } from "@sms/shared";
 import { Badge, Banner, Button, Card, Empty, Field, Screen, Segmented, useWide } from "../../src/components/ui";
 import { Appear, Disclosure, Dismiss, Shake } from "../../src/components/motion";
 import { enqueue, listProducts, type LocalProduct } from "../../src/database/local";
@@ -11,6 +11,12 @@ import { parseRwf, qtyOrNull, uuid } from "../../src/services/util";
 import { radius, space, type, useTheme } from "../../src/theme/tokens";
 
 interface Line { p: LocalProduct; qty: string; price: string }
+
+/** Selling-unit helpers: `qty` in a line is entered in the product's SELLING unit; stock checks,
+ * the outbox delta and the ledger are always in BASE units (see shared units.ts). */
+const sellingUnitOf = (p: LocalProduct) => p.selling_unit ?? p.unit;
+const unitsSellingOf = (p: LocalProduct) => p.units_per_selling ?? 1;
+
 
 export default function Sell() {
   const t = useT(); const c = useTheme(); const wide = useWide();
@@ -88,8 +94,7 @@ export default function Sell() {
     // Re-tapping a row that is animating out restores it instead of silently doing nothing.
     setLeaving((v) => v.filter((id) => id !== p.id));
     setLines((l) => (l.some((x) => x.p.id === p.id) ? l : [...l, { p, qty: "1", price: String(p.selling_price) }]));
-  }
-  const update = (i: number, patch: Partial<Line>) => setLines((a) => a.map((y, j) => (j === i ? { ...y, ...patch } : y)));
+  }  const update = (i: number, patch: Partial<Line>) => setLines((a) => a.map((y, j) => (j === i ? { ...y, ...patch } : y)));
   const step = (i: number, delta: number) => {
     const qn = qtyOrNull(lines[i]!.qty) ?? 0; const next = Math.max(1, qn + delta * 1000);
     update(i, { qty: String(next / 1000) });
@@ -100,7 +105,7 @@ export default function Sell() {
     lines.forEach((l, i) => {
       const qn = qtyOrNull(l.qty);
       if (!qn) e[`q${i}`] = t("v.positive");
-      else if (qn > eff(l.p)) e[`q${i}`] = `${t("sell.insufficient")} · ${formatQty(eff(l.p))}`;
+      else if (toBaseQty(qn, unitsSellingOf(l.p)) > eff(l.p)) e[`q${i}`] = `${t("sell.insufficient")} · ${formatQty(eff(l.p))} ${l.p.unit}`;
       if (parseRwf(l.price) === null) e[`p${i}`] = t("v.invalid");
     });
     if (parseRwf(discount) === null || disc > gross) e.d = t("v.invalid");
@@ -112,7 +117,10 @@ export default function Sell() {
     if (!lines.length || Object.keys(e).length) return;
 
     const saleTotal = total, count = lines.length, saleId = uuid(), at = new Date().toISOString();
-    const payload = { saleId, soldAt: at, discount: disc, amountPaid: appliedPaid, paymentMethod: method, lines: lines.map((l) => ({ productId: l.p.id, qty: qtyOrNull(l.qty)!, unitPrice: parseRwf(l.price)! })) };
+    const payload = { saleId, soldAt: at, discount: disc, amountPaid: appliedPaid, paymentMethod: method, lines: lines.map((l) => {
+      const natural = qtyOrNull(l.qty)!;                         // milli SELLING units as entered
+      return { productId: l.p.id, qty: toBaseQty(natural, unitsSellingOf(l.p)), unitPrice: parseRwf(l.price)!, sellingQty: natural };
+    }) };
     const deltas: Record<string, number> = {}; payload.lines.forEach((l) => (deltas[l.productId] = (deltas[l.productId] ?? 0) - l.qty));
     setBusy(true); setSaveError(null);
     try {
@@ -158,7 +166,7 @@ export default function Sell() {
                   <Pressable key={p.id} testID={`sell-product-${idx}`} accessibilityRole="button" accessibilityLabel={p.name} onPress={() => add(p)}
                     style={({ hovered, pressed }: any) => ({ width: wide ? 168 : "47%", flexGrow: wide ? 0 : 1, minHeight: 82, padding: space.md, borderWidth: 1, borderColor: c.line, borderRadius: radius.md, backgroundColor: c.surface, gap: 4, opacity: pressed ? 0.82 : hovered ? 0.95 : 1 })}>
                     <Text numberOfLines={2} style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{p.name}</Text>
-                    <Text style={{ color: c.inkSoft, fontSize: 12, fontVariant: ["tabular-nums"] }}>{formatRwf(p.selling_price)}</Text>
+                    <Text style={{ color: c.inkSoft, fontSize: 12, fontVariant: ["tabular-nums"] }}>{formatRwf(p.selling_price)}{unitsSellingOf(p) !== 1 || sellingUnitOf(p) !== p.unit ? ` / ${sellingUnitOf(p)}` : ""}</Text>
                     {out ? <Badge tone="danger" dot label={t("sell.outOfStock")} />
                       : stock <= p.low_threshold ? <Badge tone="warn" dot label={`${formatQty(stock)} ${p.unit} ${t("sell.left")}`} />
                       : <Text style={{ color: c.muted, fontSize: 11, fontWeight: "600" }}>{`${formatQty(stock)} ${p.unit} ${t("sell.left")}`}</Text>}
@@ -184,22 +192,22 @@ export default function Sell() {
               <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
                 <View style={{ flex: 1 }}>
                   <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{l.p.name}</Text>
-                  <Text style={{ color: c.muted, fontSize: 11 }}>{t("sell.remaining")} {formatQty(eff(l.p))} {l.p.unit} · {formatRwf(l.p.selling_price)}</Text>
+                  <Text style={{ color: c.muted, fontSize: 11 }}>{t("sell.remaining")} {formatQty(eff(l.p))} {l.p.unit} · {formatRwf(l.p.selling_price)} / {sellingUnitOf(l.p)}</Text>
                 </View>
                 <Button size="sm" kind="quiet" label={t("common.remove")} onPress={() => setLeaving((v) => [...v, l.p.id])} />
               </View>
               <View style={{ flexDirection: "row", gap: space.sm, alignItems: "flex-start", flexWrap: "wrap" }}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexGrow: 1, flexBasis: 150 }}>
                   <Button size="sm" kind="secondary" label="−" onPress={() => step(i, -1)} />
-                  <View style={{ flex: 1 }}><Field testID={`sell-qty-${i}`} label={t("common.qty")} value={l.qty} keyboardType="decimal-pad" error={errs[`q${i}`]} onChangeText={(x) => update(i, { qty: x })} /></View>
+                  <View style={{ flex: 1 }}><Field testID={`sell-qty-${i}`} label={`${t("common.qty")} (${sellingUnitOf(l.p)})`} value={l.qty} keyboardType="decimal-pad" error={errs[`q${i}`]} onChangeText={(x) => update(i, { qty: x })} /></View>
                   <Button size="sm" kind="secondary" label="+" onPress={() => step(i, 1)} />
                 </View>
                 <View style={{ flexGrow: 1, flexBasis: 130 }}>
-                  <Field testID={`sell-price-${i}`} label={t("common.price")} value={l.price} keyboardType="number-pad" error={errs[`p${i}`]} onChangeText={(x) => update(i, { price: x })} />
+                  <Field testID={`sell-price-${i}`} label={`${t("common.price")} / ${sellingUnitOf(l.p)}`} value={l.price} keyboardType="number-pad" error={errs[`p${i}`]} onChangeText={(x) => update(i, { price: x })} />
                 </View>
               </View>
               <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                <Text style={{ color: c.muted, fontSize: 12 }}>{t("sell.lineTotal")}</Text>
+                <Text style={{ color: c.muted, fontSize: 12 }}>{t("sell.lineTotal")}{unitsSellingOf(l.p) !== 1 ? ` (${formatQty(toBaseQty(qtyOrNull(l.qty) ?? 0, unitsSellingOf(l.p)))} ${l.p.unit})` : ""}</Text>
                 <Text style={{ color: c.ink, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(amount(l))}</Text>
               </View>
             </Card>

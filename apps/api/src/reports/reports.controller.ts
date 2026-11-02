@@ -189,7 +189,7 @@ export class ReportsController {
     const lowMarginProducts = productFin.filter(i => i.grossMarginBps !== null && i.grossMarginBps < TARGET_GROSS_MARGIN_BPS)
       .sort((a, b) => (a.grossMarginBps ?? 0) - (b.grossMarginBps ?? 0)).slice(0, 5)
       .map(p => ({ productId: p.productId, name: p.name, units: p.units, revenue: p.revenue,
-        grossMarginBps: p.grossMarginBps, sellingPrice: p.sellingPrice, avgCost: p.avgCost, belowCost: p.flags.belowCost }));
+        grossMarginBps: p.grossMarginBps, sellingPrice: p.sellingPrice, sellingUnit: p.sellingUnit, avgCost: p.avgCost, belowCost: p.flags.belowCost }));
 
     const productTotals = await this.db.query(
       `SELECT p.id, p.name, COALESCE(SUM(sl.qty),0)::bigint AS qty, COALESCE(SUM(sl.line_amount),0)::bigint AS net_sales

@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import type { PoolClient } from "pg";
-import { Operation, lineAmount, type OperationT, type OpResult, type Role } from "@sms/shared";
+import { Operation, lineAmount, priceBelowCost, toBaseQty, type OperationT, type OpResult, type Role } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
 import type { AuthUser } from "../common/auth";
@@ -89,10 +89,13 @@ export class SyncService {
     const { rows: [s] } = await c.query("SELECT below_cost_policy, max_discount_percent FROM shops WHERE id=$1", [shopId]);
     return s as { below_cost_policy: "acknowledge" | "block"; max_discount_percent: number };
   }
-  private async lock(c: PoolClient, shopId: string, ids: string[]) {
+  private async lock(c: PoolClient, shopId: string, ids: string[]): Promise<Map<string, { unitsPerPurchase: number; unitsPerSelling: number }>> {
     const uniq = [...new Set(ids)].sort();
-    const { rows } = await c.query("SELECT id FROM products WHERE id = ANY($1::uuid[]) AND shop_id=$2 ORDER BY id FOR UPDATE", [uniq, shopId]);
+    const { rows } = await c.query("SELECT id, units_per_purchase, units_per_selling FROM products WHERE id = ANY($1::uuid[]) AND shop_id=$2 ORDER BY id FOR UPDATE", [uniq, shopId]);
     if (rows.length !== uniq.length) throw new BizError("rejected", "unknown_product");
+    // The unit configuration rides along with the row lock: every quantity conversion below is
+    // validated against this authoritative server-side config, never against a client claim.
+    return new Map(rows.map((r: any) => [r.id, { unitsPerPurchase: Number(r.units_per_purchase), unitsPerSelling: Number(r.units_per_selling) }]));
   }
   private async onHand(c: PoolClient, productId: string): Promise<number> {
     const { rows: [r] } = await c.query("SELECT COALESCE(SUM(qty),0)::bigint AS q FROM stock_movements WHERE product_id=$1", [productId]); return Number(r.q);
@@ -114,10 +117,22 @@ export class SyncService {
   private async apply(c: PoolClient, u: AuthUser, shopId: string, op: OperationT): Promise<OpResult["status"] | void> {
     switch (op.type) {
       case "sale.create": {
-        const p = op.payload; await this.lock(c, shopId, p.lines.map(l => l.productId));
+        const p = op.payload; const cfg = await this.lock(c, shopId, p.lines.map(l => l.productId));
         const need = new Map<string, number>(); p.lines.forEach(l => need.set(l.productId, (need.get(l.productId) ?? 0) + l.qty));
         for (const [pid, q] of need) { const have = await this.onHand(c, pid); if (have < q) throw new BizError("conflict", `insufficient_stock:${pid}:have=${have}:need=${q}`); }
-        const amounts = p.lines.map(l => lineAmount(l.qty, l.unitPrice)); const gross = amounts.reduce((a, b) => a + b, 0);
+        // Price each line from the quantity the cashier entered. When the product sells in a unit
+        // other than its base unit the natural quantity is mandatory and must convert back to the
+        // base quantity exactly, so stock can never be deducted on one basis and charged on another.
+        const natural = p.lines.map((l) => {
+          const units = cfg.get(l.productId)!.unitsPerSelling;
+          if (l.sellingQty !== undefined) {
+            if (toBaseQty(l.sellingQty, units) !== l.qty) throw new BizError("rejected", `unit_conversion_mismatch:${l.productId}`);
+            return l.sellingQty;
+          }
+          if (units !== 1) throw new BizError("rejected", `selling_qty_required:${l.productId}`);
+          return l.qty;
+        });
+        const amounts = p.lines.map((l, i) => lineAmount(natural[i]!, l.unitPrice)); const gross = amounts.reduce((a, b) => a + b, 0);
         if (p.discount > gross) throw new BizError("rejected", "discount_exceeds_total");
         // Owner-set discount ceiling. Owners may exceed it (recorded in the audit trail); managers may not.
         const { max_discount_percent } = await this.policy(c, shopId);
@@ -127,25 +142,39 @@ export class SyncService {
         await c.query("INSERT INTO sales(id,shop_id,op_id,user_id,sold_at,gross_amount,discount,amount_paid,payment_method) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)", [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod]);
         if (u.role !== "owner" && p.discount > 0) await audit(c, { shopId, actorId: u.id, action: "sale.discount", entity: "sale", entityId: p.saleId, newValue: { discount: p.discount, gross, limitPercent: max_discount_percent } });
         for (const [i, l] of p.lines.entries()) {
-          await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount) VALUES ($1,$2,$3,$4,$5)", [p.saleId, l.productId, l.qty, l.unitPrice, amounts[i]]);
+          await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered) VALUES ($1,$2,$3,$4,$5,$6)", [p.saleId, l.productId, l.qty, l.unitPrice, amounts[i], natural[i]]);
           await this.mv(c, shopId, u.id, l.productId, "sale", -l.qty, null, "sale", p.saleId, p.soldAt);
         }
         return;
       }
       case "purchase.create": {
-        const p = op.payload; await this.lock(c, shopId, p.lines.map(l => l.productId));
+        const p = op.payload; const cfg = await this.lock(c, shopId, p.lines.map(l => l.productId));
         if (p.supplierId) { const { rowCount } = await c.query("SELECT 1 FROM suppliers WHERE id=$1 AND shop_id=$2", [p.supplierId, shopId]); if (!rowCount) throw new BizError("rejected", "unknown_supplier"); }
+        // Conversion validation against the authoritative product config: the natural quantity the
+        // buyer entered must convert back to the base quantity, and the advertised factor must be
+        // the product's configured one (required, not optional, when the product uses conversion).
+        for (const l of p.lines) {
+          const units = cfg.get(l.productId)!.unitsPerPurchase;
+          if (l.unitFactor !== undefined && l.unitFactor !== units) throw new BizError("rejected", `unit_factor_mismatch:${l.productId}`);
+          if (units !== 1) {
+            if (l.unitFactor === undefined) throw new BizError("rejected", `unit_factor_required:${l.productId}`);
+            if (l.purchaseQty === undefined) throw new BizError("rejected", `purchase_qty_required:${l.productId}`);
+          }
+          if (l.purchaseQty !== undefined && toBaseQty(l.purchaseQty, units) !== l.qty) throw new BizError("rejected", `unit_conversion_mismatch:${l.productId}`);
+        }
         const total = p.lines.reduce((s, l) => s + lineAmount(l.qty, l.unitCost), 0);
         if (p.amountPaid > total) throw new BizError("rejected", "paid_exceeds_total");
         // Below-cost selling prices are an explicit, auditable decision - never silently accepted.
-        const below = p.lines.filter(l => l.sellingPrice !== undefined && l.sellingPrice < l.unitCost);
+        // unitCost is per BASE unit while sellingPrice is per SELLING unit, so the comparison is
+        // cross-multiplied across unit bases (reduces to sellingPrice < unitCost when 1:1).
+        const below = p.lines.filter(l => l.sellingPrice !== undefined && priceBelowCost(l.sellingPrice, cfg.get(l.productId)!.unitsPerSelling, l.unitCost));
         if (below.length) {
           const { below_cost_policy } = await this.policy(c, shopId);
           if (below_cost_policy === "block" && u.role !== "owner") throw new BizError("rejected", "below_cost_blocked_by_shop_policy");
           if (!p.belowCostAcknowledged || (p.belowCostReason?.trim().length ?? 0) < 3) throw new BizError("rejected", "below_cost_acknowledgement_required");
         }
         await c.query("INSERT INTO purchases(id,shop_id,op_id,user_id,supplier_id,ordered_at,total_amount,amount_paid,reference,notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [p.purchaseId, shopId, op.opId, u.id, p.supplierId, p.orderedAt, total, p.amountPaid, p.reference ?? null, p.notes ?? null]);
-        for (const l of p.lines) await c.query("INSERT INTO purchase_lines(purchase_id,product_id,qty_ordered,unit_cost,selling_price,purchase_unit,unit_factor) VALUES ($1,$2,$3,$4,$5,$6,$7)", [p.purchaseId, l.productId, l.qty, l.unitCost, l.sellingPrice ?? null, l.purchaseUnit ?? null, l.unitFactor ?? null]);
+        for (const l of p.lines) await c.query("INSERT INTO purchase_lines(purchase_id,product_id,qty_ordered,unit_cost,selling_price,purchase_unit,unit_factor,qty_entered) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [p.purchaseId, l.productId, l.qty, l.unitCost, l.sellingPrice ?? null, l.purchaseUnit ?? null, l.unitFactor ?? null, l.purchaseQty ?? null]);
         if (below.length) await audit(c, { shopId, actorId: u.id, action: "purchase.below_cost", entity: "purchase", entityId: p.purchaseId, oldValue: { accepted: false }, newValue: { lines: below.map(l => ({ productId: l.productId, unitCost: l.unitCost, sellingPrice: l.sellingPrice })), purchaseTotal: total }, reason: p.belowCostReason });
         if (p.receiveNow) { // full delivery at once; the receipt shares the purchase op id (unique per receipt row)
           await c.query("INSERT INTO goods_receipts(id,shop_id,purchase_id,op_id,user_id,received_at) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5)", [shopId, p.purchaseId, op.opId, u.id, p.orderedAt]);
@@ -227,9 +256,29 @@ export class SyncService {
         await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext('product.upsert'))", [p.productId]);
         const { rows: [ex] } = await c.query("SELECT * FROM products WHERE id=$1", [p.productId]);
         if (ex && ex.shop_id !== shopId) throw new BizError("rejected", "unknown_product");
-        await c.query(`INSERT INTO products(id,shop_id,code,barcode,name,category,unit,selling_price,low_stock_threshold) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        // The unit configuration is set at creation and locked afterwards: changing conversion on
+        // a product that already has stock would reinterpret every historical quantity.
+        if (ex) {
+          const stored = {
+            purchaseUnit: ex.purchase_unit ?? ex.unit, sellingUnit: ex.selling_unit ?? ex.unit,
+            unitsPerPurchase: Number(ex.units_per_purchase), unitsPerSelling: Number(ex.units_per_selling),
+          };
+          const given = {
+            purchaseUnit: p.purchaseUnit, sellingUnit: p.sellingUnit,
+            unitsPerPurchase: p.unitsPerPurchase, unitsPerSelling: p.unitsPerSelling,
+          };
+          if ((given.purchaseUnit !== undefined && given.purchaseUnit !== stored.purchaseUnit)
+            || (given.sellingUnit !== undefined && given.sellingUnit !== stored.sellingUnit)
+            || (given.unitsPerPurchase !== undefined && given.unitsPerPurchase !== stored.unitsPerPurchase)
+            || (given.unitsPerSelling !== undefined && given.unitsPerSelling !== stored.unitsPerSelling)) {
+            throw new BizError("rejected", "unit_config_locked");
+          }
+        }
+        await c.query(`INSERT INTO products(id,shop_id,code,barcode,name,category,unit,selling_price,low_stock_threshold,purchase_unit,selling_unit,units_per_purchase,units_per_selling)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
           ON CONFLICT (id) DO UPDATE SET code=$3,barcode=$4,name=$5,category=$6,unit=$7,selling_price=$8,low_stock_threshold=$9,updated_at=now()`,
-          [p.productId, shopId, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold]);
+          [p.productId, shopId, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold,
+           p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1]);
         const stock = { initialQty: p.initialQty ?? null, initialUnitCost: p.initialUnitCost ?? null, initialStockValue: p.initialQty ? lineAmount(p.initialQty, p.initialUnitCost ?? 0) : 0 };
         if (ex) {
           await audit(c, { shopId, actorId: u.id, action: "product.update", entity: "product", entityId: p.productId, oldValue: { name: ex.name, selling_price: ex.selling_price, code: ex.code }, newValue: { name: p.name, sellingPrice: p.sellingPrice, code: p.code } });
@@ -238,7 +287,9 @@ export class SyncService {
           // (the ledger movement it produced is visible through the stock history).
           if (p.initialQty) await this.mv(c, shopId, u.id, p.productId, "opening", p.initialQty, p.initialUnitCost ?? 0, "product", p.productId, op.createdAt, "initial stock");
           await audit(c, { shopId, actorId: u.id, action: "product.create", entity: "product", entityId: p.productId,
-            newValue: { code: p.code, name: p.name, unit: p.unit, sellingPrice: p.sellingPrice, lowStockThreshold: p.lowStockThreshold, barcode: p.barcode ?? null, ...stock } });
+            newValue: { code: p.code, name: p.name, unit: p.unit, sellingPrice: p.sellingPrice, lowStockThreshold: p.lowStockThreshold, barcode: p.barcode ?? null,
+              purchaseUnit: p.purchaseUnit ?? p.unit, sellingUnit: p.sellingUnit ?? p.unit,
+              unitsPerPurchase: p.unitsPerPurchase ?? 1, unitsPerSelling: p.unitsPerSelling ?? 1, ...stock } });
         }
         return;
       }
@@ -265,7 +316,8 @@ export class SyncService {
     return {
       checkpoint: JSON.stringify(next), hasMore: products.length === limit || suppliers.length === limit,
       changes: [
-        ...products.map(p => ({ entity: "product", id: p.id, data: { id: p.id, code: p.code, barcode: p.barcode, name: p.name, category: p.category, unit: p.unit, sellingPrice: p.selling_price, lowStockThreshold: p.low_stock_threshold, onHand: p.on_hand, active: p.active } })),
+        ...products.map(p => ({ entity: "product", id: p.id, data: { id: p.id, code: p.code, barcode: p.barcode, name: p.name, category: p.category, unit: p.unit, sellingPrice: p.selling_price, lowStockThreshold: p.low_stock_threshold, onHand: p.on_hand, active: p.active,
+          purchaseUnit: p.purchase_unit, sellingUnit: p.selling_unit, unitsPerPurchase: p.units_per_purchase, unitsPerSelling: p.units_per_selling } })),
         ...suppliers.map(s => ({ entity: "supplier", id: s.id, data: { id: s.id, name: s.name, phone: s.phone } })),
       ],
     };

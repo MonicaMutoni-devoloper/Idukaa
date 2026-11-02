@@ -20,7 +20,7 @@ interface ProductFlags {
 }
 interface PRow {
   productId: string; name: string; code: string | null; unit: string;
-  sellingPrice: number; avgCost: number; onHand: number; inventoryValue: number; lowStock: boolean;
+  sellingPrice: number; sellingUnit?: string; avgCost: number; onHand: number; inventoryValue: number; lowStock: boolean;
   units: number; revenue: number; cogs: number; grossProfit: number; grossMarginBps: number | null;
   stockLosses: number; stockLossCount: number;
   velocityPerDay: number; velocity30PerDay: number; stockouts90: number;
@@ -174,7 +174,7 @@ export default function Profitability() {
     ) },
     { key: "price", title: `${t("common.price")} / ${t("common.cost")}`, align: "right" as const, render: (r: PRow) => (
       <View style={{ alignItems: "flex-end", gap: 1 }}>
-        <Text style={{ color: c.ink, fontSize: 13, fontVariant: ["tabular-nums"] }}>{formatRwf(r.sellingPrice)}</Text>
+        <Text style={{ color: c.ink, fontSize: 13, fontVariant: ["tabular-nums"] }}>{formatRwf(r.sellingPrice)}{r.sellingUnit && r.sellingUnit !== r.unit ? ` / ${r.sellingUnit}` : ""}</Text>
         <Text style={{ color: r.flags.belowCost ? c.danger : c.muted, fontSize: 11, fontVariant: ["tabular-nums"] }}>{formatRwf(r.avgCost)}</Text>
       </View>
     ) },

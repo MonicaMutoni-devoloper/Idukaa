@@ -18,7 +18,13 @@ export const SaleOp = z.object({
   payload: z.object({
     saleId: id, soldAt: iso, discount: int.nonnegative().default(0), amountPaid: int.nonnegative(),
     paymentMethod: z.enum(PaymentMethods).default("cash"),
-    lines: z.array(z.object({ productId: id, qty, unitPrice: int.nonnegative() })).min(1),
+    lines: z.array(z.object({
+      productId: id,
+      // `qty` is always BASE milli-units (what stock is deducted in). `sellingQty` is the
+      // natural quantity the cashier entered (milli selling units) when the product sells in a
+      // unit other than its base unit; the server verifies qty === toBaseQty(sellingQty).
+      qty, unitPrice: int.nonnegative(), sellingQty: qty.optional(),
+    })).min(1),
   }),
 });
 export const PurchaseOp = z.object({
@@ -29,10 +35,16 @@ export const PurchaseOp = z.object({
     // Below-cost lines must carry an explicit, auditable decision by the person recording them.
     belowCostAcknowledged: z.boolean().default(false), belowCostReason: z.string().max(500).optional(),
     lines: z.array(z.object({
-      productId: id, qty, unitCost: int.nonnegative(),
+      productId: id,
+      // `qty` is always BASE milli-units (what the ledger receives). `purchaseQty` is the natural
+      // quantity the buyer entered (milli purchase units) when the product is bought in a larger
+      // unit; the server verifies qty === toBaseQty(purchaseQty) and that `unitFactor` equals the
+      // product's configured units-per-purchase, so a conversion can never be applied one-sidedly.
+      qty, unitCost: int.nonnegative(),
       sellingPrice: int.nonnegative().optional(),
       purchaseUnit: z.string().min(1).max(20).optional(),
-      unitFactor: posInt.optional(), // sellable units per purchase unit, e.g. 12 for a box of 12
+      unitFactor: posInt.optional(), // base units per purchase unit, e.g. 12 for a carton of 12
+      purchaseQty: qty.optional(),
     })).min(1),
     receiveNow: z.boolean().default(false),
   }),
@@ -79,8 +91,20 @@ export const AdjustmentOp = z.object({
  */
 export const ProductOp = z.object({
   type: z.literal("product.upsert"),
-  payload: z.object({ productId: id, code: z.string().min(1).max(40), barcode: z.string().max(64).nullable().optional(), name: z.string().min(1).max(120), category: z.string().max(60).optional(), unit: z.string().min(1).max(20), sellingPrice: int.nonnegative(), lowStockThreshold: int.nonnegative(), initialQty: int.nonnegative().optional(), initialUnitCost: int.nonnegative().optional() })
-    .refine(v => (v.initialQty === undefined) === (v.initialUnitCost === undefined), { message: "initial_stock_incomplete" }),
+  payload: z.object({ productId: id, code: z.string().min(1).max(40), barcode: z.string().max(64).nullable().optional(), name: z.string().min(1).max(120), category: z.string().max(60).optional(),
+    unit: z.string().min(1).max(20), // BASE inventory unit: the unit every ledger quantity is stored in
+    sellingPrice: int.nonnegative(), lowStockThreshold: int.nonnegative(),
+    initialQty: int.nonnegative().optional(), initialUnitCost: int.nonnegative().optional(),
+    // Unit configuration (all optional; omitted = simple 1:1 setup, and on an EXISTING product the
+    // server refuses changes so historical quantities can never be reinterpreted):
+    purchaseUnit: z.string().min(1).max(20).optional(),
+    sellingUnit: z.string().min(1).max(20).optional(),
+    unitsPerPurchase: int.min(1).max(1_000_000).optional(), // BASE units per purchase unit (1 bag = 25 kg -> 25)
+    unitsPerSelling: int.min(1).max(1_000_000).optional(),   // BASE units per selling unit
+  })
+    .refine(v => (v.initialQty === undefined) === (v.initialUnitCost === undefined), { message: "initial_stock_incomplete" })
+    .refine(v => (v.unitsPerPurchase ?? 1) === 1 || !!v.purchaseUnit, { message: "purchase_unit_required" })
+    .refine(v => (v.unitsPerSelling ?? 1) === 1 || !!v.sellingUnit, { message: "selling_unit_required" }),
 });
 export const SupplierOp = z.object({
   type: z.literal("supplier.upsert"),

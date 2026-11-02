@@ -15,7 +15,7 @@ import type { LocalProduct, OutboxRow, OutboxStatus, StorageBackend } from "./lo
 export type { LocalProduct, OutboxRow, OutboxStatus, StorageBackend };
 
 interface LocalSupplier { id: string; name: string; phone?: string | null }
-interface WebProduct extends LocalProduct { barcode: string | null; active: number }
+interface WebProduct extends LocalProduct { barcode: string | null; active: number; purchase_unit: string | null; selling_unit: string | null; units_per_purchase: number; units_per_selling: number }
 interface State { kv: Record<string, string>; products: WebProduct[]; suppliers: LocalSupplier[]; outbox: OutboxRow[]; seq: number }
 
 const IDB_NAME = "sms-local";
@@ -73,10 +73,21 @@ function normalize(raw: unknown): State {
   const s = (raw ?? {}) as Partial<State>;
   return {
     kv: s.kv && typeof s.kv === "object" ? s.kv : {},
-    products: Array.isArray(s.products) ? s.products : [],
+    products: Array.isArray(s.products) ? s.products.map(normalizeProduct) : [],
     suppliers: Array.isArray(s.suppliers) ? s.suppliers : [],
     outbox: Array.isArray(s.outbox) ? s.outbox : [],
     seq: typeof s.seq === "number" ? s.seq : (Array.isArray(s.outbox) ? s.outbox.reduce((m, r) => Math.max(m, r.seq ?? 0), 0) : 0),
+  };
+}
+
+/** Products stored before the unit-conversion feature gain identity conversion (1:1, base labels). */
+function normalizeProduct(p: WebProduct): WebProduct {
+  return {
+    ...p,
+    purchase_unit: p.purchase_unit ?? null,
+    selling_unit: p.selling_unit ?? null,
+    units_per_purchase: Number.isInteger(p.units_per_purchase) && p.units_per_purchase > 0 ? p.units_per_purchase : 1,
+    units_per_selling: Number.isInteger(p.units_per_selling) && p.units_per_selling > 0 ? p.units_per_selling : 1,
   };
 }
 
@@ -165,13 +176,26 @@ export async function enqueue(userId: string, opId: string, type: string, payloa
   await local?.();
 }
 
-export async function upsertLocalProduct(p: { id: string; code: string; barcode?: string | null; name: string; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number }) {
+export async function upsertLocalProduct(p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number }) {
   await mutate((s) => {
     const ex = s.products.find((x) => x.id === p.id);
-    if (ex) { ex.code = p.code; ex.barcode = p.barcode ?? null; ex.name = p.name; ex.unit = p.unit; ex.selling_price = p.sellingPrice; ex.low_threshold = p.lowStockThreshold; }
+    // COALESCE-like: an edit that omits the conversion config keeps the stored one (the server
+    // locks unit configuration on existing products, so local state must not drift from it).
+    const cfg = (cur: WebProduct | undefined) => ({
+      purchase_unit: p.purchaseUnit ?? cur?.purchase_unit ?? null,
+      selling_unit: p.sellingUnit ?? cur?.selling_unit ?? null,
+      units_per_purchase: p.unitsPerPurchase ?? cur?.units_per_purchase ?? 1,
+      units_per_selling: p.unitsPerSelling ?? cur?.units_per_selling ?? 1,
+    });
+    if (ex) {
+      ex.code = p.code; ex.barcode = p.barcode ?? null; ex.name = p.name; ex.unit = p.unit;
+      ex.selling_price = p.sellingPrice; ex.low_threshold = p.lowStockThreshold;
+      if (p.category) ex.category = p.category;
+      Object.assign(ex, cfg(ex));
+    }
     // Opening stock is shown optimistically through pending_delta; the matching delta on the
     // product.upsert operation is released when the server verdict arrives.
-    else s.products.push({ id: p.id, code: p.code, barcode: p.barcode ?? null, name: p.name, category: null, unit: p.unit, selling_price: p.sellingPrice, low_threshold: p.lowStockThreshold, on_hand: 0, pending_delta: p.initialQty ?? 0, active: 1 });
+    else s.products.push(normalizeProduct({ id: p.id, code: p.code, barcode: p.barcode ?? null, name: p.name, category: p.category ?? null, unit: p.unit, selling_price: p.sellingPrice, low_threshold: p.lowStockThreshold, on_hand: 0, pending_delta: p.initialQty ?? 0, active: 1, ...cfg(undefined) }));
   });
 }
 
@@ -232,7 +256,10 @@ export async function applyPull(changes: { entity: string; id: string; data: any
     for (const c of changes) {
       if (c.entity === "product") {
         const p = c.data; const ex = s.products.find((x) => x.id === p.id);
-        const row: WebProduct = { id: p.id, code: p.code, barcode: p.barcode ?? null, name: p.name, category: p.category ?? null, unit: p.unit, selling_price: p.sellingPrice, low_threshold: p.lowStockThreshold, on_hand: p.onHand, active: p.active ? 1 : 0, pending_delta: ex?.pending_delta ?? 0 };
+        const row: WebProduct = { id: p.id, code: p.code, barcode: p.barcode ?? null, name: p.name, category: p.category ?? null, unit: p.unit, selling_price: p.sellingPrice, low_threshold: p.lowStockThreshold, on_hand: p.onHand, active: p.active ? 1 : 0, pending_delta: ex?.pending_delta ?? 0,
+          purchase_unit: p.purchaseUnit ?? null, selling_unit: p.sellingUnit ?? null,
+          units_per_purchase: Number.isInteger(p.unitsPerPurchase) && p.unitsPerPurchase > 0 ? p.unitsPerPurchase : 1,
+          units_per_selling: Number.isInteger(p.unitsPerSelling) && p.unitsPerSelling > 0 ? p.unitsPerSelling : 1 };
         if (ex) Object.assign(ex, row); else s.products.push(row);
       }
       if (c.entity === "supplier") {

@@ -115,7 +115,7 @@ export class FinanceService {
   async productProfitability(shopId: string, from: string, to: string, moves?: Map<string, Movement[]>): Promise<ProductFinanceRow[]> {
     const mv = moves ?? await this.movements(shopId);
     const products = await this.db.query<any>(
-      "SELECT id, name, code, unit, selling_price, low_stock_threshold FROM products WHERE shop_id=$1 AND active ORDER BY name", [shopId]);
+      "SELECT id, name, code, unit, selling_unit, selling_price, low_stock_threshold, units_per_selling FROM products WHERE shop_id=$1 AND active ORDER BY name", [shopId]);
 
     // Revenue per product, net of a proportional share of the sale-level discount (numeric rounding,
     // so a product's share never exceeds its line). Groups in SQL — never loads all transactions.
@@ -158,13 +158,15 @@ export class FinanceService {
       const onHand = r.onHand;
       items.push({
         productId: p.id, name: p.name, code: p.code, unit: p.unit,
-        sellingPrice: p.selling_price, avgCost: r.avgCost, onHand, inventoryValue: r.value,
+        sellingPrice: p.selling_price, sellingUnit: p.selling_unit ?? p.unit, avgCost: r.avgCost, onHand, inventoryValue: r.value,
         lowStock: onHand <= p.low_stock_threshold,
         units: rev.units, revenue: rev.net, cogs: pc.cogs, grossProfit, grossMarginBps: marginBps,
         stockLosses: pc.lossValue, stockLossCount: lossCount,
         velocityPerDay: rev.units / periodDays, velocity30PerDay: velocity30, stockouts90: stockouts,
         flags: {
-          belowCost: r.avgCost > 0 && p.selling_price < r.avgCost && onHand > 0,
+          // selling_price is quoted per SELLING unit while avgCost is per BASE unit; compare on a
+          // single basis (cross-multiplied, exact in integer RWF) instead of mixing the two.
+          belowCost: r.avgCost > 0 && priceBelowCost(p.selling_price, Number(p.units_per_selling ?? 1), r.avgCost) && onHand > 0,
           negativeMargin: marginBps !== null && marginBps < 0,
           lowMargin: marginBps !== null && marginBps >= 0 && marginBps < TARGET_GROSS_MARGIN_BPS,
           highVolumeLowMargin: false, // recomputed below against the median volume of sold products
