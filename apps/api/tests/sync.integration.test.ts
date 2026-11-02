@@ -158,14 +158,14 @@ test("ledger and audit log are immutable at the database level", { skip }, async
  * carried alongside and re-verified server-side (toBaseQty is the same shared function the
  * offline client uses, so both sides convert identically without connectivity).
  */
-const specRice = () => {
+const specRice = (initialMilli = 12_500) => {
   const id = uuid();
   return {
     id,
     create: op("product.upsert", {
       productId: id, code: `RICE-${id.slice(0, 6)}`, name: "Rice", unit: "kg", sellingPrice: 1_400, lowStockThreshold: 5_000,
       purchaseUnit: "bag", unitsPerPurchase: 25, sellingUnit: "kg", unitsPerSelling: 1,
-      initialQty: 12_500,  // 0.5 bag = 12.5 kg
+      initialQty: initialMilli,
       initialUnitCost: 1_200,
     }),
     buy: (bags: number, costPerBag: number, opId = uuid()) => op("purchase.create", {
@@ -196,18 +196,16 @@ test("rice: buying 1 bag adds 25 kg, selling 5 kg deducts 5 kg and leaves 20 kg"
 });
 
 test("rice: weighted average cost stays in base units (1,200 then 1,300 -> 1,250/kg)", { skip }, async () => {
-  const r = specRice();
-  assert.equal((await svc.push(mgr, "d", [r.create]))[0].status, "applied");       // 12.5 kg @ 1,200
-  assert.equal((await svc.push(mgr, "d", [r.buy(1, 30_000)]))[0].status, "applied"); // +25 kg @ 1,200
-  assert.equal((await svc.push(mgr, "d", [r.buy(2, 65_000)]))[0].status, "applied"); // +50 kg @ 1,300
+  const r = specRice(25_000); // 1 bag opening = 25 kg @ 1,200
+  assert.equal((await svc.push(mgr, "d", [r.create]))[0].status, "applied");
+  assert.equal((await svc.push(mgr, "d", [r.buy(1, 30_000)]))[0].status, "applied");   // +25 kg @ 1,200
+  assert.equal((await svc.push(mgr, "d", [r.buy(2, 32_500)]))[0].status, "applied");   // +50 kg @ 1,300 (65,000 for 2 bags)
   const { replayLedger } = await import("@sms/shared");
   const mv = (await pool.query("SELECT type, qty, unit_cost, occurred_at FROM stock_movements WHERE product_id=$1 ORDER BY occurred_at, id", [r.id])).rows;
   const led = replayLedger(mv.map((m: any) => ({ type: m.type, qty: Number(m.qty), unitCost: m.unit_cost === null ? undefined : Number(m.unit_cost), occurredAt: new Date(m.occurred_at).toISOString() })));
-  assert.equal(led.onHand, 87_500,                                        // 12.5 + 25 + 50
-    "87.5 kg on hand");
-  assert.equal(led.value, 109_375,                                        // 12.5x1200 + 25x1200 + 50x1300
-    "inventory valued at base-unit cost");
-  assert.equal(led.avgCost, 1_250, "moving average: 109,375 / 87.5 kg = 1,250/kg");
+  assert.equal(led.onHand, 100_000, "100 kg on hand (25 + 25 + 50)");
+  assert.equal(led.value, 125_000, "25x1200 + 25x1200 + 50x1300 = 125,000 RWF valued at base-unit cost");
+  assert.equal(led.avgCost, 1_250, "moving average: 125,000 / 100 kg = 1,250/kg");
 });
 
 test("rice: selling all remaining stock hits exactly zero, decimal kg allowed", { skip }, async () => {
@@ -249,14 +247,16 @@ test("conversion mismatches are rejected server-side, never silently applied", {
   assert.equal(await qtyOnHand(r.id), 12_500, "stock untouched by every rejected attempt");
 });
 
-test("a converted product cannot be sold by a build that omits the natural quantity", { skip }, async () => {
-  const r = specRice();
-  assert.equal((await svc.push(mgr, "d", [r.create]))[0].status, "applied");
+test("a product sold in packs cannot be sold by a build that omits the natural quantity", { skip }, async () => {
+  const id = uuid();
+  assert.equal((await svc.push(mgr, "d", [op("product.upsert", {
+    productId: id, code: `PACK-${id.slice(0, 6)}`, name: "Soap pack", unit: "bar", sellingPrice: 4_000, lowStockThreshold: 0,
+    sellingUnit: "pack", unitsPerSelling: 4, initialQty: 4_000, initialUnitCost: 500 })]))[0].status, "applied");
   const oldBuild = op("sale.create", { saleId: uuid(), soldAt: now(), discount: 0, amountPaid: 0,
-    lines: [{ productId: r.id, qty: 1_000, unitPrice: 1_400 }] });
+    lines: [{ productId: id, qty: 1_000, unitPrice: 4_000 }] });
   const res = (await svc.push(mgr, "d", [oldBuild]))[0];
   assert.equal(res.status, "rejected"); assert.match(String(res.message), /selling_qty_required/);
-  assert.equal(await qtyOnHand(r.id), 12_500);
+  assert.equal(await qtyOnHand(id), 4_000, "nothing moved");
 });
 
 test("carton-style selling units price lines from the natural quantity", { skip }, async () => {
@@ -268,7 +268,7 @@ test("carton-style selling units price lines from the natural quantity", { skip 
   })]))[0].status, "applied");
   // Receive 2 cartons: qty in base bottles, natural carton entry + factor verified by the server.
   assert.equal((await svc.push(mgr, "d", [op("purchase.create", { purchaseId: uuid(), supplierId: null, orderedAt: now(), amountPaid: 0, receiveNow: true,
-    lines: [{ productId: id, qty: 24_000, purchaseQty: 2_000, unitFactor: 12, unitCost: 3_600, sellingPrice: 6_000 }] })]))[0].status, "applied");
+    lines: [{ productId: id, qty: 24_000, purchaseQty: 2_000, unitFactor: 12, unitCost: 300, sellingPrice: 6_000 }] })]))[0].status, "applied");
   assert.equal(await qtyOnHand(id), 36_000, "36 bottles on hand (3 cartons)");
   // Sell 1 carton: deducts 12 bottles, revenue = 1 carton x 6,000 (NOT 12 x 6,000).
   const sale = op("sale.create", { saleId: uuid(), soldAt: now(), discount: 0, amountPaid: 6_000,
@@ -320,19 +320,22 @@ test("unit configuration is set at creation and locked afterwards", { skip }, as
   assert.equal(rl.status, "rejected"); assert.match(String(rl.message), /purchase_unit_required/);
 });
 
-test("different shops configure the same product id differently and stay isolated", { skip }, async () => {
-  const id = uuid();
-  assert.equal((await svc.push(mgr, "d", [op("product.upsert", { productId: id, code: "ISO-A", name: "Rice A", unit: "kg", sellingPrice: 1_400, lowStockThreshold: 0,
+test("different shops configure units independently and stay isolated", { skip }, async () => {
+  const idA = uuid(), idB = uuid();
+  assert.equal((await svc.push(mgr, "d", [op("product.upsert", { productId: idA, code: "ISO-A", name: "Rice A", unit: "kg", sellingPrice: 1_400, lowStockThreshold: 0,
     purchaseUnit: "bag", unitsPerPurchase: 25, initialQty: 25_000, initialUnitCost: 1_200 })]))[0].status, "applied");
-  assert.equal((await svc.push(mgrB, "d", [op("product.upsert", { productId: id, code: "ISO-B", name: "Soap B", unit: "pcs", sellingPrice: 500, lowStockThreshold: 0,
-    sellingUnit: "packet", unitsPerSelling: 4, initialQty: 4_000, initialUnitCost: 300 })]))[0].status, "applied");
-  const a = (await pool.query("SELECT shop_id, unit, units_per_purchase FROM products WHERE id=$1", [id])).rows;
-  assert.equal(a.length, 1, "the same uuid cannot exist in two shops");
-  assert.equal(a[0].shop_id, shopA);
-  // Shop B still cannot sell with shop A's product id (isolation unchanged by the feature).
+  assert.equal((await svc.push(mgrB, "d", [op("product.upsert", { productId: idB, code: "ISO-B", name: "Soap B", unit: "bar", sellingPrice: 2_000, lowStockThreshold: 0,
+    sellingUnit: "packet", unitsPerSelling: 4, initialQty: 4_000, initialUnitCost: 800 })]))[0].status, "applied");
+  const rows = (await pool.query("SELECT id, shop_id, units_per_purchase, units_per_selling FROM products WHERE id = ANY($1::uuid[])", [[idA, idB]])).rows;
+  assert.equal(rows.length, 2, "each shop keeps its own product row");
+  const a = rows.find((r: any) => r.id === idA)!, b = rows.find((r: any) => r.id === idB)!;
+  assert.equal(a.shop_id, shopA); assert.equal(b.shop_id, shopB);
+  assert.equal(Number(a.units_per_purchase), 25, "shop A buys in bags");
+  assert.equal(Number(b.units_per_selling), 4, "shop B sells in packets of 4");
+  // Shop B cannot touch shop A's product: the row lock is shop-scoped, conversion or not.
   const res = (await svc.push(mgrB, "d", [op("sale.create", { saleId: uuid(), soldAt: now(), discount: 0, amountPaid: 0,
-    lines: [{ productId: id, qty: 1_000, sellingQty: 1_000, unitPrice: 500 }] })]))[0];
-  assert.equal(res.status, "rejected"); assert.match(String(res.message), /selling_qty_required|unknown_product/);
+    lines: [{ productId: idA, qty: 1_000, sellingQty: 1_000, unitPrice: 1_400 }] })]))[0];
+  assert.equal(res.status, "rejected"); assert.match(String(res.message), /unknown_product/);
 });
 
 test("offline purchase and sale: replay after reconnect is applied exactly once", { skip }, async () => {

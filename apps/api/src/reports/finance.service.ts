@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { z } from "zod";
 import {
-  TARGET_GROSS_MARGIN_BPS, periodCosts, replayLedger, summarize, valueAt,
+  TARGET_GROSS_MARGIN_BPS, periodCosts, priceBelowCost, replayLedger, summarize, valueAt,
   type ExpenseChange, type Movement, type PeriodSummary, type ProductFinanceRow,
 } from "@sms/shared";
 import { Db } from "../db/db.service";

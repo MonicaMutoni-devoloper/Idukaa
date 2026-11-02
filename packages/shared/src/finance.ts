@@ -101,6 +101,8 @@ export interface ProductFinanceRow {
   code: string | null;
   unit: string;
   sellingPrice: Rwf;
+  /** The unit `sellingPrice` is quoted per (products.selling_unit, falls back to `unit`). */
+  sellingUnit?: string;
   avgCost: Rwf;               // current moving-average unit cost; 0 when the cost basis is unknown
   onHand: number;
   inventoryValue: Rwf;

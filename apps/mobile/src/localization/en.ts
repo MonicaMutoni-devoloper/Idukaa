@@ -21,7 +21,7 @@ export const en = {
   "common.week": "This week", "common.month": "This month", "common.year": "This year", "common.empty": "Nothing here yet", "common.loading": "Loading…",
   "common.error": "Something went wrong", "common.retry": "Try again", "common.signOut": "Sign out", "common.language": "Language",
   "common.add": "Add", "common.remove": "Remove", "common.date": "Date", "common.period": "Period", "common.all": "All",
-  "common.none": "None", "common.status": "Status", "common.optional": "Optional", "common.never": "Never", "common.sales": "Sales",
+  "common.none": "None", "common.status": "Status", "common.optional": "Optional", "common.on": "On", "common.off": "Off", "common.never": "Never", "common.sales": "Sales",
   "common.purchases": "Purchases", "common.expenses": "Expenses", "common.balance": "Balance", "common.unpaid": "Unpaid", "common.active": "Active",
 
   "sync.pending": "Waiting to sync", "sync.synced": "Synced", "sync.failed": "Not synced", "sync.conflict": "Needs review",

@@ -20,12 +20,12 @@ export const rw: Record<Key, string> = {
 
   "common.save": "Bika", "common.cancel": "Hagarika", "common.search": "Shakisha", "common.total": "Yose hamwe", "common.paid": "Yishyuwe",
   "common.discount": "Igabanyirizwa", "common.qty": "Ingano", "common.price": "Igiciro", "common.cost": "Igiciro cyo kugura",
-  "common.product": "Igicuruzwa", "common.supplier": "Utanga ibicuruzwa", "common.category": "Icyiciro", "common.note": "Icyitonderwa",
+  "common.product": "Igicuruzwa", "common.supplier": "Utanga ibicuruzwa", "common.category": "Icyiciro", "common.note": "Icyitonderwa", "stock.category": "Icyiciro",
   "common.amount": "Amafaranga", "common.today": "Uyu munsi", "common.week": "Iki Cyumweru", "common.month": "Uku Kwezi", "common.year": "Uyu mwaka",
   "common.empty": "Nta makuru arimo", "common.loading": "Birimo gufunguka…", "common.error": "Hari ikitagenze neza",
   "common.retry": "Ongera ugerageze", "common.signOut": "Sohoka", "common.language": "Ururimi", "common.add": "Ongeraho",
   "common.remove": "Kuraho", "common.date": "Itariki", "common.period": "Igihe", "common.all": "Byose", "common.none": "Nta na kimwe",
-  "common.status": "Imimerere", "common.optional": "Si ngombwa", "common.never": "Nta na rimwe", "common.sales": "Igurisha",
+  "common.status": "Imimerere", "common.optional": "Si ngombwa", "common.on": "Mfunguye", "common.off": "Bifunze", "common.never": "Nta na rimwe", "common.sales": "Igurisha",
   "common.purchases": "Ibyaguzwe", "common.expenses": "Amafaranga yakoreshejwe", "common.balance": "Isigaye",
   "common.unpaid": "Ntirishyuwe", "common.active": "Irakora",
 
@@ -79,7 +79,7 @@ export const rw: Record<Key, string> = {
   "stock.productNamePlaceholder": "urugero: Ifu ya 25kg", "stock.codeAuto": "Si ngombwa — niba ubyanditse ubusa, kode izakerwa wenyine.",
   "stock.sectionInitial": "Ububiko bwa mbere", "stock.qtyHelp": "Umubare w'ibicuruzwa uriho ubu kuri iyi mbuga.",
   "stock.costPerUnit": "Igiciro ku kintu kimwe", "stock.costHelp": "Igiciro waguriyeho ikintu kimwe — gikoreshwa mu kubara igiciro mpuzandengo.",
-  "stock.sectionPurchase": "Igishya ry'igura",  "stock.sectionPurchase": "Igishya ry'igura", "stock.sectionSelling": "Amakuru yo kugurisha", "stock.sellingPrice": "Igiciro cyo kugurisha ku kintu",
+  "stock.sectionPurchase": "Igishya ry'igura",   "stock.sectionSelling": "Amakuru yo kugurisha", "stock.sellingPrice": "Igiciro cyo kugurisha ku kintu",
   "stock.baseUnit": "Igice ry'ibidukikije cyibanze", "stock.baseUnitHelp": "Uburyo ibidukikije bibarwa nakurwezwa (urugero: kg, fulake, pcs).",
   "stock.purchaseUnit": "Uburyo baguriramo", "stock.purchaseUnitHint": "Uburyo wagaruriramo: faga, karitoni, agasanduku…",
   "stock.unitsPerPurchase": "Ibyiza by'ibanze kuri bumwe bw'uburyo bwo kugura", "stock.unitsPerPurchaseHint": "urugero: 1 faga = 25 kg",
@@ -94,7 +94,6 @@ export const rw: Record<Key, string> = {
   "stock.errPerPurchase": "Andika umubare wuzuye w'ibizigira by'ibanze kuri bumwe (1 cyangwa wereengero)", "stock.errPerSelling": "Andika umubare wuzuye w'ibizigira by'ibanze kuri bumwe (1 cyangwa wereengero)",
   "stock.errPurchaseUnit": "Andika uburyo bwo kugura", "stock.errSellingUnit": "Andika uburyo bwo kugurisha",
   "stock.unitConfigLockedTitle": "Imirongo itangirwa igaruka", "stock.unitConfigLocked": "Iri producti ringana {purchase} arakurisha mu biciro by'ibanze {selling}. Ntiguhinduka iho ibiri muri stock — ibidukikije bya mbere biguha isubirwamo — ongera producti nshya.",
-  "stock.baseUnit": "Urupapuro rw'ibidukikije
   "stock.totalCost": "Igiciro cy'ububiko bwose", "stock.profitPerUnit": "Inyungu yapereye ku kintu kimwe", "stock.marginPct": "Umusaruro wo kugurisha",
   "stock.costNotExpense": "Kugura ibicuruzwa ni ububiko, si intumwa y'akazi — bigira igiciro igihe igicuruzwa kigurishijwe.",
   "stock.errName": "Andika izina ry'igicuruzwa.", "stock.errUnit": "Andika igipimo (urugero: pcs, kg).",

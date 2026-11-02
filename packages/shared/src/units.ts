@@ -19,19 +19,18 @@ function assertUnitsPer(unitsPer: number): void {
   if (!Number.isInteger(unitsPer) || unitsPer < 1) throw new Error(`unitsPer must be an integer >= 1, got ${unitsPer}`);
 }
 
-/** Natural quantity in milli purchase/selling units -> base milli-units, rounded half-up. */
+/** Natural quantity in milli purchase/selling units -> base milli-units (exact: milli x integer factor). */
 export function toBaseQty(naturalMilli: QtyMilli, unitsPer: number): QtyMilli {
   assertInt(naturalMilli, "naturalMilli"); assertUnitsPer(unitsPer);
-  const num = BigInt(naturalMilli) * BigInt(unitsPer);
-  const neg = num < 0n; const abs = neg ? -num : num;
-  const r = Number((abs + 500n) / 1000n);
-  return neg ? -r : r;
+  const r = Number(BigInt(naturalMilli) * BigInt(unitsPer));
+  if (!Number.isSafeInteger(r)) throw new Error(`toBaseQty overflows: ${naturalMilli} x ${unitsPer}`);
+  return r;
 }
 
 /** Base milli-units -> natural milli units (round half-up; exact when evenly divisible). */
 export function fromBaseQty(baseMilli: QtyMilli, unitsPer: number): QtyMilli {
   assertInt(baseMilli, "baseMilli"); assertUnitsPer(unitsPer);
-  const num = BigInt(baseMilli) * 1000n;
+  const num = BigInt(baseMilli);
   const den = BigInt(unitsPer);
   const neg = num < 0n; const abs = neg ? -num : num;
   const r = Number((abs + den / 2n) / den);

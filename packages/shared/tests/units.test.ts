@@ -17,11 +17,13 @@ test("selling units convert the same way, and the inverse round-trips", () => {
   assert.equal(fromBaseQty(12_500, 25), 500); // 12.5 kg back to 0.5 bag
 });
 
-test("conversion is integer-only: non-divisible amounts round half-up, never float", () => {
-  assert.equal(toBaseQty(1, 25), 0);          // 0.001 bag of 25 kg -> 0.025 kg -> 0 kg
-  assert.equal(toBaseQty(1500, 7), 10_500);   // 1.5 x 7 = 10.5 -> exact
-  assert.equal(toBaseQty(1, 3), 0);
-  assert.equal(toBaseQty(2, 3), 1);           // 0.002 x 3 = 0.006 -> 0.001 after half-up on milli scale? 0.006 rounds to 0.01 -> 1 milli
+test("conversion is integer-only: multiplication is exact, division rounds half-up, never float", () => {
+  assert.equal(toBaseQty(1, 25), 25);         // 0.001 bag x 25 kg/bag = 0.025 kg = 25 milli-kg
+  assert.equal(toBaseQty(1500, 7), 10_500);   // 1.5 x 7 = 10.5 kg, exact
+  assert.equal(toBaseQty(1, 3), 3);           // 0.001 x 3 = 0.003, exact
+  assert.equal(toBaseQty(2, 3), 6);           // 0.002 x 3 = 0.006, exact
+  assert.equal(fromBaseQty(13, 2), 7);        // 6.5 milli -> 7, rounded half-up
+  assert.equal(fromBaseQty(12, 2), 6);        // exact division stays exact
   assert.throws(() => toBaseQty(u(1), 0));
   assert.throws(() => toBaseQty(u(1), 2.5));
   assert.throws(() => fromBaseQty(u(1), 0));
@@ -42,7 +44,7 @@ test("below-cost checks compare on one basis across unit configurations", () => 
   assert.equal(priceBelowCost(1_400, 25, 1_200), true);
   // Carton pricing: 5,000/carton of 12 vs 300/bottle -> 416.67 per bottle, above cost.
   assert.equal(priceBelowCost(5_000, 12, 300), false);
-  assert.equal(priceBelowCost(3_000, 12, 300), false); // exactly 250/bottle
+  assert.equal(priceBelowCost(3_000, 12, 300), true); // exactly 250/bottle, still below the 300 cost
   assert.equal(priceBelowCost(2_999, 12, 300), true);
   // Legacy 1:1 behaviour is unchanged.
   assert.equal(priceBelowCost(1_428, 1, 1_429), true);
