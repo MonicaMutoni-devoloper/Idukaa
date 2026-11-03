@@ -832,3 +832,22 @@ The 401 loop was three problems, not one. §7 covers the server side; this is wh
 
 **Not verified:** the live deployment until this commit is pushed (Vercel and Render redeploy from
 `main`); a signed-in production walkthrough still needs credentials, which are not available here.
+
+### Live verification after the deploy (3 Nov 2026)
+
+`main` pushed as `ee7e711`; Vercel and Render both redeployed from it.
+
+| Check | Result |
+|---|---|
+| Render API healthy on the new build | ✅ `x-request-id` now on every response (new middleware) |
+| CORS preflight from `https://idukaa-api.vercel.app` | ✅ 204, `allow-credentials: true`, `allow-headers: content-type,x-csrf-token` |
+| `POST /auth/refresh` cross-site without a credential | ✅ 401 `refresh_invalid` — **not** 403 `csrf_failed`, i.e. the new CSRF path is live and the old one (which rejected every real browser) is gone |
+| Vercel bundle carries the fix | ✅ `__common-e6a73fc1…js` contains the session-expired banner and message strings |
+| `node scripts/verify-deployment.mjs` | ✅ **23/23** (first run lost one check to a Render cold-start timeout; the rerun passed) |
+
+**Still not verified live:** a full sign-in → reload → refresh cycle against production, which needs
+account credentials (none are available here). The equivalent flow was proven in a real browser
+locally against the same cross-site shape (web.localhost → api.localhost: login 201, refresh 201,
+second refresh 201), and the unit/integration suites cover the rest. If a production reload still
+prompts for sign-in, check the Render logs for `auth.refresh.failed` — the `category` and `crossSite`
+fields now say exactly which step failed.
