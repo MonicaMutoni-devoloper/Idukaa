@@ -1,7 +1,9 @@
 // App-shell cache only. Business data lives in the local database, NOT in this cache.
 // Authentication and business API responses are never cached, even when the API is deployed on the
 // same origin as the web app: their paths are excluded explicitly and authorized requests are skipped.
-const CACHE = "sms-shell-v2";
+// v3: purge the shell/assets cached before the cross-site auth fix so no client keeps running a
+// bundle whose refresh flow was replaced.
+const CACHE = "sms-shell-v3";
 const SHELL = ["/", "/manifest.json", "/icon-192.png", "/icon-512.png"];
 
 // Every REST prefix used by the API. A response from any of these is always fetched live.

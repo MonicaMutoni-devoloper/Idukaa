@@ -7,7 +7,7 @@ import { BarList, CompareBars, ProductRanking, StockHealthBar, TrendBars } from 
 import { Appear, Disclosure, useCountUp } from "../../src/components/motion";
 import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
-import { request, useSession } from "../../src/services/api";
+import { ApiError, request, useSession } from "../../src/services/api";
 import { addDaysToDay, customRange, presetRange, todayDay, type Preset } from "../../src/services/util";
 import { useSync } from "../../src/synchronization/engine";
 import { motion, space, type, useTheme } from "../../src/theme/tokens";
@@ -137,6 +137,8 @@ export default function Home() {
   const wide = useWide();
   const router = useRouter();
   const user = useSession((s) => s.user);
+  // Re-load when a fresh sign-in replaces an expired session (the effect below depends on it).
+  const token = useSession((s) => s.token);
   const online = useSync((s) => s.online);
   const lastSync = useSync((s) => s.lastSync);
   const isOwner = user?.role === "owner";
@@ -149,6 +151,8 @@ export default function Home() {
   const [data, setData] = useState<Dashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
+  // Distinguishes "the server rejected the session" from "the server could not be reached".
+  const [authIssue, setAuthIssue] = useState(false);
   const [staleAt, setStaleAt] = useState<string | null>(null);
   const [trendMetric, setTrendMetric] = useState<"sales" | "profit">("sales");
 
@@ -156,14 +160,15 @@ export default function Home() {
 
   const load = useCallback(async () => {
     if (!range) return;
-    setLoading(true); setFailed(false);
+    setLoading(true); setFailed(false); setAuthIssue(false);
     const key = `dashboard:${user?.role}:${range.from}:${range.to}`;
     try {
       const res = await request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { auth: true });
       setData(res); setStaleAt(null);
       void kvSet(key, JSON.stringify({ savedAt: new Date().toISOString(), data: res })).catch(() => {});
-    } catch {
+    } catch (e) {
       setFailed(true);
+      setAuthIssue(e instanceof ApiError && e.status === 401);
       try {
         const raw = await kvGet(key);
         if (raw) { const cached = JSON.parse(raw); if (cached?.data) { setData(cached.data); setStaleAt(cached.savedAt ?? null); } }
@@ -173,7 +178,7 @@ export default function Home() {
     }
   }, [range, user?.role]);
 
-  useEffect(() => { void load(); }, [load, lastSync]);
+  useEffect(() => { void load(); }, [load, lastSync, token]);
 
   const applyCustom = () => {
     const r = customRange(customFrom, customTo);
@@ -240,7 +245,7 @@ export default function Home() {
       ) : null}
 
       {!online ? <Banner tone="warn" text={staleAt ? t("dash.cachedAt").replace("{time}", new Date(staleAt).toLocaleString()) : t("home.cachedData")} /> : null}
-      {failed && data ? <Banner tone="warn" text={t("dash.staleBanner")} /> : null}
+      {authIssue ? <Banner tone="danger" text={t("dash.sessionExpired")} /> : failed && data ? <Banner tone="warn" text={t("dash.staleBanner")} /> : null}
 
       <Card tone="muted" style={{ gap: space.sm }}>
         <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("home.quickActions")}</Text>
@@ -257,7 +262,7 @@ export default function Home() {
           {[1, 2, 3, 4].map((i) => <Skeleton key={i} height={98} width="23%" style={{ minWidth: 150, flexGrow: 1 }} />)}
         </View>
       ) : failed && !data ? (
-        <ErrorState text={t("home.loadError")} onRetry={() => void load()} />
+        <ErrorState text={t(authIssue ? "dash.sessionExpired" : "home.loadError")} onRetry={() => void load()} />
       ) : !data || !ops ? (
         <Loading />
       ) : (

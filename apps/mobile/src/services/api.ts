@@ -33,12 +33,19 @@ const WEB = Platform.OS === "web";
 const ACCESS_KEY = "token";
 const REFRESH_KEY = "refresh_token";
 const USER_KEY = "user";
-const REFRESH_TIMEOUT_MS = 12_000;
+// The API sleeps on Render's free tier; a cold first request regularly takes 10-15s. Timing out
+// mid-rotation is what loses the rotated cookie, so the refresh gets more room than a normal call.
+const REFRESH_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 20_000;
+const REFRESH_BACKOFF_MS = 15_000;
 
 let accessToken: string | null = null;
 let challengeToken: string | null = null;
 let refreshInFlight: Promise<boolean> | null = null;
+/** Definitive rejection from the server: stop automatic refresh until the user signs in again. */
+let refreshBlocked = false;
+/** Transport/offline failure: wait a moment before the next automatic attempt (never a loop). */
+let refreshRetryAt = 0;
 
 const storage = {
   async get(key: string): Promise<string | null> {
@@ -80,7 +87,11 @@ async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = REQUEST
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (o.auth !== false && accessToken) headers.Authorization = `Bearer ${accessToken}`;
   const csrf = WEB ? readCookie("sms_csrf") : null;
+  // On a cross-site deployment (web on one domain, API on another) the browser refuses to expose the
+  // API's cookie to JavaScript, so its value is unknowable here. The header must still be present:
+  // the API then trusts its own Origin allow-list instead of a double submit it could never verify.
   if (csrf) headers["x-csrf-token"] = csrf;
+  else if (WEB) headers["x-csrf-token"] = "1";
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -108,6 +119,8 @@ async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = REQUEST
 
 async function adopt(session: SessionResponse) {
   accessToken = session.token;
+  refreshBlocked = false;
+  refreshRetryAt = 0;
   if (!WEB) {
     await storage.set(ACCESS_KEY, session.token);
     if (session.refreshToken) await storage.set(REFRESH_KEY, session.refreshToken);
@@ -116,24 +129,57 @@ async function adopt(session: SessionResponse) {
   // Before the UI can render: scope the local cache to this user's shop, so no leftovers from a
   // previously signed-in account are ever shown (and a switch triggers a clean re-pull).
   await bindShop(session.user.shopId);
-  useSession.setState({ token: session.token, user: session.user });
+  useSession.setState({ token: session.token, user: session.user, expired: false });
 }
 
-/** One refresh at a time: concurrent 401s wait for the same rotation instead of racing. */
-function refreshSession(): Promise<boolean> {
+/** The server rejected the refresh credential: the session is over until a new sign-in. */
+function blockSession(status: number, reason: string) {
+  refreshBlocked = true;
+  refreshRetryAt = 0;
+  // Safe diagnostic: never a token, only the verdict and HTTP status (categories match the API logs).
+  console.warn("[auth] refresh rejected", { status, reason });
+  useSession.getState().expire();
+}
+
+const refreshOnce = (body: Record<string, unknown>) =>
+  fetchJson<SessionResponse>("/auth/refresh", { method: "POST", body, auth: false }, REFRESH_TIMEOUT_MS);
+
+/**
+ * One refresh at a time, and never a loop.
+ *  - Concurrent 401s (dashboard + reports + sync at once) share the same rotation.
+ *  - A definitive rejection (401/403) stops automatic refresh until login, preserves the outbox and
+ *    flips the session to "expired" so the UI asks for a sign-in instead of reporting a network error.
+ *  - A transport failure backs off; the session may still be perfectly valid, so it is not expired.
+ *  - A lost response is retried once: the server's reuse grace window makes the retry safe (if the
+ *    rotation did happen, the retry picks up the live successor instead of revoking the family).
+ */
+function refreshSession(force = false): Promise<boolean> {
   if (refreshInFlight) return refreshInFlight;
+  if (refreshBlocked) return Promise.resolve(false);
+  // `force` is used by the sync pass: one attempt per pass, not per request, so the backoff must not
+  // swallow it (an offline reload leaves no access token and the queue would wait for nothing).
+  if (!force && Date.now() < refreshRetryAt) return Promise.resolve(false);
   refreshInFlight = (async () => {
     try {
       let body: Record<string, unknown> = {};
       if (!WEB) {
         const stored = await storage.get(REFRESH_KEY);
-        if (!stored) return false;
+        if (!stored) { blockSession(401, "missing_refresh_credential"); return false; }
         body = { refreshToken: stored };
       }
-      const session = await fetchJson<SessionResponse>("/auth/refresh", { method: "POST", body, auth: false }, REFRESH_TIMEOUT_MS);
+      let session: SessionResponse;
+      try {
+        session = await refreshOnce(body);
+      } catch (e) {
+        if (e instanceof ApiError) { blockSession(e.status, String(e.message)); return false; }
+        await new Promise((r) => setTimeout(r, 400));
+        session = await refreshOnce(body);
+      }
       await adopt(session);
       return true;
-    } catch {
+    } catch (e) {
+      if (e instanceof ApiError) blockSession(e.status, String(e.message));
+      else refreshRetryAt = Date.now() + REFRESH_BACKOFF_MS;
       return false;
     } finally {
       refreshInFlight = null;
@@ -141,6 +187,9 @@ function refreshSession(): Promise<boolean> {
   })();
   return refreshInFlight;
 }
+
+/** True once the refresh credential has been definitively rejected (user must sign in again). */
+export const sessionRejected = () => refreshBlocked;
 
 async function clearLocalSession() {
   accessToken = null;
@@ -153,6 +202,8 @@ export const useSession = create<{
   token: string | null;
   user: SessionUser | null;
   ready: boolean;
+  /** The refresh credential was rejected: everything local is intact, a sign-in is required. */
+  expired: boolean;
   load: () => Promise<void>;
   login: (email: string, password: string) => Promise<{ twoFactorRequired: boolean }>;
   verifyTwoFactor: (code: string) => Promise<void>;
@@ -162,7 +213,7 @@ export const useSession = create<{
   expire: () => void;
   apply: (p: { token?: string; refreshToken?: string; user?: SessionUser }) => Promise<void>;
 }>((set) => ({
-  token: null, user: null, ready: false,
+  token: null, user: null, ready: false, expired: false,
 
   load: async () => {
     const rawUser = await storage.get(USER_KEY);
@@ -204,23 +255,28 @@ export const useSession = create<{
       await fetchJson("/auth/logout", { method: "POST", body: stored ? { refreshToken: stored } : {}, auth: false }, 6_000);
     } catch { /* the local sign-out still happens */ }
     await clearLocalSession();
-    set({ token: null, user: null });
+    refreshBlocked = false; refreshRetryAt = 0;
+    set({ token: null, user: null, expired: false });
   },
 
   logoutAll: async () => {
     try { await fetchJson("/auth/logout-all", { method: "POST", body: {}, auth: true }, 6_000); }
-    finally { await clearLocalSession(); set({ token: null, user: null }); }
+    finally {
+      await clearLocalSession();
+      refreshBlocked = false; refreshRetryAt = 0;
+      set({ token: null, user: null, expired: false });
+    }
   },
 
   // Keep `user` so the UI can say "sign in again"; local data and the outbox are untouched.
-  expire: () => { accessToken = null; set({ token: null }); },
+  expire: () => { accessToken = null; set({ token: null, expired: true }); },
 
   // Persist a changed profile or a rotated session without touching the outbox.
   apply: async (p) => {
     if (p.token) { accessToken = p.token; if (!WEB) await storage.set(ACCESS_KEY, p.token); }
     if (p.refreshToken && !WEB) await storage.set(REFRESH_KEY, p.refreshToken);
     if (p.user) await storage.set(USER_KEY, JSON.stringify(p.user));
-    set((s) => ({ token: p.token ?? s.token, user: p.user ?? s.user }));
+    set((s) => ({ token: p.token ?? s.token, user: p.user ?? s.user, expired: false }));
   },
 }));
 
@@ -236,14 +292,16 @@ export async function request<T>(path: string, o: RequestOptions = {}): Promise<
   } catch (e) {
     if (!(e instanceof ApiError) || e.status !== 401 || o.auth === false) throw e;
     if (await refreshSession()) return fetchJson<T>(path, o);
-    useSession.getState().expire();
+    // The refresh already marked the session expired when the server rejected the credential. A
+    // transport failure leaves the session intact (it may still be valid) and backs off instead.
     throw e;
   }
 }
 
 /** Called by the sync engine: makes sure an expired session has been refreshed once before pushing. */
-export const ensureSession = async () => {
-  if (!accessToken && useSession.getState().user) return refreshSession();
+export const ensureSession = async (force = false) => {
+  if (refreshBlocked) return false;
+  if (!accessToken && useSession.getState().user) return refreshSession(force);
   return !!accessToken;
 };
 

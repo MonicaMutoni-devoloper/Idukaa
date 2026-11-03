@@ -1,7 +1,7 @@
 import NetInfo from "@react-native-community/netinfo";
 import { AppState } from "react-native";
 import { create } from "zustand";
-import { ApiError, getDeviceId, request, useSession } from "../services/api";
+import { ApiError, ensureSession, getDeviceId, request, sessionRejected, useSession } from "../services/api";
 import { applyPull, applyResults, dueOps, kvGet, kvSet, markRetry, outboxCounts, retryNow } from "../database";
 import type { OpResult, PullResponse } from "@sms/shared";
 
@@ -16,6 +16,15 @@ async function runPass(force: boolean): Promise<void> {
   // The access token is refreshed on demand by `request`; only a signed-out user or the platform
   // administrator (who has no shop data) skips syncing.
   const s = useSession.getState(); if (!s.user || s.user.role === "system_admin") return;
+  // The refresh credential was rejected by the server: stop calling the API (which only produces
+  // more 401s) and wait for a sign-in. The queue and every local record stay exactly as they are.
+  if (s.expired) { useSync.setState({ authRequired: true }); return; }
+  // After an offline reload (web) there is no access token yet: get one before touching the queue,
+  // bypassing the per-request backoff because this is a single attempt per pass.
+  if (!(await ensureSession(true))) {
+    if (sessionRejected()) useSync.setState({ authRequired: true });
+    return;
+  }
   useSync.setState({ running: true, authRequired: false });
   try {
     if (force) await retryNow(s.user.id);
@@ -30,7 +39,9 @@ async function runPass(force: boolean): Promise<void> {
         // instead of guessing — the counts are a cheap local query and the pass refreshes again at the end.
         await refreshCounts();
       } catch (e) {
-        if (e instanceof ApiError && e.status === 401) { useSync.setState({ authRequired: true }); return; } // queue is kept intact
+        // Only a rejected credential needs the user to sign in; a token that is merely not available
+        // yet (offline reload, refresh backing off) keeps the queue and retries on the next pass.
+        if (e instanceof ApiError && e.status === 401 && sessionRejected()) { useSync.setState({ authRequired: true }); return; }
         await markRetry(due.map(r => r.op_id), e instanceof ApiError ? `server_${e.status}` : "network"); break; // backoff; try again later
       }
     }
@@ -46,7 +57,7 @@ async function runPass(force: boolean): Promise<void> {
       if (!r.hasMore) break;
     }
     const at = new Date().toISOString(); await kvSet("last_sync", at); useSync.setState((x) => ({ lastSync: at, dataVersion: x.dataVersion + 1 }));
-  } catch (e) { if (e instanceof ApiError && e.status === 401) useSync.setState({ authRequired: true }); }
+  } catch (e) { if (e instanceof ApiError && e.status === 401 && sessionRejected()) useSync.setState({ authRequired: true }); }
   finally { useSync.setState({ running: false }); await refreshCounts(); }
 }
 
@@ -78,4 +89,7 @@ export function startSyncEngine() {
   NetInfo.addEventListener(st => { const online = !!st.isConnected && st.isInternetReachable !== false; useSync.setState({ online }); if (online) void syncNow(); });
   setInterval(() => { if (useSync.getState().online) void syncNow(); }, 30_000);
   AppState.addEventListener("change", s => { if (s === "active") void syncNow(); });
+  // Signing in again (after an expired session) resumes the queue immediately — the work recorded
+  // while signed out was never discarded, so this is the only recovery step a user needs to take.
+  useSession.subscribe((s, prev) => { if (s.token && !prev.token) void syncNow(); });
 }

@@ -30,6 +30,14 @@ const resetTtlMinutes = () => {
   return Number.isFinite(n) && n >= 5 && n <= 240 ? n : 30;
 };
 const devResetEnabled = () => process.env.NODE_ENV !== "production" && process.env.PASSWORD_RESET_DEV_MODE === "true";
+/**
+ * How long a just-rotated refresh token may still be presented by the same browser without being
+ * treated as theft (REFRESH_REUSE_GRACE_SECONDS, default 30s, 0 disables it). See refresh().
+ */
+const refreshGraceSeconds = () => {
+  const n = Number(process.env.REFRESH_REUSE_GRACE_SECONDS ?? 30);
+  return Number.isFinite(n) && n >= 0 && n <= 300 ? n : 30;
+};
 const resetUrl = (token: string) => {
   const base = (process.env.PASSWORD_RESET_URL ?? "http://localhost:8081/reset-password").split("?")[0]!;
   return `${base}?token=${encodeURIComponent(token)}`;
@@ -141,54 +149,83 @@ export class AuthService {
     return session;
   }
 
-  /** Rotates the refresh token. A reused (already rotated) token revokes its whole session family. */
+  /**
+   * Rotates the refresh token.
+   *
+   * A token that was already rotated is normally theft and revokes the whole session family — but a
+   * rotation that happened *seconds* ago is almost always the same browser racing itself: two tabs
+   * refreshing together, a reload during a Render cold start, or a Set-Cookie that never arrived
+   * because the client timed out mid-rotation. Treating those as theft nuked every session in the
+   * family and locked the user out permanently, which is how a slow first request turned into
+   * "POST /auth/refresh 401" on every subsequent visit. Inside REFRESH_REUSE_GRACE_SECONDS we keep
+   * the family and rotate the live successor instead; outside it, reuse is handled exactly as before.
+   */
   async refresh(presented: string, meta: SessionMeta): Promise<SessionPayload> {
     const hash = hashToken(presented);
-    const [row] = await this.db.query("SELECT * FROM refresh_sessions WHERE token_hash=$1", [hash]);
+    let [row] = await this.db.query("SELECT * FROM refresh_sessions WHERE token_hash=$1", [hash]);
     if (!row) throw new UnauthorizedException("refresh_invalid");
 
-    if (row.revoked_at) {
-      await this.revokeFamily(row.family_id, "reuse_detected");
-      await audit(this.db.pool, {
-        shopId: null, actorId: row.user_id, action: "auth.refresh.reuse_detected", entity: "session", entityId: row.id,
-      });
-      throw new UnauthorizedException("refresh_reused");
-    }
-    if (new Date(row.expires_at).getTime() <= Date.now()) {
-      await this.db.query("UPDATE refresh_sessions SET revoked_at=now(), revoke_reason='expired' WHERE id=$1 AND revoked_at IS NULL", [row.id]);
-      throw new UnauthorizedException("refresh_expired");
-    }
-    const [u] = await this.db.query("SELECT * FROM users WHERE id=$1", [row.user_id]);
-    if (!u || !u.active || u.account_status !== "active") throw new UnauthorizedException("session_revoked");
-
-    const newId = randomUUID();
-    const refreshToken = newOpaqueToken();
-    try {
-      await this.db.tx(async (c) => {
-        // Claim the presented row exactly once, even under concurrent requests.
-        const claim = await c.query(
-          "UPDATE refresh_sessions SET revoked_at=now(), revoke_reason='rotated', last_used_at=now() WHERE id=$1 AND revoked_at IS NULL RETURNING id",
-          [row.id],
-        );
-        if (!claim.rowCount) throw new Error("refresh_reused");
-        await c.query(
-          `INSERT INTO refresh_sessions(id, user_id, family_id, token_hash, device_id, user_agent, ip, expires_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [newId, u.id, row.family_id, hashToken(refreshToken), meta.deviceId ?? row.device_id,
-            meta.userAgent?.slice(0, 300) ?? row.user_agent, meta.ip ?? row.ip,
-            new Date(Date.now() + refreshTtlDays() * 86_400_000)],
-        );
-        await c.query("UPDATE refresh_sessions SET replaced_by=$2 WHERE id=$1", [row.id, newId]);
-      });
-    } catch (e) {
-      if ((e as Error).message === "refresh_reused") {
+    // Walk the rotation chain while inside the grace window: a lost claim race (this request) or a
+    // concurrent replay (another tab) may have moved the live row one or more steps forward already.
+    // The expiry and account checks for each hop happen in the branch below.
+    for (let hop = 0; hop < 8; hop++) {
+      if (row.revoked_at) {
+        const grace = refreshGraceSeconds();
+        const withinGrace = row.revoke_reason === "rotated" && row.replaced_by && grace > 0
+          && Date.now() - new Date(row.revoked_at).getTime() <= grace * 1000;
+        if (withinGrace) {
+          const [succ] = await this.db.query("SELECT * FROM refresh_sessions WHERE id=$1", [row.replaced_by]);
+          if (succ) {
+            await audit(this.db.pool, { shopId: null, actorId: row.user_id, action: "auth.refresh.grace_reuse", entity: "session", entityId: succ.id });
+            row = succ;
+            continue;
+          }
+        }
         await this.revokeFamily(row.family_id, "reuse_detected");
-        await audit(this.db.pool, { shopId: null, actorId: row.user_id, action: "auth.refresh.reuse_detected", entity: "session", entityId: row.id });
+        await audit(this.db.pool, {
+          shopId: null, actorId: row.user_id, action: "auth.refresh.reuse_detected", entity: "session", entityId: row.id,
+        });
         throw new UnauthorizedException("refresh_reused");
       }
-      throw e;
-    }
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        await this.db.query("UPDATE refresh_sessions SET revoked_at=now(), revoke_reason='expired' WHERE id=$1 AND revoked_at IS NULL", [row.id]);
+        throw new UnauthorizedException("refresh_expired");
+      }
+      const [u] = await this.db.query("SELECT * FROM users WHERE id=$1", [row.user_id]);
+      if (!u || !u.active || u.account_status !== "active") throw new UnauthorizedException("session_revoked");
 
+      const session = await this.claimAndIssue(row, u, meta);
+      if (session) return session;
+
+      // Another request claimed this row first (same tab or another device). Re-read it: it is now
+      // revoked as 'rotated', so the next hop either uses the grace window or reports real reuse.
+      [row] = await this.db.query("SELECT * FROM refresh_sessions WHERE id=$1", [row.id]);
+      if (!row) throw new UnauthorizedException("refresh_invalid");
+    }
+    throw new UnauthorizedException("refresh_reused");
+  }
+
+  /** Claims `row` exactly once and issues its successor in the same family; null when it lost a race. */
+  private async claimAndIssue(row: any, u: any, meta: SessionMeta): Promise<SessionPayload | null> {
+    const newId = randomUUID();
+    const refreshToken = newOpaqueToken();
+    let claimed = true;
+    await this.db.tx(async (c) => {
+      const claim = await c.query(
+        "UPDATE refresh_sessions SET revoked_at=now(), revoke_reason='rotated', last_used_at=now() WHERE id=$1 AND revoked_at IS NULL RETURNING id",
+        [row.id],
+      );
+      if (!claim.rowCount) { claimed = false; return; }
+      await c.query(
+        `INSERT INTO refresh_sessions(id, user_id, family_id, token_hash, device_id, user_agent, ip, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [newId, u.id, row.family_id, hashToken(refreshToken), meta.deviceId ?? row.device_id,
+          meta.userAgent?.slice(0, 300) ?? row.user_agent, meta.ip ?? row.ip,
+          new Date(Date.now() + refreshTtlDays() * 86_400_000)],
+      );
+      await c.query("UPDATE refresh_sessions SET replaced_by=$2 WHERE id=$1", [row.id, newId]);
+    });
+    if (!claimed) return null;
     const { token, expiresIn } = await this.signAccess(u);
     return { token, refreshToken, expiresIn, user: sessionUser(u) };
   }

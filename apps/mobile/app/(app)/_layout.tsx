@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, Text, View } from "react-native";
 import { Redirect, Slot, usePathname, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { SyncBadge, useWide } from "../../src/components/ui";
+import { Banner, Button, SyncBadge, useWide } from "../../src/components/ui";
 import { Icon, navIcon } from "../../src/components/icons";
 import { ThemeSwitcher } from "../../src/components/theme-switcher";
 import { useLang, useT, type Key } from "../../src/localization";
@@ -49,7 +49,7 @@ function TabIndicator({ active }: { active: boolean }) {
 }
 
 export default function AppLayout() {
-  const { token, user } = useSession();
+  const { user, expired, logout } = useSession();
   const t = useT(); const c = useTheme(); const wide = useWide(); const path = usePathname(); const router = useRouter();
   const { lang, set } = useLang(); const insets = useSafeAreaInsets();
   const online = useSync((s) => s.online);
@@ -88,6 +88,15 @@ export default function AppLayout() {
       <Text style={{ color: c.inkSoft, fontWeight: "700", fontSize: 11 }}>{lang === "en" ? "RW" : "EN"}</Text>
     </Pressable>
   );
+
+  // One recovery point on every screen: the server rejected the refresh credential, so the user has
+  // to sign in again. Nothing local is touched — the outbox keeps syncing after the new sign-in.
+  const expiredBanner = expired ? (
+    <View style={{ paddingHorizontal: wide ? space.xl : space.lg, paddingTop: space.sm }}>
+      <Banner tone="danger" title={t("session.expiredTitle")} text={t("session.expired")}
+        action={<Button testID="session-signin" label={t("session.signIn")} onPress={() => void logout().then(() => router.replace("/login"))} />} />
+    </View>
+  ) : null;
 
   const syncControl = (
     <Pressable onPress={() => user.role !== "system_admin" && router.push("/sync")} disabled={user.role === "system_admin"}
@@ -182,6 +191,7 @@ export default function AppLayout() {
         </Animated.View>
         <View style={{ flex: 1, minWidth: 0 }}>
           {top}
+          {expiredBanner}
           <Slot />
         </View>
       </View>
@@ -192,6 +202,7 @@ export default function AppLayout() {
   return (
     <View style={{ flex: 1, backgroundColor: c.bg }}>
       {top}
+      {expiredBanner}
       <View style={{ flex: 1 }}><Slot /></View>
       <View style={{ flexDirection: "row", borderTopWidth: 1, borderTopColor: c.line, backgroundColor: c.surface, paddingBottom: insets.bottom }}>
         {tabs.map((item) => {

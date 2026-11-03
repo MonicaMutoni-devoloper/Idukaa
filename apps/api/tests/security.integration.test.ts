@@ -283,7 +283,7 @@ test("a 2FA challenge is rate-limited: five wrong codes invalidate it", { skip }
 
 /* ------------------------------------------------------------------ refresh sessions */
 
-test("refresh tokens rotate, reuse is detected and the whole family is revoked", { skip }, async () => {
+test("refresh tokens rotate and reuse outside the grace window revokes the whole family", { skip }, async () => {
   const u = await makeUser(shopA, "manager", `refresh-${Date.now()}@security.test`);
   const session = await auth.login(u.email, PASSWORD, meta());
   const rotated = await auth.refresh(session.refreshToken, meta());
@@ -297,11 +297,57 @@ test("refresh tokens rotate, reuse is detected and the whole family is revoked",
   assert.ok(stored[0].revoked_at);
   assert.equal(stored[0].replaced_by, stored[1].id);
 
-  await assert.rejects(() => auth.refresh(session.refreshToken, meta()), /refresh_reused/);
-  await assert.rejects(() => auth.refresh(rotated.refreshToken, meta()), /refresh_reused/,
-    "reusing a rotated token revokes the new token in the same family");
+  // A real theft presents the old token long after the rotation: with the grace window disabled the
+  // original, strict behaviour applies (revoke every session in the family).
+  process.env.REFRESH_REUSE_GRACE_SECONDS = "0";
+  try {
+    await assert.rejects(() => auth.refresh(session.refreshToken, meta()), /refresh_reused/);
+    await assert.rejects(() => auth.refresh(rotated.refreshToken, meta()), /refresh_reused/,
+      "reusing a rotated token revokes the new token in the same family");
+  } finally {
+    delete process.env.REFRESH_REUSE_GRACE_SECONDS;
+  }
   assert.ok(Number((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action='auth.refresh.reuse_detected' AND actor_id=$1", [u.id])).rows[0].n) >= 1,
     "reuse is recorded in the audit log");
+});
+
+/* The two cases below are the production failure: the browser presents a refresh token that was
+ * rotated moments ago (two tabs refreshing together, or a rotation whose Set-Cookie never arrived
+ * because the client timed out during a cold start). Neither may destroy the session. */
+
+test("a quick replay inside the grace window keeps the family alive and rotates the live successor", { skip }, async () => {
+  delete process.env.REFRESH_REUSE_GRACE_SECONDS; // default 30s
+  const u = await makeUser(shopA, "manager", `grace-${Date.now()}@security.test`);
+  const first = await auth.login(u.email, PASSWORD, meta("tab-a"));
+  const second = await auth.refresh(first.refreshToken, meta("tab-a")); // tab A refreshes
+  const third = await auth.refresh(first.refreshToken, meta("tab-b")); // tab B still holds the old one
+
+  assert.ok(third.token && third.refreshToken, "the stale tab gets a working session instead of a lockout");
+  assert.notEqual(third.refreshToken, second.refreshToken, "the replay rotates the live successor");
+  assert.ok((await auth.refresh(third.refreshToken, meta("tab-b"))).token, "the newest token keeps working");
+
+  const live = await pool.query("SELECT count(*)::int AS n FROM refresh_sessions WHERE user_id=$1 AND revoked_at IS NULL", [u.id]);
+  assert.equal(live.rows[0].n, 1, "one live session row remains");
+  assert.ok(Number((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action='auth.refresh.grace_reuse' AND actor_id=$1", [u.id])).rows[0].n) >= 1,
+    "the benign replay is recorded distinctly from reuse detection");
+});
+
+test("simultaneous refreshes with one token all succeed and never revoke the session", { skip }, async () => {
+  delete process.env.REFRESH_REUSE_GRACE_SECONDS;
+  const u = await makeUser(shopA, "manager", `race-${Date.now()}@security.test`);
+  const session = await auth.login(u.email, PASSWORD, meta());
+
+  const results = await Promise.all([
+    auth.refresh(session.refreshToken, meta("a")),
+    auth.refresh(session.refreshToken, meta("b")),
+    auth.refresh(session.refreshToken, meta("c")),
+  ]);
+  for (const r of results) {
+    assert.ok(r.token, "every concurrent caller receives an access token");
+    assert.ok((await auth.refresh(r.refreshToken, meta())).token, "every issued refresh token is usable");
+  }
+  const live = await pool.query("SELECT count(*)::int AS n FROM refresh_sessions WHERE user_id=$1 AND revoked_at IS NULL", [u.id]);
+  assert.equal(live.rows[0].n, 1, "the session family is intact after the race");
 });
 
 test("logout revokes one session, logout-all revokes every session and old access tokens", { skip }, async () => {

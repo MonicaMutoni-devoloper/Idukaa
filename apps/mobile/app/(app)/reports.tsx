@@ -4,7 +4,7 @@ import { useLocalSearchParams } from "expo-router";
 import { formatQty, formatRwf } from "@sms/shared";
 import { Badge, Banner, Button, Card, ConfirmDialog, DataTable, Empty, ErrorState, Field, KeyValue, Loading, Modal, Screen, Segmented } from "../../src/components/ui";
 import { useT } from "../../src/localization";
-import { API_URL, request, useSession } from "../../src/services/api";
+import { API_URL, ApiError, request, useSession } from "../../src/services/api";
 import { addDaysToDay, customRange, rangeFor, todayDay, type Preset, type Range } from "../../src/services/util";
 import { useSync } from "../../src/synchronization/engine";
 import { space, type, useTheme } from "../../src/theme/tokens";
@@ -55,6 +55,9 @@ export default function Reports() {
   const [rows, setRows] = useState<any[]>([]);
   const [itemTotals, setItemTotals] = useState<ItemTotals | null>(null);
   const [failed, setFailed] = useState(false);
+  // A rejected session is not an offline error: say so, or the user keeps waiting for a connection
+  // that is already working. The value tracks the last failed load.
+  const [authIssue, setAuthIssue] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<{ tone: "ok" | "danger"; text: string } | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -78,20 +81,23 @@ export default function Reports() {
 
   const load = useCallback(() => {
     if (view === "summary") { setLoading(false); setFailed(false); setRows([]); setItemTotals(null); return; }
-    setLoading(true); setFailed(false);
+    setLoading(true); setFailed(false); setAuthIssue(false);
+    const failedWith = (e: unknown) => { setFailed(true); setAuthIssue(e instanceof ApiError && e.status === 401); };
     const q = `from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
     if (view === "items") {
       request<{ items: ItemRow[]; totals: ItemTotals }>(`/reports/items?${q}`)
         .then((r) => { setRows(r.items); setItemTotals(r.totals); })
-        .catch(() => { setFailed(true); setRows([]); setItemTotals(null); })
+        .catch((e) => { failedWith(e); setRows([]); setItemTotals(null); })
         .finally(() => setLoading(false));
       return;
     }
     setItemTotals(null);
     request<any[]>(`/reports/transactions?kind=${view}&${q}`)
-      .then((r) => setRows(r)).catch(() => { setFailed(true); setRows([]); }).finally(() => setLoading(false));
+      .then((r) => setRows(r)).catch((e) => { failedWith(e); setRows([]); }).finally(() => setLoading(false));
   }, [view, from, to]);
-  useEffect(() => { load(); }, [load]);
+  // `token` is a dependency on purpose: after an expired session is replaced by a fresh sign-in the
+  // period reloads by itself instead of asking the user to press Retry.
+  useEffect(() => { load(); }, [load, token]);
 
   const applyCustom = () => {
     const r = customRange(customFrom, customTo);
@@ -306,7 +312,7 @@ export default function Reports() {
         <Field testID="reports-items-search" label={t("common.search")} placeholder={t("stock.searchPlaceholder")} value={query} onChangeText={setQuery} autoCorrect={false} />
       ) : null}
 
-      {view === "summary" ? null : loading ? <Loading /> : failed ? <ErrorState onRetry={load} text={t("reports.offline")} /> : (
+      {view === "summary" ? null : loading ? <Loading /> : failed ? <ErrorState onRetry={load} text={t(authIssue ? "reports.sessionExpired" : "reports.offline")} /> : (
         <DataTable rows={filtered} cols={cols}
           onRow={view === "sales" ? (r: any) => void openSale(r.id) : undefined}
           rowTestID={view === "sales" ? (r: any) => `sale-open-${r.id}` : undefined}
@@ -425,18 +431,22 @@ function Stat({ label, value, delta, tone, hint, testID, emphasis }: {
  */
 function SummaryPanel({ from, to }: { from: string; to: string }) {
   const t = useT(); const c = useTheme();
+  const { token } = useSession();
   const [data, setData] = useState<SummaryPayload | null>(null);
   const [failed, setFailed] = useState(false);
+  const [authIssue, setAuthIssue] = useState(false);
   const [loading, setLoading] = useState(true);
   const load = useCallback(() => {
-    setLoading(true); setFailed(false);
+    setLoading(true); setFailed(false); setAuthIssue(false);
     request<SummaryPayload>(`/reports/summary?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
-      .then((r) => setData(r)).catch(() => { setFailed(true); setData(null); }).finally(() => setLoading(false));
+      .then((r) => setData(r))
+      .catch((e) => { setFailed(true); setAuthIssue(e instanceof ApiError && e.status === 401); setData(null); })
+      .finally(() => setLoading(false));
   }, [from, to]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, token]);
 
   if (loading) return <Loading />;
-  if (failed || !data) return <ErrorState onRetry={load} text={t("reports.offline")} />;
+  if (failed || !data) return <ErrorState onRetry={load} text={t(authIssue ? "reports.sessionExpired" : "reports.offline")} />;
   const cur = data.current; const cmp = data.comparison;
   const rows: [string, string][] = [
     [t("reports.grossSales"), formatRwf(cur.grossSales)],

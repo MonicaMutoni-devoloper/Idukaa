@@ -3,6 +3,7 @@ import { Throttle } from "@nestjs/throttler";
 import type { Request, Response } from "express";
 import { z } from "zod";
 import { Me, Public, type AuthUser } from "../common/auth";
+import { authLog, refreshFailureCategory } from "../common/auth-log";
 import { clearAuthCookies, clientMeta, cookieCsrfOk, readCookie, refreshCookieMaxAge, setAuthCookies } from "../common/http";
 import { AuthService } from "./auth.service";
 
@@ -34,20 +35,47 @@ export class AuthController {
   async login(@Body() body: unknown, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const { email, password } = Login.parse(body);
     const result = await this.auth.login(email, password, clientMeta(req));
-    if ("twoFactorRequired" in result) return result; // no session and no cookie until the code is verified
+    if ("twoFactorRequired" in result) {
+      authLog(req, "login.challenged", "ok");
+      return result; // no session and no cookie until the code is verified
+    }
+    authLog(req, "login.ok", "ok", { userId: result.user.id });
     setAuthCookies(req, res, result.refreshToken, refreshCookieMaxAge());
     return result;
   }
 
-  /** Rotates the refresh token. The old one stops working immediately. */
+  /**
+   * Rotates the refresh token. The old one keeps working for a short grace window (so a racing tab or
+   * a lost cookie cannot lock the user out), then stops working entirely.
+   */
   @Public() @Throttle({ default: { limit: 30, ttl: 60_000 } }) @Post("refresh")
   async refresh(@Body() body: unknown, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const b = RefreshBody.safeParse(body ?? {});
-    const presented = presentedRefreshToken(req, b.success ? b.data?.refreshToken : undefined);
-    if (!presented) throw new UnauthorizedException("refresh_invalid");
-    const session = await this.auth.refresh(presented, clientMeta(req));
-    setAuthCookies(req, res, session.refreshToken, refreshCookieMaxAge());
-    return session;
+    const fromCookie = !!readCookie(req, "sms_rt");
+    let presented: string | undefined;
+    try {
+      presented = presentedRefreshToken(req, b.success ? b.data?.refreshToken : undefined);
+    } catch (e) {
+      // The cookie arrived but the CSRF header did not match: a non-browser caller, never a real user.
+      authLog(req, "refresh.failed", "csrf_rejected", { cookiePresent: fromCookie });
+      throw e;
+    }
+    if (!presented) {
+      // Evidence for the transport question: on a cross-site deployment a Strict cookie is simply
+      // never sent, so this category with crossSite=true means "the browser dropped the cookie".
+      authLog(req, "refresh.failed", "missing_refresh_credential", { cookiePresent: fromCookie, bodyToken: !!b.success && !!b.data?.refreshToken });
+      throw new UnauthorizedException("refresh_invalid");
+    }
+    try {
+      const session = await this.auth.refresh(presented, clientMeta(req));
+      authLog(req, "refresh.ok", "ok", { userId: session.user.id, cookiePresent: fromCookie });
+      setAuthCookies(req, res, session.refreshToken, refreshCookieMaxAge());
+      return session;
+    } catch (e) {
+      const message = (e as Error).message;
+      authLog(req, "refresh.failed", refreshFailureCategory(message), { cookiePresent: fromCookie, detail: message });
+      throw e;
+    }
   }
 
   @Public() @Throttle({ default: { limit: 30, ttl: 60_000 } }) @Post("logout")

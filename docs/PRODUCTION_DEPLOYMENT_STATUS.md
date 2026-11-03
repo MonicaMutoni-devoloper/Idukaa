@@ -328,22 +328,54 @@ origin. A mismatch shows up as a browser CORS error on every request while `/hea
 
 ---
 
-## 7. Cross-site cookie constraint — decision needed
+## 7. Cross-site cookie constraint — RESOLVED in code (3 Nov 2026)
 
-The web app keeps its refresh token in an `HttpOnly`, `SameSite=Strict` cookie and reloads exchange
-it for a new access token. `Strict` only works when the site and the API share a registrable domain.
-With the default hosts (`something.vercel.app` → `something.onrender.com`) the request is **cross-site**,
-so the cookie would be dropped and **every page reload would require signing in again**.
+The web app keeps its refresh token in an `HttpOnly` cookie. The default hosts put the web app on
+`*.vercel.app` and the API on `*.onrender.com`, which are **different sites**. That produced the live
+`POST /auth/refresh 401` loop, through two independent mechanisms:
 
-Two options (both verified working in code):
+1. **Transport.** The cookie was `SameSite=Strict`. A browser does not attach a `Strict` cookie to a
+   cross-site request, so the API never received it and answered `401 refresh_invalid` — on the first
+   load, on every reload, for every user.
+2. **CSRF check.** Even with the cookie attached, `sms_csrf` belongs to the API host. JavaScript on the
+   web origin can never read it (`document.cookie` is origin-scoped), so the double-submit header could
+   not match and the call was rejected `403 csrf_failed`.
 
-- **A — custom domains (recommended):** point `app.<yourdomain>` at Vercel and `api.<yourdomain>` at
-  Render (same parent domain). Keep `COOKIE_SAMESITE` unset → `Strict`, the strongest posture.
-- **B — cross-site cookies:** set `COOKIE_SAMESITE=none` on Render. Verified output:
-  `Set-Cookie: sms_rt=…; Secure; SameSite=None`. Protection still holds: HTTPS-only, `HttpOnly`,
-  and the double-submit `x-csrf-token` header (client already sends it).
+What the code does now:
 
-Until you choose, the app works but a reload on default hosts will re-prompt for sign-in.
+- **SameSite is derived per request** from the caller's `Origin` (`apps/api/src/common/http.ts`):
+  same registrable domain → `strict`; different sites → `none` + `Secure`. An explicit
+  `COOKIE_SAMESITE` still overrides. No deployment-time configuration is required.
+- **CSRF adapts to the deployment**: matching double submit wins; when the caller provably cannot read
+  the cookie (cross-site), the API trusts its own `CORS_ORIGINS` allow-list plus the required header.
+  A page that is not allow-listed can never pass the preflight, and `Origin` is set by the browser and
+  cannot be forged by script.
+- **Rotation no longer punishes races.** A refresh token presented within `REFRESH_REUSE_GRACE_SECONDS`
+  (default 30) of its rotation — two tabs, a reload during a Render cold start, a client that timed out
+  mid-rotation and lost the `Set-Cookie` — now rotates the live successor instead of revoking the whole
+  session family. Outside that window, reuse is still treated as theft and revokes the family.
+
+Verified in a real browser, cross-site, against the local API
+(`http://web.localhost:8081` → `http://api.localhost:3000`, the same shape as Vercel → Render):
+login `201`, `POST /auth/refresh` `201` with the cookie actually received (`cookiePresent: true` in the
+API log), and a second refresh `201` as well.
+
+**Still recommended (deployment, not code):** give the app `app.<yourdomain>` and the API
+`api.<yourdomain>`. Same-site cookies are first-party, so they are immune to Chrome's third-party
+cookie phase-out; the cross-site path above works today but is the one browsers are restricting.
+
+---
+
+## 7.1 Authentication diagnostics (3 Nov 2026)
+
+Every auth decision now emits one greppable JSON line (never a token, cookie, password or header):
+`evt`, `category`, `requestId`, `method`, `path`, `crossSite`, plus non-secret context. Categories:
+`missing_refresh_credential` (cookie never arrived — a transport/cookie problem), `csrf_rejected`,
+`unknown_token`, `token_expired`, `token_reused`, `session_revoked`, `invalid_access_token`,
+`session_state_mismatch`, `shop_suspended`, `role_not_allowed`, `database_error`, `ok`. `x-request-id`
+is echoed on every response and accepts an inbound value, so a browser console error, a Render log line
+and the audit row can be matched. `auth.refresh.grace_reuse` is audited separately from
+`auth.refresh.reuse_detected`, so a benign race is never mistaken for a stolen token.
 
 ---
 
@@ -758,3 +790,45 @@ release pipeline; a web build says nothing about native packages. Native work sh
 - The E2E script writes demo/test records into whatever database it points at — never point it at
   production.
 - Login throttle is 8/min per IP; a shared NAT can rate-limit a busy shop.
+
+---
+
+## 11. Session recovery (3 Nov 2026) — web and native
+
+The 401 loop was three problems, not one. §7 covers the server side; this is what changed in the app:
+
+- **One refresh, never a loop.** Concurrent 401s share a single rotation (`refreshSession()` is
+  single-flight). A definitive rejection (`401`/`403`) sets `sessionExpired` and stops automatic
+  refresh until the user signs in again; a transport failure instead backs off 15s and leaves the
+  session marked valid. Before, every failed request fired its own refresh, so one bad cookie produced
+  the refresh storm visible in the production console.
+- **No more "unreachable server" for an authorization failure.** Reports, the period summary and the
+  dashboard now classify the error: `401` → "Your session expired. Sign in again…", network failure →
+  the existing offline message. They also reload automatically when a new token arrives.
+- **The outbox is never touched.** Expiring a session only clears the in-memory token. Queued sales,
+  purchases and expenses stay in SQLite/IndexedDB, bound to their user and shop, and the sync engine
+  resumes (and revalidates permissions) the moment a fresh sign-in produces a token.
+- **One recovery point.** The app shell shows a "Session expired — Sign in again" banner on every
+  screen; signing in clears it and sync restarts on its own.
+- **Refresh timeout raised** from 12s to 30s, because a Render cold start regularly exceeds 12s and the
+  aborted request was what lost the rotated `Set-Cookie`. The server-side grace window makes that retry
+  safe as well.
+- **Service worker cache bumped** to `sms-shell-v3` so no client keeps running a bundle with the old
+  refresh flow.
+
+### Tests executed (3 Nov 2026, local)
+
+| Suite | Result |
+|---|---|
+| `npm run typecheck` (all workspaces) | ✅ exit 0 |
+| API integration (`TEST_DATABASE_URL=…/sms_test`) | ✅ **79 pass / 0 fail** |
+| — new: cookie/CSRF policy unit tests | ✅ 8 cases (site comparison, auto SameSite, allow-list CSRF) |
+| — new: concurrent refresh (`Promise.all` × 3, one token) | ✅ every caller gets a session, one live row |
+| — new: replay inside the grace window | ✅ family survives, successor rotates, audited as `grace_reuse` |
+| — updated: reuse with the grace window disabled | ✅ family revoked, `reuse_detected` audited |
+| `npm run test:shared` | ✅ 32 pass |
+| `npm run test:mobile` (i18n parity) | ✅ 5 pass |
+| Browser cross-site probe (Vercel→Render shape) | ✅ login 201, refresh 201, second refresh 201 |
+
+**Not verified:** the live deployment until this commit is pushed (Vercel and Render redeploy from
+`main`); a signed-in production walkthrough still needs credentials, which are not available here.
