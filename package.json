@@ -13,7 +13,7 @@
   "scripts": {
     "test:shared": "npm run test -w @sms/shared",
     "test:api": "node scripts/require-test-db.mjs && npm run test -w @sms/api",
-    "test:mobile": "npm run test:i18n -w @sms/mobile",
+    "test:mobile": "npm run test:i18n -w @sms/mobile && npm run test:dashboard -w @sms/mobile",
     "migrate": "npm run migrate -w @sms/api",
     "seed": "npm run seed -w @sms/api",
     "api": "npm run start:dev -w @sms/api",

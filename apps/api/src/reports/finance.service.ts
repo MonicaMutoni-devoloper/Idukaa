@@ -49,7 +49,9 @@ export class FinanceService {
 
   /** Full stock ledger for a shop, grouped per product and ordered by occurrence (costing replay input). */
   async movements(shopId: string): Promise<Map<string, Movement[]>> {
-    const rows = await this.db.query("SELECT product_id, type, qty, unit_cost, to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at FROM stock_movements WHERE shop_id=$1 ORDER BY occurred_at, id", [shopId]);
+    // COALESCE on the timestamp and a filter on impossible rows: the ledger is NOT NULL by schema,
+    // but a report must never throw because one legacy row cannot be ordered (see valuation#byTime).
+    const rows = await this.db.query("SELECT product_id, type, qty, unit_cost, to_char(COALESCE(occurred_at, recorded_at) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at FROM stock_movements WHERE shop_id=$1 AND COALESCE(occurred_at, recorded_at) IS NOT NULL ORDER BY COALESCE(occurred_at, recorded_at), id", [shopId]);
     const m = new Map<string, Movement[]>();
     for (const r of rows) { const l = m.get(r.product_id) ?? []; l.push({ type: r.type, qty: r.qty, unitCost: r.unit_cost ?? undefined, occurredAt: r.at }); m.set(r.product_id, l); }
     return m;
@@ -141,7 +143,7 @@ export class FinanceService {
     const items: ProductFinanceRow[] = [];
 
     for (const p of products) {
-      const list = [...(mv.get(p.id) ?? [])].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+      const list = [...(mv.get(p.id) ?? [])].sort((a, b) => String(a.occurredAt ?? "").localeCompare(String(b.occurredAt ?? "")));
       const r = replayLedger(list);
       const pc = periodCosts(list, from, to);
       let lossCount = 0, stockouts = 0, balance = 0;

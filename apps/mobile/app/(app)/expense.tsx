@@ -28,7 +28,7 @@ export default function Expense() {
     if (!incurredAt) { setErr(t("expense.dateError")); return; }
     setErr(null); setBusy(true);
     try {
-      await enqueue(user.id, uuid(), "expense.create", { expenseId: uuid(), category: cat, amount: a, paid, incurredAt, note: note.trim() || undefined });
+      await enqueue(user.id, uuid(), "expense.create", { expenseId: uuid(), category: cat, amount: a, paid, incurredAt, note: note.trim() || undefined }, {}, undefined, incurredAt);
       setAmount(""); setNote(""); setSaved(true); setDay(today());
       await refreshCounts(); void syncNow();
     } catch { setErr(t("common.error")); } finally { setBusy(false); }

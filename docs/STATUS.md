@@ -154,8 +154,13 @@ reset, 2FA and notifications.
 
 ## 4. Known limitations and deliberate choices
 
-1. **Reports need connectivity.** The owner dashboard falls back to the last downloaded copy with a
-   timestamp; transaction lists, CSV export and voiding do not.
+1. **The dashboard works offline; other reports still need connectivity.** The dashboard is now
+   calculated on the device from the records saved there (see `apps/mobile/src/services/local-dashboard.ts`)
+   and labels each figure as calculated locally, pending synchronization, synchronized, failed or in
+   conflict. It falls back to the last downloaded copy only when the device has no records for the
+   requested period. Coverage starts at the oldest record on that device: older history still needs a
+   connection, and the dashboard says so. Transaction lists, CSV export and voiding still need
+   connectivity.
 2. **Costing is moving weighted average**, recomputed from the ledger. Voiding a sale returns stock at the
    current average cost.
 3. **Stock corrections** only happen through owner-approved adjustments.

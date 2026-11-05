@@ -30,8 +30,14 @@ function mulDiv(a: number, b: number, d: number): number {
 }
 const INBOUND_COSTED: MovementType[] = ["opening", "receipt", "transfer_in"];
 
+/**
+ * Chronological order for a ledger replay. Missing timestamps sort first instead of throwing:
+ * a single malformed row must never take a whole report down with "cannot read localeCompare".
+ */
+const byTime = (a: Movement, b: Movement) => String(a.occurredAt ?? "").localeCompare(String(b.occurredAt ?? ""));
+
 export function replayLedger(movements: Movement[]): ValuationResult {
-  const sorted = [...movements].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+  const sorted = [...movements].sort(byTime);
   let onHand = 0, value = 0, cogs = 0, lossValue = 0;
   const per: Rwf[] = [];
   for (const m of sorted) {
@@ -80,7 +86,7 @@ export function compareCount(expected: QtyMilli, counted: QtyMilli): Discrepancy
 
 /** COGS and loss value attributable to movements inside [from, to) for ONE product, using the full-history moving average. */
 export function periodCosts(movements: Movement[], from: string, to: string): { cogs: Rwf; lossValue: Rwf } {
-  const sorted = [...movements].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+  const sorted = [...movements].sort(byTime);
   const r = replayLedger(sorted);
   let cogs = 0, lossValue = 0;
   sorted.forEach((m, i) => {

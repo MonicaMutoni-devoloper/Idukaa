@@ -132,6 +132,17 @@ async function adopt(session: SessionResponse) {
   useSession.setState({ token: session.token, user: session.user, expired: false });
 }
 
+/**
+ * Only a 401/403 from /auth/refresh proves the credential itself is dead. Everything else — a 429
+ * from the throttle, a Render 502/503 during a cold start, a 500 while the database reconnects —
+ * says nothing about the session.
+ *
+ * Treating every ApiError as a rejection is what produced the recurring "session expired" message:
+ * one bad-tempered refresh during a cold start set `refreshBlocked`, dropped the access token and
+ * forced a sign-in, even though the very same credential would have worked a second later.
+ */
+const isDefinitiveRejection = (e: ApiError) => e.status === 401 || e.status === 403;
+
 /** The server rejected the refresh credential: the session is over until a new sign-in. */
 function blockSession(status: number, reason: string) {
   refreshBlocked = true;
@@ -139,6 +150,12 @@ function blockSession(status: number, reason: string) {
   // Safe diagnostic: never a token, only the verdict and HTTP status (categories match the API logs).
   console.warn("[auth] refresh rejected", { status, reason });
   useSession.getState().expire();
+}
+
+/** A refresh that failed for a reason unrelated to the credential: back off, keep the session. */
+function deferRefresh(status: number) {
+  refreshRetryAt = Date.now() + REFRESH_BACKOFF_MS;
+  console.warn("[auth] refresh deferred", { status });
 }
 
 const refreshOnce = (body: Record<string, unknown>) =>
@@ -171,15 +188,19 @@ function refreshSession(force = false): Promise<boolean> {
       try {
         session = await refreshOnce(body);
       } catch (e) {
-        if (e instanceof ApiError) { blockSession(e.status, String(e.message)); return false; }
+        if (e instanceof ApiError && isDefinitiveRejection(e)) { blockSession(e.status, String(e.message)); return false; }
+        // A transient answer (502/503/429/500) or a dropped connection: one immediate retry, then
+        // back off for a while. The refresh credential was never declared invalid, so the session stays.
         await new Promise((r) => setTimeout(r, 400));
         session = await refreshOnce(body);
       }
       await adopt(session);
       return true;
     } catch (e) {
-      if (e instanceof ApiError) blockSession(e.status, String(e.message));
-      else refreshRetryAt = Date.now() + REFRESH_BACKOFF_MS;
+      if (e instanceof ApiError) {
+        if (isDefinitiveRejection(e)) blockSession(e.status, String(e.message));
+        else deferRefresh(e.status);
+      } else refreshRetryAt = Date.now() + REFRESH_BACKOFF_MS;
       return false;
     } finally {
       refreshInFlight = null;
@@ -291,7 +312,10 @@ export async function request<T>(path: string, o: RequestOptions = {}): Promise<
     return await fetchJson<T>(path, o);
   } catch (e) {
     if (!(e instanceof ApiError) || e.status !== 401 || o.auth === false) throw e;
-    if (await refreshSession()) return fetchJson<T>(path, o);
+    // Force one refresh for this 401 even if a previous failure is still backing off: a 401 means
+    // the server answered, so the credential is worth exactly one more attempt. Single-flight keeps
+    // every concurrent 401 sharing it, and the retry below happens at most once per request.
+    if (await refreshSession(true)) return fetchJson<T>(path, o);
     // The refresh already marked the session expired when the server rejected the credential. A
     // transport failure leaves the session intact (it may still be valid) and backs off instead.
     throw e;

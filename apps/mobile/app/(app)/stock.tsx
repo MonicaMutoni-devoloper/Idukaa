@@ -142,7 +142,8 @@ export default function Stock() {
     if (!lines.length) { setErr(t("stock.countEmpty")); return; }
     setErr(null); setBusy(true);
     try {
-      await enqueue(user.id, uuid(), "count.submit", { countId: uuid(), countedAt: new Date().toISOString(), lines });
+      const countedAt = new Date().toISOString();
+      await enqueue(user.id, uuid(), "count.submit", { countId: uuid(), countedAt, lines }, {}, undefined, countedAt);
       setCounts({}); setCounting(false); setMsg(t("stock.countSaved"));
       await refreshCounts(); void syncNow();
     } catch { setErr(t("common.error")); } finally { setBusy(false); }
@@ -202,7 +203,7 @@ export default function Stock() {
     };
     try {
       // The operation id is created once per save; a retried sync reuses it and the server deduplicates.
-      await enqueue(user.id, uuid(), "purchase.create", payload, { [stocking.id]: baseQty });
+      await enqueue(user.id, uuid(), "purchase.create", payload, { [stocking.id]: baseQty }, undefined, when.toISOString());
       setStocking(null); setS(emptyStock()); setMsg(t("stock.stockSaved"));
       await refreshCounts(); void syncNow();
     } catch { setSErr(t("common.error")); } finally { setSBusy(false); }

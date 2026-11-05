@@ -124,7 +124,9 @@ export default function Sell() {
     const deltas: Record<string, number> = {}; payload.lines.forEach((l) => (deltas[l.productId] = (deltas[l.productId] ?? 0) - l.qty));
     setBusy(true); setSaveError(null);
     try {
-      await enqueue(user.id, uuid(), "sale.create", payload, deltas); // durable BEFORE success is shown
+      // `at` is passed as the record timestamp so today's local figures place the sale on the
+      // Kigali business day it was made, not on whichever day the sync later ran.
+      await enqueue(user.id, uuid(), "sale.create", payload, deltas, undefined, at); // durable BEFORE success is shown
       setLines([]); setDiscount("0"); setPaid(null); setErrs({});
       setSaved({ total: saleTotal, count, ref: `RC-${saleId.slice(0, 8).toUpperCase()}`, paid: appliedPaid, change, at, method });
       await refreshCounts(); void syncNow();

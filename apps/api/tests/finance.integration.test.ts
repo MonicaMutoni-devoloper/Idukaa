@@ -313,6 +313,45 @@ test("dashboard: headline snapshots, monthly series and profitability slices", {
   assert.equal(d.operations.unitsSold, 8000);
 });
 
+test("dashboard: a shop with no transactions at all returns valid zeros, not a 500", { skip }, async () => {
+  // A brand-new shop (no products, no sales, no expenses) is the case that used to be reported as a
+  // failing dashboard. Every collection must be an empty array and every number a real zero.
+  const shopC = (await pool.query("INSERT INTO shops(name) VALUES ('Empty shop C') RETURNING id")).rows[0].id;
+  const ownerC = await makeUser(shopC, "owner", "owner-c@finance.test");
+  const d = await reports.dashboard(ownerC, { from: JAN.from, to: JAN.to });
+  assert.equal(d.operations.netSales, 0);
+  assert.equal(d.operations.transactions, 0);
+  assert.equal(d.operations.unitsSold, 0);
+  assert.equal(d.operations.productCount, 0);
+  assert.equal(d.financials.netSales, 0);
+  assert.equal(d.financials.cogs, 0);
+  assert.equal(d.financials.operatingResultAfterStockLosses, 0);
+  assert.equal(d.financials.grossMarginBps, null, "no sales: the margin is unavailable, not 0%");
+  assert.equal(d.financials.monthly.length, 12);
+  assert.ok(d.financials.monthly.every((m: any) => m.operatingResult === 0));
+  assert.deepEqual(d.trend, []);
+  assert.deepEqual(d.topProducts, []);
+  assert.deepEqual(d.activity, []);
+  assert.deepEqual(d.lowStock, []);
+
+  // A shop with a catalogue but no sales is not empty — the products must still be counted.
+  const prodC = uuid();
+  await svc.push(ownerC, "fin-dev", [
+    op("product.upsert", { productId: prodC, code: "FC-1", name: "Untouched", unit: "pcs", sellingPrice: 500, lowStockThreshold: 0 }),
+  ]);
+  const noSales = await reports.dashboard(ownerC, { from: JAN.from, to: JAN.to });
+  assert.equal(noSales.operations.productCount, 1);
+  assert.equal(noSales.operations.netSales, 0);
+  assert.equal(noSales.financials.costBasisIncomplete, false, "no inbound movement means no unknown cost");
+});
+
+test("dashboard: an invalid range is a 400, never a 500", { skip }, async () => {
+  await assert.rejects(() => reports.dashboard(owner, { from: "not-a-date", to: JAN.to }),
+    (e: any) => e.getStatus?.() === 400 || e.status === 400);
+  await assert.rejects(() => reports.dashboard(owner, { from: JAN.to, to: JAN.from }),
+    (e: any) => e.getStatus?.() === 400 || e.status === 400, "from must be before to");
+});
+
 test("empty periods: everything is zero and the margin is unavailable, not 0%", { skip }, async () => {
   const s = await finance.period(shopA, "2030-01-01T00:00:00.000Z", "2030-01-02T00:00:00.000Z");
   assert.equal(s.netSales, 0);

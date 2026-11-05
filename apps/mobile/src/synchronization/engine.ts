@@ -5,8 +5,17 @@ import { ApiError, ensureSession, getDeviceId, request, sessionRejected, useSess
 import { applyPull, applyResults, dueOps, kvGet, kvSet, markRetry, outboxCounts, retryNow } from "../database";
 import type { OpResult, PullResponse } from "@sms/shared";
 
-export const useSync = create<{ online: boolean; running: boolean; pending: number; issues: number; awaitingApproval: number; authRequired: boolean; lastSync: string | null; dataVersion: number }>(() => ({ online: true, running: false, pending: 0, issues: 0, awaitingApproval: 0, authRequired: false, lastSync: null, dataVersion: 0 }));
-export const refreshCounts = async () => { const u = useSession.getState().user; if (!u) return; const c = await outboxCounts(u.id); useSync.setState({ pending: c.pending, issues: c.issues, awaitingApproval: c.awaitingApproval }); };
+export const useSync = create<{ online: boolean; running: boolean; pending: number; issues: number; awaitingApproval: number; authRequired: boolean; lastSync: string | null; dataVersion: number; recordsVersion: number }>(() => ({ online: true, running: false, pending: 0, issues: 0, awaitingApproval: 0, authRequired: false, lastSync: null, dataVersion: 0, recordsVersion: 0 }));
+/**
+ * Refreshes the quality-of-sync counters AND bumps `recordsVersion`, the only signal the dashboard
+ * listens to. It is called after every save and after every sync pass, so figures are recalculated
+ * exactly when a record was added or its verdict changed — never on a timer of its own.
+ */
+export const refreshCounts = async () => {
+  const u = useSession.getState().user; if (!u) return;
+  const c = await outboxCounts(u.id);
+  useSync.setState((x) => ({ pending: c.pending, issues: c.issues, awaitingApproval: c.awaitingApproval, recordsVersion: x.recordsVersion + 1 }));
+};
 
 let inFlight: Promise<void> | null = null;
 let rerunRequested = false;

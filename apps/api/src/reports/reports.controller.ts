@@ -1,5 +1,5 @@
-import { BadRequestException, Controller, ForbiddenException, Get, NotFoundException, Param, Query, Res } from "@nestjs/common";
-import type { Response } from "express";
+import { BadRequestException, Controller, ForbiddenException, Get, NotFoundException, Param, Query, Req, Res } from "@nestjs/common";
+import type { Request, Response } from "express";
 import { z } from "zod";
 import {
   TARGET_GROSS_MARGIN_BPS, allocateLineDiscounts, compare, dayRange, kigaliDay, presetRange,
@@ -8,6 +8,7 @@ import {
 import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { FinanceService, parseRange as parse } from "./finance.service";
+import { reportLog } from "../common/report-log";
 
 interface DashboardProduct { id: string; name: string; qty: string | number; net_sales: string | number }
 
@@ -17,6 +18,32 @@ export class ReportsController {
 
   /** Owner always sees profit; a manager only when the owner enabled it for the shop. Enforced here, not in the UI. */
   private canSeeFinancials(u: AuthUser): Promise<boolean> { return this.finance.canSeeFinancials(u); }
+
+  /**
+   * Runs one optional dashboard section so its failure cannot take the whole report down.
+   *
+   * The headline totals (sales, expenses, COGS, profit, stock) come from the finance service and must
+   * succeed; the supporting panels (trend charts, activity feed, staff list, expense breakdown) are
+   * decoration around them. Before this, one bad optional query — a schema drift in production, a
+   * dropped connection — answered HTTP 500 and the shop owner saw no figures at all even though the
+   * numbers were available. The failure is still recorded, with the request id, so it can be fixed.
+   */
+  private async section<T>(req: Request | undefined, name: string, run: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await run();
+    } catch (e) {
+      reportLog(req, "reports.section_failed", name, e);
+      this.degradation(req).push(name);
+      return fallback;
+    }
+  }
+
+  /** Names of the panels that could not be computed, sent with the response so the UI can say so. */
+  private degradation(req?: Request): string[] {
+    if (!req) return [];
+    const r = req as Request & { degradedSections?: string[] };
+    return (r.degradedSections ??= []);
+  }
 
   @Get("summary") @Roles("owner", "manager") async summary(@Me() u: AuthUser, @Query() q: unknown) {
     if (!(await this.canSeeFinancials(u))) throw new ForbiddenException("financials_not_permitted");
@@ -51,7 +78,7 @@ export class ReportsController {
    * The stock ledger is loaded ONCE and shared by every consumer below — never re-read per query.
    */
   @Get("dashboard")
-  async dashboard(@Me() u: AuthUser, @Query() q: unknown) {
+  async dashboard(@Me() u: AuthUser, @Query() q: unknown, @Req() req?: Request) {
     const { from, to } = parse(q);
     const shopId = u.shopId!;
     const canSeeFinancials = await this.canSeeFinancials(u);
@@ -62,34 +89,35 @@ export class ReportsController {
     const prev = await this.finance.period(shopId, prevFrom, from, moves);
     const inventory = await this.inventoryData(u, moves);
 
-    const openPurchases = (await this.db.query(
+    const openPurchases = await this.section(req, "open_purchases", () => this.db.query<{ c: number }>(
       `SELECT COUNT(DISTINCT pu.id)::int AS c FROM purchases pu JOIN purchase_lines pl ON pl.purchase_id=pu.id
-       WHERE pu.shop_id=$1 AND pl.qty_received < pl.qty_ordered`, [shopId]))[0];
+       WHERE pu.shop_id=$1 AND pl.qty_received < pl.qty_ordered`, [shopId]), []).then((r) => r[0] ?? { c: 0 });
 
-    const payables = (await this.db.query(
-      `SELECT COALESCE(SUM(total_amount - amount_paid),0)::bigint AS p FROM purchases WHERE shop_id=$1`, [shopId]))[0];
+    const payables = await this.section(req, "payables", () => this.db.query<{ p: number }>(
+      `SELECT COALESCE(SUM(total_amount - amount_paid),0)::bigint AS p FROM purchases WHERE shop_id=$1`, [shopId]), []).then((r) => r[0] ?? { p: 0 });
 
-    const issues = (await this.db.query(
+    const issues = await this.section(req, "issues", () => this.db.query<{ pending_approvals: number; open_investigations: number; open_conflicts: number }>(
       `SELECT
         (SELECT COUNT(*)::int FROM adjustments WHERE shop_id=$1 AND status='pending') AS pending_approvals,
         (SELECT COUNT(*)::int FROM investigations WHERE shop_id=$1 AND status IN ('open','investigating')) AS open_investigations,
-        (SELECT COUNT(*)::int FROM operations WHERE shop_id=$1 AND status IN ('conflict','rejected') AND resolved_at IS NULL) AS open_conflicts`, [shopId]))[0];
+        (SELECT COUNT(*)::int FROM operations WHERE shop_id=$1 AND status IN ('conflict','rejected') AND resolved_at IS NULL) AS open_conflicts`, [shopId]), [])
+      .then((r) => r[0] ?? { pending_approvals: 0, open_investigations: 0, open_conflicts: 0 });
 
     const spanDays = span / 86_400_000;
     const bucket = spanDays > 400 ? "month" : spanDays > 62 ? "week" : "day";
-    const trend = await this.db.query(
+    const trend = await this.section(req, "trend", () => this.db.query(
       `SELECT to_char(date_trunc($4, s.sold_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS date,
               COALESCE(SUM(s.gross_amount - s.discount),0)::bigint AS net_sales,
               COUNT(*)::int AS transactions
        FROM sales s WHERE s.shop_id=$1 AND s.status='posted' AND s.sold_at>=$2 AND s.sold_at<$3
-       GROUP BY 1 ORDER BY 1`, [shopId, from, to, bucket]);
+       GROUP BY 1 ORDER BY 1`, [shopId, from, to, bucket]), []);
 
     // Operating expenses per bucket, so the trend can show gross profit vs. expenses consistently.
-    const expTrend = canSeeFinancials ? await this.db.query(
+    const expTrend = canSeeFinancials ? await this.section(req, "trend_expenses", () => this.db.query(
       `SELECT to_char(date_trunc($4, incurred_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS date,
               COALESCE(SUM(amount),0)::bigint AS amount
        FROM expenses WHERE shop_id=$1 AND incurred_at>=$2 AND incurred_at<$3
-       GROUP BY 1`, [shopId, from, to, bucket]) : [];
+       GROUP BY 1`, [shopId, from, to, bucket]), []) : [];
     const expByDate = new Map<string, number>((expTrend as any[]).map(e => [e.date, Number(e.amount)]));
 
     // The calendar year (Africa/Kigali) containing the range start: the monthly chart's year.
@@ -137,19 +165,19 @@ export class ReportsController {
     }
 
     // Monthly operating results for that year: net sales (less returns), COGS, expenses, stock losses.
-    const monthSales = canSeeFinancials ? await this.db.query(
+    const monthSales = canSeeFinancials ? await this.section(req, "monthly_sales", () => this.db.query(
       `SELECT to_char(date_trunc('month', sold_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS month,
               COALESCE(SUM(gross_amount - discount),0)::bigint AS net
-       FROM sales WHERE shop_id=$1 AND status='posted' AND sold_at>=$2 AND sold_at<$3 GROUP BY 1`, [shopId, yearFrom, yearTo]) : [];
-    const monthReturns = canSeeFinancials ? await this.db.query(
+       FROM sales WHERE shop_id=$1 AND status='posted' AND sold_at>=$2 AND sold_at<$3 GROUP BY 1`, [shopId, yearFrom, yearTo]), []) : [];
+    const monthReturns = canSeeFinancials ? await this.section(req, "monthly_returns", () => this.db.query(
       `SELECT to_char(date_trunc('month', decided_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS month,
               COALESCE(SUM(refund_amount),0)::bigint AS r
        FROM adjustments WHERE shop_id=$1 AND status='approved' AND reason='sale_return'
-         AND decided_at>=$2 AND decided_at<$3 GROUP BY 1`, [shopId, yearFrom, yearTo]) : [];
-    const monthExp = canSeeFinancials ? await this.db.query(
+         AND decided_at>=$2 AND decided_at<$3 GROUP BY 1`, [shopId, yearFrom, yearTo]), []) : [];
+    const monthExp = canSeeFinancials ? await this.section(req, "monthly_expenses", () => this.db.query(
       `SELECT to_char(date_trunc('month', incurred_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS month,
               COALESCE(SUM(amount),0)::bigint AS amount
-       FROM expenses WHERE shop_id=$1 AND incurred_at>=$2 AND incurred_at<$3 GROUP BY 1`, [shopId, yearFrom, yearTo]) : [];
+       FROM expenses WHERE shop_id=$1 AND incurred_at>=$2 AND incurred_at<$3 GROUP BY 1`, [shopId, yearFrom, yearTo]), []) : [];
     const numMap = (rows: any[], key: string, val: string) => new Map<string, number>(rows.map(r => [r[key], Number(r[val])]));
     const mNet = numMap(monthSales as any[], "month", "net");
     const mRet = numMap(monthReturns as any[], "month", "r");
@@ -191,13 +219,13 @@ export class ReportsController {
       .map(p => ({ productId: p.productId, name: p.name, units: p.units, revenue: p.revenue,
         grossMarginBps: p.grossMarginBps, sellingPrice: p.sellingPrice, sellingUnit: p.sellingUnit, avgCost: p.avgCost, belowCost: p.flags.belowCost }));
 
-    const productTotals = await this.db.query(
+    const productTotals = await this.section(req, "product_totals", () => this.db.query<DashboardProduct>(
       `SELECT p.id, p.name, COALESCE(SUM(sl.qty),0)::bigint AS qty, COALESCE(SUM(sl.line_amount),0)::bigint AS net_sales
        FROM sale_lines sl JOIN sales s ON s.id=sl.sale_id JOIN products p ON p.id=sl.product_id
        WHERE s.shop_id=$1 AND s.status='posted' AND s.sold_at>=$2 AND s.sold_at<$3
-       GROUP BY p.id, p.name ORDER BY net_sales DESC`, [shopId, from, to]);
+       GROUP BY p.id, p.name ORDER BY net_sales DESC`, [shopId, from, to]), []);
 
-    const activity = await this.db.query(
+    const activity = await this.section(req, "activity", () => this.db.query(
       `SELECT a.id, a.at, a.action, a.entity, a.entity_id, a.reason, us.full_name AS actor, p.name AS product_name,
               sp.names AS sale_products, sa.gross_amount AS sale_total,
               pu.total_amount AS purchase_total, pu.reference AS purchase_reference, su.name AS supplier_name
@@ -208,18 +236,18 @@ export class ReportsController {
        LEFT JOIN suppliers su ON su.id = pu.supplier_id
        LEFT JOIN LATERAL (SELECT string_agg(p2.name, ', ') AS names FROM sale_lines sl JOIN products p2 ON p2.id=sl.product_id WHERE sl.sale_id=sa.id) sp ON true
        WHERE a.shop_id=$1 AND a.action NOT LIKE 'auth.%'
-       ORDER BY a.id DESC LIMIT 10`, [shopId]);
+       ORDER BY a.id DESC LIMIT 10`, [shopId]), []);
 
-    const expenseBreakdown = canSeeFinancials ? await this.db.query(
+    const expenseBreakdown = canSeeFinancials ? await this.section(req, "expenses_by_category", () => this.db.query(
       `SELECT category, COALESCE(SUM(amount),0)::bigint AS amount, COALESCE(SUM(amount) FILTER (WHERE NOT paid),0)::bigint AS unpaid
        FROM expenses WHERE shop_id=$1 AND incurred_at>=$2 AND incurred_at<$3
-       GROUP BY category ORDER BY amount DESC LIMIT 8`, [shopId, from, to]) : [];
+       GROUP BY category ORDER BY amount DESC LIMIT 8`, [shopId, from, to]), []) : [];
 
-    const staff = await this.db.query(
+    const staff = await this.section(req, "staff_activity", () => this.db.query(
       `SELECT us.full_name AS actor, COUNT(*)::int AS actions
        FROM audit_log a JOIN users us ON us.id=a.actor_id
        WHERE a.shop_id=$1 AND a.at>=$2 AND a.at<$3 AND a.action NOT LIKE 'auth.%' AND a.action <> 'sale.discount'
-       GROUP BY us.full_name ORDER BY actions DESC LIMIT 6`, [shopId, from, to]);
+       GROUP BY us.full_name ORDER BY actions DESC LIMIT 6`, [shopId, from, to]), []);
 
     const transactions = cur.transactions;
     const netSales = cur.netSales;
@@ -234,6 +262,9 @@ export class ReportsController {
 
     return {
       role: u.role,
+      // Empty when every panel was computed. A non-empty list means those panels fell back to
+      // zero/empty and the figures they would have shown are NOT known — the UI must say so.
+      degraded: this.degradation(req),
       range: { from, to },
       previousRange: { from: prevFrom, to: from },
       permissions: { financials: canSeeFinancials },
@@ -259,7 +290,7 @@ export class ReportsController {
         supplierPayables: Number(payables.p), productCount: inventory.items.length,
         lowStockCount: inventory.lowStockCount, outOfStockCount: inventory.items.filter(i => i.onHand <= 0).length,
         pendingApprovals: Number(issues.pending_approvals), openInvestigations: Number(issues.open_investigations),
-        openConflicts: Number(issues.open_conflicts),
+        openConflicts: Number(issues.open_conflicts ?? 0),
       },
       salesComparison: { netSales: comparison.netSales },
       trend: trend.map((t: any) => ({

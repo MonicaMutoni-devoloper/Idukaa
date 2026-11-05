@@ -10,13 +10,13 @@
 // Concurrency: writes are serialized with the Web Locks API when available and re-read the latest
 // state under the lock, so two tabs cannot clobber each other's queued operations. Other tabs are
 // notified through BroadcastChannel and drop their read cache.
-import type { LocalProduct, OutboxRow, OutboxStatus, StorageBackend } from "./local";
+import type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend } from "./local";
 
-export type { LocalProduct, OutboxRow, OutboxStatus, StorageBackend };
+export type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend };
 
 interface LocalSupplier { id: string; name: string; phone?: string | null }
 interface WebProduct extends LocalProduct { barcode: string | null; active: number; purchase_unit: string | null; selling_unit: string | null; units_per_purchase: number; units_per_selling: number }
-interface State { kv: Record<string, string>; products: WebProduct[]; suppliers: LocalSupplier[]; outbox: OutboxRow[]; seq: number }
+interface State { kv: Record<string, string>; products: WebProduct[]; suppliers: LocalSupplier[]; outbox: OutboxRow[]; records: LocalRecord[]; seq: number }
 
 const IDB_NAME = "sms-local";
 const IDB_STORE = "state";
@@ -24,7 +24,7 @@ const IDB_KEY = "state";
 const LEGACY_KEY = "sms.localdb.v1";
 const CHANNEL = "sms-local";
 
-const empty = (): State => ({ kv: {}, products: [], suppliers: [], outbox: [], seq: 0 });
+const empty = (): State => ({ kv: {}, products: [], suppliers: [], outbox: [], records: [], seq: 0 });
 const hasIDB = typeof indexedDB !== "undefined";
 const hasLS = typeof localStorage !== "undefined";
 
@@ -76,6 +76,7 @@ function normalize(raw: unknown): State {
     products: Array.isArray(s.products) ? s.products.map(normalizeProduct) : [],
     suppliers: Array.isArray(s.suppliers) ? s.suppliers : [],
     outbox: Array.isArray(s.outbox) ? s.outbox : [],
+    records: Array.isArray(s.records) ? s.records : [],
     seq: typeof s.seq === "number" ? s.seq : (Array.isArray(s.outbox) ? s.outbox.reduce((m, r) => Math.max(m, r.seq ?? 0), 0) : 0),
   };
 }
@@ -158,22 +159,37 @@ export async function bindShop(shopId: string | null) {
     if (s.kv["local.shop"] === shopId) return; // another tab may have bound it already
     s.products = [];
     s.suppliers = [];
+    s.records = []; // another shop's saved records must never be reported
     for (const k of Object.keys(s.kv)) if (k.startsWith("cp:")) delete s.kv[k]; // full re-pull
     s.kv["local.shop"] = shopId;
   });
 }
 
 /** Persist operation + optimistic stock deltas atomically. deltas: productId -> signed milli-units. */
-export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>) {
+export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>, recordAt?: string) {
+  const now = new Date().toISOString();
   await mutate((s) => {
     s.seq += 1;
     s.outbox.push({
       seq: s.seq, op_id: opId, user_id: userId, type, payload: JSON.stringify(payload), deltas: JSON.stringify(deltas),
-      status: "pending", attempts: 0, next_attempt_at: 0, message: null, created_at: new Date().toISOString(), synced_at: null,
+      status: "pending", attempts: 0, next_attempt_at: 0, message: null, created_at: now, synced_at: null,
     });
     for (const [pid, q] of Object.entries(deltas)) { const p = s.products.find((p) => p.id === pid); if (p) p.pending_delta += q; }
+    // Same single write as the outbox row: the reportable record and the queued operation commit together.
+    if (!s.records.some((r) => r.op_id === opId)) {
+      s.records.push({ op_id: opId, type, at: recordAt ?? now, data: JSON.stringify(payload), actor: null, created_at: now, status: "pending" });
+    }
   });
   await local?.();
+}
+
+/** Every record saved in this browser, with its sync verdict (the dashboard's only data source offline). */
+export async function listRecords() {
+  const s = await readState();
+  return [...s.records].sort((a, b) => a.at.localeCompare(b.at) || a.op_id.localeCompare(b.op_id)).map((r) => ({
+    ...r,
+    status: s.outbox.find((o) => o.op_id === r.op_id)?.status ?? "pending",
+  }));
 }
 
 export async function upsertLocalProduct(p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number }) {

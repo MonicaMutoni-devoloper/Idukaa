@@ -10,6 +10,7 @@
     "web": "expo start --web",
     "build:web": "node scripts/check-api-url.mjs && expo export --platform web",
     "test:i18n": "node --test tests/i18n.test.mts",
+    "test:dashboard": "node --test tests/local-dashboard.test.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

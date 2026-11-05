@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { formatQty, formatRwf } from "@sms/shared";
@@ -7,7 +7,9 @@ import { BarList, CompareBars, ProductRanking, StockHealthBar, TrendBars } from 
 import { Appear, Disclosure, useCountUp } from "../../src/components/motion";
 import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
-import { ApiError, request, useSession } from "../../src/services/api";
+import { ApiError, request, sessionRejected, useSession } from "../../src/services/api";
+import { buildLocalDashboard } from "../../src/services/local-dashboard-data";
+import type { Dashboard as DashboardPayload, FigureSource, FigureStatus, LocalDashboardResult } from "../../src/services/local-dashboard";
 import { addDaysToDay, customRange, presetRange, todayDay, type Preset } from "../../src/services/util";
 import { useSync } from "../../src/synchronization/engine";
 import { motion, space, type, useTheme } from "../../src/theme/tokens";
@@ -52,22 +54,16 @@ interface ActivityRow {
   id: number; at: string; action: string; entity: string; reason: string | null; actor: string | null;
   productName: string | null; saleTotal: number | null; purchaseTotal: number | null; purchaseReference: string | null;
 }
-interface Dashboard {
-  role: "owner" | "manager";
-  permissions: { financials: boolean };
-  range: { from: string; to: string };
-  financials: Financials | null;
-  financialComparison: { netSales: Change; grossProfit: Change; operatingProfit: Change } | null;
-  operations: Operations;
-  salesComparison: { netSales: Change };
-  trend: { date: string; netSales: number; transactions: number; grossProfit: number | null; operatingExpenses: number | null }[];
-  topProducts: { id: string; name: string; qty: number; netSales: number }[];
-  worstProducts: { id: string; name: string; qty: number; netSales: number }[];
-  activity: ActivityRow[];
-  staffActivity: { actor: string; actions: number }[];
-  expensesByCategory: { category: string; amount: number; unpaid: number }[];
-  lowStock: { id: string; name: string; onHand: number; unit: string; threshold: number }[];
-}
+/**
+ * The payload is defined once, in the local calculation service: the figures rendered offline are
+ * the same shape as the ones the API returns, so a local figure can never drift structurally from
+ * a server figure.
+ */
+type Dashboard = DashboardPayload;
+
+/** True when this device holds at least one record inside the range, so local figures describe it. */
+const localInRange = (r: LocalDashboardResult, to: string) =>
+  !!r.coverageFrom && r.coverageFrom < to && r.counts.inRange > 0;
 
 const ACTION_KEYS: Record<string, Key> = {
   "op.sale.create": "dash.act.sale",
@@ -141,6 +137,10 @@ export default function Home() {
   const token = useSession((s) => s.token);
   const online = useSync((s) => s.online);
   const lastSync = useSync((s) => s.lastSync);
+  // Bumped when a record is saved or its sync verdict changes — the only recalculation trigger.
+  const recordsVersion = useSync((s) => s.recordsVersion);
+  const pendingOps = useSync((s) => s.pending);
+  const awaitingApproval = useSync((s) => s.awaitingApproval);
   const isOwner = user?.role === "owner";
 
   const [period, setPeriod] = useState<Period>(isOwner ? "month" : "today");
@@ -155,30 +155,69 @@ export default function Home() {
   const [authIssue, setAuthIssue] = useState(false);
   const [staleAt, setStaleAt] = useState<string | null>(null);
   const [trendMetric, setTrendMetric] = useState<"sales" | "profit">("sales");
+  // Where the numbers on screen came from, and the local record counts behind them.
+  const [source, setSource] = useState<FigureSource | null>(null);
+  const [localInfo, setLocalInfo] = useState<LocalDashboardResult | null>(null);
+  // Every load takes a sequence number: a response for a range the user has already changed is
+  // discarded instead of overwriting newer figures (the old duplicate-request/render-loop bug).
+  const loadSeq = useRef(0);
 
   const range = useMemo(() => (period === "custom" ? appliedCustom : presetRange(period)), [period, appliedCustom]);
 
   const load = useCallback(async () => {
     if (!range) return;
+    const seq = ++loadSeq.current;
     setLoading(true); setFailed(false); setAuthIssue(false);
     const key = `dashboard:${user?.role}:${range.from}:${range.to}`;
+
+    // 1. Local figures first. They come from this device's own records, so they exist in
+    //    milliseconds and do not depend on the network at all.
+    let local: LocalDashboardResult | null = null;
+    try {
+      // A manager only sees cost and profit when the owner granted it — remembered from the last
+      // server answer so the local view does not invent a permission it cannot verify offline.
+      const granted = user?.role === "owner" ? true : (await kvGet("dash.perms").catch(() => null)) === "1";
+      local = await buildLocalDashboard({ from: range.from, to: range.to, role: user?.role ?? "manager", financials: granted });
+      if (seq !== loadSeq.current) return;
+      setLocalInfo(local);
+      // Adopt local figures only when this device holds a record INSIDE the range. A fresh install,
+      // or a period whose history lives only on the server, must never replace good figures with
+      // zeros just because the local ledger happens to be empty for that period.
+      if (localInRange(local, range.to)) {
+        setData(local.data); setSource("local"); setStaleAt(null);
+      }
+    } catch { /* local calculation failed: keep what is on screen, never blank it */ }
+
+    // 2. Reconcile with the server when it answers. Server figures are authoritative, but they are
+    //    only *claimed* to be synchronized while nothing is still queued (see `displayStatus`).
     try {
       const res = await request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { auth: true });
-      setData(res); setStaleAt(null);
+      if (seq !== loadSeq.current) return;
+      setData(res); setSource("server"); setFailed(false); setStaleAt(null);
       void kvSet(key, JSON.stringify({ savedAt: new Date().toISOString(), data: res })).catch(() => {});
+      void kvSet("dash.perms", res.permissions?.financials ? "1" : "0").catch(() => {});
     } catch (e) {
+      if (seq !== loadSeq.current) return;
+      // A 401 means "sign in again" only when the refresh credential was actually rejected. A token
+      // that is merely absent (offline start) or whose refresh is backing off is not an expired
+      // session — saying so is what turned a network hiccup into a fake logout.
+      const rejected = e instanceof ApiError && e.status === 401 && sessionRejected();
+      setAuthIssue(rejected);
       setFailed(true);
-      setAuthIssue(e instanceof ApiError && e.status === 401);
-      try {
-        const raw = await kvGet(key);
-        if (raw) { const cached = JSON.parse(raw); if (cached?.data) { setData(cached.data); setStaleAt(cached.savedAt ?? null); } }
-      } catch { /* leave the previous data in place */ }
+      if (!local || !localInRange(local, range.to)) {
+        try {
+          const raw = await kvGet(key);
+          if (raw) { const cached = JSON.parse(raw); if (cached?.data) { setData(cached.data); setSource("cached"); setStaleAt(cached.savedAt ?? null); } }
+        } catch { /* leave the previous data in place */ }
+      }
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [range, user?.role]);
 
-  useEffect(() => { void load(); }, [load, lastSync, token]);
+  // Recalculate when the range changes, when a record is saved or its verdict changes, or when a
+  // new session replaces an expired one. Not on a timer, and never twice for the same change.
+  useEffect(() => { void load(); }, [load, recordsVersion, token]);
 
   const applyCustom = () => {
     const r = customRange(customFrom, customTo);
@@ -193,6 +232,32 @@ export default function Home() {
 
   const ops = data?.operations;
   const fin = data?.financials;
+  const counts = localInfo?.counts;
+  // Sections the API could not compute (it reports them instead of answering 500). Shown, because a
+  // failed panel must never look like a real zero.
+  const degraded: string[] = (data as (Dashboard & { degraded?: string[] }) | null)?.degraded ?? [];
+  // "Synchronized" can only be claimed when the server answered AND nothing is still queued.
+  const displayStatus: FigureStatus =
+    counts && counts.conflicts > 0 ? "conflict"
+    : counts && counts.failed > 0 ? "sync_failed"
+    : source === "server" ? (pendingOps > 0 || awaitingApproval > 0 ? "pending_sync" : "synchronized")
+    : counts && (counts.pending > 0 || counts.awaitingApproval > 0) ? "pending_sync"
+    : "calculated_local";
+  const statusTone: "ok" | "warn" | "danger" =
+    displayStatus === "synchronized" ? "ok" : displayStatus === "sync_failed" || displayStatus === "conflict" ? "danger" : "warn";
+  const figureNote = useMemo(() => {
+    const parts: string[] = [];
+    if (source === "cached" && staleAt) parts.push(t("dash.cachedAt").replace("{time}", new Date(staleAt).toLocaleString()));
+    if (source === "local" && localInfo) {
+      parts.push(t("dash.localFigures").replace("{n}", String(localInfo.counts.total)).replace("{time}", new Date(localInfo.calculatedAt).toLocaleTimeString()));
+      if (localInfo.coverageFrom && !localInfo.covered) parts.push(t("dash.localCoverage").replace("{date}", new Date(localInfo.coverageFrom).toLocaleDateString()));
+    }
+    if (counts?.pending) parts.push(t("dash.pendingNote").replace("{n}", String(counts.pending)));
+    if (counts?.failed) parts.push(t("dash.failedNote").replace("{n}", String(counts.failed)));
+    if (counts?.conflicts) parts.push(t("dash.conflictNote").replace("{n}", String(counts.conflicts)));
+    if (!parts.length && lastSync) parts.push(`${t("sync.lastSync")}: ${new Date(lastSync).toLocaleString()}`);
+    return parts.join(" ");
+  }, [source, staleAt, localInfo, counts, lastSync, t]);
   const outCount = ops?.outOfStockCount ?? 0;
   const lowOnly = Math.max(0, (ops?.lowStockCount ?? 0) - outCount);
   const issueCount = ops ? lowOnly + outCount + ops.pendingApprovals + ops.openInvestigations + ops.openConflicts : 0;
@@ -244,8 +309,21 @@ export default function Home() {
         </Card>
       ) : null}
 
-      {!online ? <Banner tone="warn" text={staleAt ? t("dash.cachedAt").replace("{time}", new Date(staleAt).toLocaleString()) : t("home.cachedData")} /> : null}
-      {authIssue ? <Banner tone="danger" text={t("dash.sessionExpired")} /> : failed && data ? <Banner tone="warn" text={t("dash.staleBanner")} /> : null}
+      {!online ? <Banner tone="warn" text={t("home.cachedData")} /> : null}
+      {authIssue ? <Banner tone="danger" text={t("dash.sessionExpired")} /> : null}
+      {degraded.length ? <Banner tone="warn" text={t("dash.degraded").replace("{n}", String(degraded.length))} /> : null}
+      {data ? (
+        <Card tone={displayStatus === "conflict" || displayStatus === "sync_failed" ? "warn" : "muted"} style={{ gap: 6 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
+            <Badge dot tone={statusTone} label={t("dash.figureStatus")} />
+            <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700" }}>{t(`dash.status.${displayStatus}` as Key)}</Text>
+            <Text style={{ color: c.muted, fontSize: 12 }}>
+              {source === "server" ? t("dash.src.server") : source === "cached" ? t("dash.src.cached") : t("dash.src.local")}
+            </Text>
+          </View>
+          {figureNote ? <Text style={{ color: c.muted, fontSize: 12, lineHeight: 17 }}>{figureNote}</Text> : null}
+        </Card>
+      ) : null}
 
       <Card tone="muted" style={{ gap: space.sm }}>
         <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("home.quickActions")}</Text>

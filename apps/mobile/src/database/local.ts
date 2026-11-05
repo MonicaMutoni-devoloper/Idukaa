@@ -15,6 +15,8 @@ export const storageBackend = (): StorageBackend => "sqlite";
 
 export type OutboxStatus = "pending" | "retry" | "synced" | "conflict" | "rejected" | "pending_approval";
 export interface OutboxRow { seq: number; op_id: string; user_id: string; type: string; payload: string; deltas: string; status: OutboxStatus; attempts: number; next_attempt_at: number; message: string | null; created_at: string; synced_at?: string | null }
+export interface LocalRecord { op_id: string; type: string; at: string; data: string; actor: string | null; created_at: string; status: string }
+
 export interface LocalProduct {
   id: string; code: string; barcode: string | null; name: string; unit: string; category: string | null;
   selling_price: number; low_threshold: number; on_hand: number; pending_delta: number;
@@ -31,7 +33,13 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS suppliers (id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT);
     CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, deltas TEXT NOT NULL DEFAULT '{}',
       status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, message TEXT, created_at TEXT NOT NULL, synced_at TEXT);
-    CREATE INDEX IF NOT EXISTS outbox_status ON outbox(status, next_attempt_at);`);
+    CREATE INDEX IF NOT EXISTS outbox_status ON outbox(status, next_attempt_at);
+    -- Business records saved on this device, keyed by the operation id that will sync them.
+    -- The dashboard and every offline figure are calculated from THESE rows, never from a network
+    -- response, so a sale, expense or delivery is reportable the moment it is saved. One row per
+    -- operation means moving pending -> synced cannot be counted twice (the row is never duplicated).
+    CREATE TABLE IF NOT EXISTS records (op_id TEXT PRIMARY KEY, type TEXT NOT NULL, at TEXT NOT NULL, data TEXT NOT NULL, actor TEXT, created_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS records_at ON records(at);`);
   // Incremental local migrations (SQLite has no ADD COLUMN IF NOT EXISTS): the unit-configuration
   // columns added with the purchase/base/selling-unit feature. No existing rows are touched.
   const cols = (await d.getAllAsync<{ name: string }>("PRAGMA table_info(products)")).map((r) => r.name);
@@ -57,20 +65,32 @@ export async function bindShop(shopId: string | null) {
   await d.withTransactionAsync(async () => {
     await d.runAsync("DELETE FROM products");
     await d.runAsync("DELETE FROM suppliers");
+    await d.runAsync("DELETE FROM records"); // another shop's saved records must never be reported
     await d.runAsync("DELETE FROM kv WHERE k LIKE 'cp:%'"); // checkpoints: next pull starts from scratch for this shop
     await d.runAsync("INSERT INTO kv(k,v) VALUES ('local.shop',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", [shopId]);
   });
 }
 
 /** Persist operation + optimistic stock deltas atomically. deltas: productId -> signed milli-units. */
-export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>) {
+export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>, recordAt?: string) {
   const d = await db();
+  const now = new Date().toISOString();
   await d.withTransactionAsync(async () => {
-    await d.runAsync("INSERT INTO outbox(op_id,user_id,type,payload,deltas,created_at) VALUES (?,?,?,?,?,?)", [opId, userId, type, JSON.stringify(payload), JSON.stringify(deltas), new Date().toISOString()]);
+    await d.runAsync("INSERT INTO outbox(op_id,user_id,type,payload,deltas,created_at) VALUES (?,?,?,?,?,?)", [opId, userId, type, JSON.stringify(payload), JSON.stringify(deltas), now]);
     for (const [pid, q] of Object.entries(deltas)) await d.runAsync("UPDATE products SET pending_delta = pending_delta + ? WHERE id=?", [q, pid]);
+    // The reportable record is committed in the same transaction as the outbox row: if the app dies
+    // now, either both exist or neither does — a sale can never be shown as saved without being countable.
+    await d.runAsync("INSERT OR IGNORE INTO records(op_id,type,at,data,actor,created_at) VALUES (?,?,?,?,NULL,?)",
+      [opId, type, recordAt ?? now, JSON.stringify(payload), now]);
     await local?.();
   });
 }
+
+/** Every record saved on this device, with its sync verdict (the dashboard's only data source offline). */
+export const listRecords = async () =>
+  (await db()).getAllAsync<LocalRecord>(
+    `SELECT r.op_id, r.type, r.at, r.data, r.actor, r.created_at, COALESCE(o.status, 'pending') AS status
+       FROM records r LEFT JOIN outbox o ON o.op_id = r.op_id ORDER BY r.at, r.op_id`);
 export const upsertLocalProduct = async (p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number }) => {
   const d = await db();
   // Conversion config is part of the local product so offline sales/receipts convert on-device
