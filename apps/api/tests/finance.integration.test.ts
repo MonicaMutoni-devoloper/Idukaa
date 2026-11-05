@@ -91,7 +91,8 @@ before(async () => {
     op("expense.create", { expenseId: uuid(), category: "transport", amount: 3000, paid: false, incurredAt: "2026-01-31T21:59:00.000Z" }),
     op("expense.create", { expenseId: uuid(), category: "other", amount: 7000, paid: true, incurredAt: "2026-01-31T22:00:00.000Z" }),
   ]);
-  // Only a manager may record sales (an existing authorization rule).
+  // Both shop roles may record sales (owner ⊇ manager); this fixture uses the manager, and the
+  // owner reads the same records below.
   await push(manager, [
     op("sale.create", { saleId: sale1, soldAt: "2026-01-25T10:00:00.000Z", discount: 500, amountPaid: 4500, paymentMethod: "cash", lines: [{ productId: prodX, qty: 5000, unitPrice: 1000 }] }),
     op("sale.create", { saleId: uuid(), soldAt: "2026-01-27T10:00:00.000Z", discount: 0, amountPaid: 3000, paymentMethod: "cash", lines: [{ productId: prodX, qty: 3000, unitPrice: 1000 }] }),

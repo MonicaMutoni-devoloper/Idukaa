@@ -103,7 +103,7 @@ could be duplicated.
 Verified by tests that were executed, not by reading code alone:
 
 - **Server-side shop isolation** — passing in the 62-test run: `sync.integration.test.ts`
-  (“role + shop isolation: owners cannot record sales; other shop cannot use this shop's product”),
+  (“the owner inherits every manager operation, and another shop still cannot touch these records”),
   `finance.integration.test.ts` (shop B's January sale never appears in shop A's totals),
   `security.integration.test.ts` (notifications and preferences never cross users/shops),
   `onboarding.integration.test.ts` (role enforcement 401/403 across every wrong role).

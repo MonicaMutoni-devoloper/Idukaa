@@ -25,11 +25,17 @@ export const NAV: Record<Role, NavGroup[]> = {
     ] },
   ],
   owner: [
+    // The owner does the same day-to-day work a manager does — selling and receiving stock — so
+    // those destinations come first. Without this group the owner could record a sale only through
+    // a dashboard shortcut, never from the navigation a manager uses.
+    { label: "nav.groupOperations", items: [
+      { href: "/sell", key: "nav.sell", description: "nav.sellDesc" },
+      { href: "/stock", key: "nav.stock", description: "nav.stockDesc" },
+    ] },
     { label: "nav.groupOversight", items: [
       { href: "/", key: "nav.home", description: "nav.homeDesc" },
       { href: "/reports", key: "nav.reports", description: "nav.reportsDesc" },
       { href: "/profitability", key: "nav.profitability", description: "nav.profitabilityDesc" },
-      { href: "/stock", key: "nav.stock", description: "nav.stockDesc" },
       { href: "/approvals", key: "nav.approvals", description: "nav.approvalsDesc" },
     ] },
     { label: "nav.groupAdmin", items: [

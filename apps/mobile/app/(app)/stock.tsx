@@ -261,7 +261,8 @@ export default function Stock() {
     <Screen title={t("stock.title")} subtitle={t("stock.subtitle")} actions={
       <>
         <Button testID="stock-add-toggle" kind="secondary" label={adding ? t("common.cancel") : t("stock.addProduct")} onPress={() => { setAdding(!adding); setErr(null); }} />
-        {user.role === "manager" ? <Button testID="stock-count-toggle" label={counting ? t("common.cancel") : t("stock.count")} onPress={() => { setCounting(!counting); setErr(null); }} /> : null}
+        {/* Counting is a manager operation, so the owner must have it too (owner ⊇ manager). */}
+        <Button testID="stock-count-toggle" label={counting ? t("common.cancel") : t("stock.count")} onPress={() => { setCounting(!counting); setErr(null); }} />
       </>
     }>
       {msg ? <Banner tone="ok" text={msg} /> : null}

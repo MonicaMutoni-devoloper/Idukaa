@@ -38,7 +38,7 @@ const schemaError = (column: string) =>
 /** Every SQL statement answers an empty result set, so each panel maps to its documented default. */
 const emptyDb = { query: async () => [] } as any;
 
-const makeController = async (over: Record<string, unknown> = {}) => {
+const makeController = async (over: Record<string, unknown> = {}, db: any = emptyDb) => {
   const { ReportsController } = await import("../src/reports/reports.controller");
   const finance = {
     canSeeFinancials: async () => true,
@@ -47,7 +47,7 @@ const makeController = async (over: Record<string, unknown> = {}) => {
     productProfitability: async () => [],
     ...over,
   } as any;
-  return { controller: new ReportsController(emptyDb, finance), finance };
+  return { controller: new ReportsController(db, finance), finance };
 };
 
 test("one failing panel is named in `degraded`, and the headline figures survive", async () => {
@@ -115,4 +115,48 @@ test("profitability still refuses a manager without financial access", async () 
   const finance = { canSeeFinancials: async () => false } as any;
   const prof = new ProfitabilityController(finance);
   await assert.rejects(() => prof.profitability(manager, RANGE, mkReq("/reports/profitability")), (e: any) => e.getStatus?.() === 403);
+});
+
+/**
+ * The production warning was "1 parts of this report could not be loaded" with no way to tell which
+ * one. These two tests pin the identity of the name and the recovery path.
+ */
+test("the degraded name identifies the query that failed, not a generic panel", async () => {
+  const staffDb = {
+    query: async (sql: string) => {
+      if (/ORDER BY actions DESC/.test(sql)) throw schemaError("full_name");
+      return [];
+    },
+  } as any;
+  const { controller } = await makeController({}, staffDb);
+  const d = await controller.dashboard(owner, RANGE, mkReq());
+
+  assert.deepEqual(d.degraded, ["staff_activity"], "the failing panel is named exactly");
+  assert.deepEqual(d.staffActivity, [], "only that panel is empty");
+  assert.equal(d.financials.netSales, 12345, "the figures that could be computed are unchanged");
+});
+
+test("a panel that fails once recovers on the next request, with no sticky state", async () => {
+  let calls = 0;
+  const row = {
+    productId: "p1", name: "Sugar", code: "SUG", unit: "kg", sellingUnit: "kg",
+    sellingPrice: 1200, avgCost: 800, onHand: 5000, inventoryValue: 4000, lowStock: false,
+    units: 3000, revenue: 3600, cogs: 2400, grossProfit: 1200, grossMarginBps: 1000,
+    stockLosses: 0, stockLossCount: 0, velocityPerDay: 1, velocity30PerDay: 1, stockouts90: 0,
+    flags: { belowCost: false, negativeMargin: false, lowMargin: true, highVolumeLowMargin: false,
+      slowMoving: false, repeatedStockLosses: false, outOfStock: false, frequentStockouts: false },
+  };
+  const { controller } = await makeController({
+    productProfitability: async () => { calls += 1; if (calls === 1) throw schemaError("units_per_selling"); return [row]; },
+  });
+
+  const first = await controller.dashboard(owner, RANGE, mkReq("/reports/dashboard", "rid-1"));
+  assert.deepEqual(first.degraded, ["product_profitability"]);
+  assert.deepEqual(first.financials.topProductsByProfit, [], "no profit figure is invented while the panel is missing");
+  assert.equal(first.financials.costBasisIncomplete, false, "a failed panel never marks the cost basis incomplete");
+
+  const second = await controller.dashboard(owner, RANGE, mkReq("/reports/dashboard", "rid-2"));
+  assert.deepEqual(second.degraded, [], "the earlier failure does not leak into the next request");
+  assert.equal(second.financials.topProductsByProfit[0].name, "Sugar");
+  assert.equal(second.financials.lowMarginProducts.length, 1);
 });

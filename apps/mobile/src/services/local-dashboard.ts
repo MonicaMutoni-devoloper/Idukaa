@@ -70,6 +70,8 @@ export interface ActivityRow {
 export interface Dashboard {
   role: "owner" | "manager";
   permissions: { financials: boolean };
+  /** Server-only: panels it could not compute. Absent locally (nothing is ever degraded on-device). */
+  degraded?: string[];
   range: { from: string; to: string };
   financials: Financials | null;
   financialComparison: { netSales: Change; grossProfit: Change; operatingProfit: Change } | null;
@@ -497,6 +499,8 @@ export function computeLocalDashboard(input: LocalDashboardInput): LocalDashboar
   const data: Dashboard = {
     role: role === "owner" ? "owner" : "manager",
     permissions: { financials },
+    // Computed here, from complete local records: no panel is missing, so nothing is degraded.
+    degraded: [],
     range: { from, to },
     financials: financialsBlock,
     financialComparison: financials

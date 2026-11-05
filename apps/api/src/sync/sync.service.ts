@@ -1,18 +1,17 @@
 import { Injectable } from "@nestjs/common";
 import type { PoolClient } from "pg";
-import { Operation, lineAmount, priceBelowCost, toBaseQty, type OperationT, type OpResult, type Role } from "@sms/shared";
+import { Operation, lineAmount, priceBelowCost, toBaseQty, type OperationT, type OpResult } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
+import { canRunOp } from "./op-permissions";
 import type { AuthUser } from "../common/auth";
 
 type Kind = "conflict" | "rejected" | "pending_approval";
 class BizError extends Error { constructor(public kind: Kind, message: string) { super(message); } }
 
-const ALLOWED: Record<OperationT["type"], Role[]> = {
-  // Stock receiving is open to the owner as well: a small shop's owner buys and receives goods.
-  "sale.create": ["manager"], "purchase.create": ["manager", "owner"], "receipt.create": ["manager", "owner"], "count.submit": ["manager"],
-  "adjustment.request": ["manager"], "expense.create": ["manager", "owner"], "expense.update": ["manager", "owner"], "product.upsert": ["manager", "owner"], "supplier.upsert": ["manager", "owner"],
-};
+// Operation roles live in `op-permissions.ts`: OWNER = every manager operation + owner-only routes.
+// (The owner used to be refused `sale.create`, `count.submit` and `adjustment.request` here, which
+// let a manager do things the shop owner could not.)
 /** Adjustment reason → ledger movement type. Loss categories all land in `adjustment`, which the
  *  valuation counts as stock-loss value (supplier returns are excluded: they reverse a purchase). */
 const ADJ_TYPE = {
@@ -57,7 +56,7 @@ export class SyncService {
     const parsed = Operation.safeParse(SyncService.normalize(raw));
     if (!parsed.success) return { opId, status: "rejected", message: `invalid_operation: ${parsed.error.issues[0]?.path.join(".")} ${parsed.error.issues[0]?.message}` };
     const op = parsed.data;
-    if (!user.shopId || !ALLOWED[op.type].includes(user.role)) return { opId, status: "rejected", message: "role_not_allowed" };
+    if (!user.shopId || !canRunOp(user.role, op.type)) return { opId, status: "rejected", message: "role_not_allowed" };
     const shopId = user.shopId;
 
     return this.db.tx(async (c) => {

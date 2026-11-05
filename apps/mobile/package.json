@@ -12,6 +12,8 @@
     "test:i18n": "node --test tests/i18n.test.mts",
     "test:dashboard": "node --test tests/local-dashboard.test.mts",
     "test:policy": "node --test tests/session-policy.test.mts",
+    "test:sections": "node --test tests/report-sections.test.mts",
+    "test:roles": "node --test tests/permissions.test.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

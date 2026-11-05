@@ -81,10 +81,39 @@ test("adjustments need owner approval before stock moves", { skip }, async () =>
   assert.equal(await onHand(), have);
 });
 
-test("role + shop isolation: owners cannot record sales; other shop cannot use this shop's product", { skip }, async () => {
-  const s = (shop: any) => op("sale.create", { saleId: uuid(), soldAt: now(), discount: 0, amountPaid: 0, lines: [{ productId: pid, qty: 1000, unitPrice: 1500 }] });
-  assert.equal((await svc.push(owner, "d", [s(0)]))[0].message, "role_not_allowed");
-  assert.equal((await svc.push(mgrB, "d", [s(0)]))[0].message, "unknown_product");
+test("the owner inherits every manager operation, and another shop still cannot touch these records", { skip }, async () => {
+  const saleLine = [{ productId: pid, qty: 1000, unitPrice: 1500 }];
+  const sale = (saleId: string) => op("sale.create", { saleId, soldAt: now(), discount: 0, amountPaid: 1500, lines: saleLine });
+
+  // The three operations the owner used to be refused by the sync table: selling, counting and
+  // requesting a correction (all three were `["manager"]`).
+  const before = await onHand();
+  const ownerSaleId = uuid();
+  assert.equal((await svc.push(owner, "d", [sale(ownerSaleId)]))[0].status, "applied", "an owner records a sale exactly like a manager");
+  assert.equal(await onHand(), before - 1000, "and it moves the same ledger");
+
+  assert.equal((await svc.push(owner, "d", [op("count.submit", { countId: uuid(), countedAt: now(), lines: [{ productId: pid, counted: await onHand() }] })]))[0].status,
+    "applied", "an owner counts stock like a manager");
+
+  const adj = await svc.push(owner, "d", [op("adjustment.request", { adjustmentId: uuid(), productId: pid, qty: -500, reason: "damage", note: "owner found a broken item" })]);
+  assert.equal(adj[0].status, "pending_approval", "an owner's correction still needs approval, never straight to the ledger");
+
+  // Shared shop data, not two copies: each role reads the same stored sale, whichever role recorded it.
+  const { ReportsController } = await import("../src/reports/reports.controller");
+  const { FinanceService } = await import("../src/reports/finance.service");
+  const reports = new ReportsController(db, new FinanceService(db));
+  const managerSaleId = uuid();
+  assert.equal((await svc.push(mgr, "d", [sale(managerSaleId)]))[0].status, "applied");
+  assert.equal((await reports.sale(owner, managerSaleId)).sale.id, managerSaleId, "the owner sees the manager's sale");
+  assert.equal((await reports.sale(mgr, ownerSaleId)).sale.id, ownerSaleId, "the manager sees the owner's sale");
+  assert.deepEqual(await reports.sale(owner, managerSaleId), await reports.sale(mgr, managerSaleId),
+    "both roles read the one stored record, not per-role copies");
+
+  // Owner-only controls stay closed to managers…
+  const { SalesController } = await import("../src/sales/sales.controller");
+  assert.deepEqual(Reflect.getMetadata("roles", SalesController), ["owner"], "voiding a sale stays owner-only");
+  // …and a different shop still cannot reach this shop's records.
+  assert.equal((await svc.push(mgrB, "d", [sale(uuid())]))[0].message, "unknown_product");
 });
 
 /* ------------------------------------------------------- add product: product + initial stock in ONE operation */

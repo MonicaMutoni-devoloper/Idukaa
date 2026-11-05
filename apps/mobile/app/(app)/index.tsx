@@ -8,6 +8,7 @@ import { Appear, Disclosure, useCountUp } from "../../src/components/motion";
 import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
 import { ApiError, request, sessionRejected, useSession } from "../../src/services/api";
+import { degradedList, sectionKey, sectionLabel } from "../../src/services/report-sections";
 import { buildLocalDashboard } from "../../src/services/local-dashboard-data";
 import type { Dashboard as DashboardPayload, FigureSource, FigureStatus, LocalDashboardResult } from "../../src/services/local-dashboard";
 import { addDaysToDay, customRange, presetRange, todayDay, type Preset } from "../../src/services/util";
@@ -233,9 +234,12 @@ export default function Home() {
   const ops = data?.operations;
   const fin = data?.financials;
   const counts = localInfo?.counts;
-  // Sections the API could not compute (it reports them instead of answering 500). Shown, because a
-  // failed panel must never look like a real zero.
-  const degraded: string[] = (data as (Dashboard & { degraded?: string[] }) | null)?.degraded ?? [];
+  // Sections the API could not compute (it reports them instead of answering 500). NAMED, not just
+  // counted: "1 part is missing" without saying which one leaves the owner unable to tell an empty
+  // panel apart from a real zero.
+  const degraded = degradedList(data?.degraded);
+  const sectionName = (n: string) => { const k = sectionKey(n); return k ? t(k) : sectionLabel(n); };
+  const profitMissing = degraded.includes("product_profitability");
   // "Synchronized" can only be claimed when the server answered AND nothing is still queued.
   const displayStatus: FigureStatus =
     counts && counts.conflicts > 0 ? "conflict"
@@ -311,7 +315,7 @@ export default function Home() {
 
       {!online ? <Banner tone="warn" text={t("home.cachedData")} /> : null}
       {authIssue ? <Banner tone="danger" text={t("dash.sessionExpired")} /> : null}
-      {degraded.length ? <Banner tone="warn" text={t("dash.degraded").replace("{n}", String(degraded.length))} /> : null}
+      {degraded.length ? <Banner tone="warn" text={t("dash.degraded").replace("{list}", degraded.map(sectionName).join(", "))} /> : null}
       {data ? (
         <Card tone={displayStatus === "conflict" || displayStatus === "sync_failed" ? "warn" : "muted"} style={{ gap: 6 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
@@ -331,7 +335,8 @@ export default function Home() {
           <QuickAction testID="home-action-sell" primary label={t("nav.sell")} onPress={() => router.push("/sell")} />
           <QuickAction testID="home-action-stock" label={t("nav.stock")} onPress={() => router.push("/stock")} />
           <QuickAction testID="home-action-expense" label={t("nav.expense")} onPress={() => router.push("/expense")} />
-          {user?.role !== "owner" ? <QuickAction testID="home-action-count" label={t("stock.count")} onPress={() => router.push({ pathname: "/stock", params: { count: "1" } })} /> : null}
+          {/* A stock count is a manager operation, so the owner gets this shortcut as well. */}
+          <QuickAction testID="home-action-count" label={t("stock.count")} onPress={() => router.push({ pathname: "/stock", params: { count: "1" } })} />
         </View>
       </Card>
 
@@ -523,7 +528,8 @@ export default function Home() {
                   <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.topByProfit")}</Text>
                   <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.topByProfitHint")}</Text>
                 </View>
-                {(fin.topProductsByProfit ?? []).length ? (fin.topProductsByProfit ?? []).map((p) => (
+                {profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
+                  : (fin.topProductsByProfit ?? []).length ? (fin.topProductsByProfit ?? []).map((p) => (
                   <View key={p.productId} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
                     <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
                     <Text style={{ color: (p.grossProfit ?? 0) < 0 ? c.danger : c.success, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(p.grossProfit ?? 0)}</Text>
@@ -536,7 +542,8 @@ export default function Home() {
                   <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.lowMargin")}</Text>
                   <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.lowMarginHint")}</Text>
                 </View>
-                {(fin.lowMarginProducts ?? []).length ? (fin.lowMarginProducts ?? []).map((p) => (
+                {profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
+                  : (fin.lowMarginProducts ?? []).length ? (fin.lowMarginProducts ?? []).map((p) => (
                   <View key={p.productId} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
                     <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
                     {p.belowCost ? <Badge tone="danger" label={t("receive.belowCostBadge")} /> : null}

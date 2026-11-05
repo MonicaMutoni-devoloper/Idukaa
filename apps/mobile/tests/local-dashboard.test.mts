@@ -31,12 +31,54 @@ const sale = (opId: string, at: string, over: Record<string, unknown> = {}, stat
   lines: [{ productId: "p1", qty: 2000, unitPrice: 1000, sellingQty: 2000 }], ...over,
 }, status);
 
+const purchase = (opId: string, at: string, over: Record<string, unknown> = {}, status = "synced") => rec(opId, "purchase.create", at, {
+  purchaseId: `pur-${opId}`, orderedAt: at, amountPaid: 5000, receiveNow: true,
+  lines: [{ productId: "p1", qty: 10000, unitCost: 500 }], ...over,
+}, status);
+
 const run = (records: LocalRecord[], products: LocalProduct[], range = DAY3, over: { financials?: boolean; role?: "owner" | "manager" } = {}) =>
   computeLocalDashboard({
     records, products, from: range.from, to: range.to,
     role: over.role ?? "owner", financials: over.financials ?? true,
     now: Date.parse("2026-11-03T12:00:00.000Z"),
   });
+
+test("the owner and an authorised manager compute the same figures from the same stored records", () => {
+  const records = [purchase("op1", "2026-11-02T08:00:00.000Z"), sale("op2", "2026-11-03T09:00:00.000Z", {}, "synced")];
+  const products = [product({ on_hand: 8000 })];
+  const asOwner = run(records, products, DAY3, { role: "owner" });
+  const asManager = run(records, products, DAY3, { role: "manager", financials: true });
+
+  assert.deepEqual(asManager.data.operations, asOwner.data.operations, "one shop, one set of records");
+  assert.deepEqual(asManager.data.financials, asOwner.data.financials, "with access granted, the manager sees the same cost and profit");
+  assert.equal(asOwner.data.role, "owner");
+  assert.equal(asManager.data.role, "manager");
+});
+
+test("a manager without financial access sees the shared operations but no cost or profit", () => {
+  const records = [sale("op1", "2026-11-03T09:00:00.000Z")];
+  const products = [product({ on_hand: 8000 })];
+  const hiddenView = run(records, products, DAY3, { role: "manager", financials: false });
+  const ownerView = run(records, products, DAY3, { role: "owner" });
+
+  assert.equal(hiddenView.data.financials, null, "cost and profit stay owner-only until the owner grants access");
+  assert.deepEqual(hiddenView.data.operations, ownerView.data.operations, "operational figures are shared, not per-role copies");
+  assert.ok(!("grossProfit" in (hiddenView.data.topProducts[0] ?? {})), "no profit leaks through the product ranking");
+});
+
+test("recomputing from stored records is stable across a relaunch and never double counts", () => {
+  const records = [purchase("op1", "2026-11-02T08:00:00.000Z"), sale("op2", "2026-11-03T09:00:00.000Z", {}, "synced")];
+  const products = [product({ on_hand: 8000 })];
+  const first = run(records, products);
+  const afterRelaunch = run(records, products); // same persisted rows, fresh process
+
+  assert.deepEqual(afterRelaunch.data.operations, first.data.operations, "the same records give the same figures");
+  assert.deepEqual(afterRelaunch.data.financials, first.data.financials);
+
+  // The record is stored once per operation id, so moving it from pending to synced is not a new sale.
+  const pending = run([purchase("op1", "2026-11-02T08:00:00.000Z"), sale("op2", "2026-11-03T09:00:00.000Z")], products);
+  assert.deepEqual(pending.data.operations, first.data.operations, "pending -> synced does not count the sale twice");
+});
 
 test("an offline sale appears in the dashboard immediately", () => {
   const r = run([sale("op1", "2026-11-03T09:00:00.000Z")], [product({ on_hand: 8000 })]);
