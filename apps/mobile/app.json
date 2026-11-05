@@ -1,4 +1,69 @@
-{ "expo": { "name": "Shop Management", "slug": "shop-management", "scheme": "shopmgmt", "version": "1.0.0", "orientation": "default", "userInterfaceStyle": "automatic",
-  "android": { "package": "rw.shop.management", "versionCode": 1, "adaptiveIcon": { "backgroundColor": "#0F5C4D" } },
-  "web": { "bundler": "metro", "output": "single", "name": "Shop Management", "themeColor": "#172B4D" },
-  "plugins": ["expo-router", "expo-secure-store", ["expo-sqlite", {}]], "experiments": { "typedRoutes": false } } }
+{
+  "expo": {
+    "name": "Shop Management System",
+    "slug": "shop-management",
+    "scheme": "shopmgmt",
+    "version": "1.0.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "package": "rw.shop.management",
+      "versionCode": 1,
+      "userInterfaceStyle": "automatic",
+      "icon": "./assets/icon.png",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0F5C4D"
+      },
+      "softwareKeyboardLayoutMode": "resize",
+      "allowBackup": false,
+      "permissions": ["android.permission.INTERNET"],
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.VIBRATE"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "rw.shop.management",
+      "buildNumber": "1",
+      "supportsTablet": true,
+      "userInterfaceStyle": "automatic",
+      "icon": "./assets/icon.png",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIViewControllerBasedStatusBarAppearance": true
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "name": "Shop Management System",
+      "themeColor": "#172B4D",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "./plugins/with-android-build-settings",
+      "expo-router",
+      "expo-secure-store",
+      ["expo-sqlite", {}],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 220,
+          "resizeMode": "contain",
+          "backgroundColor": "#0F5C4D",
+          "dark": {
+            "image": "./assets/splash-icon.png",
+            "backgroundColor": "#0D1520"
+          }
+        }
+      ]
+    ],
+    "experiments": { "typedRoutes": false }
+  }
+}
