@@ -3,6 +3,7 @@ import Constants from "expo-constants";
 import * as SecureStore from "expo-secure-store";
 import { create } from "zustand";
 import { bindShop, kvGet } from "../database";
+import { refreshVerdict } from "./session-policy";
 
 /**
  * Web talks to localhost. A phone in Expo Go cannot: `localhost` is the phone itself,
@@ -133,15 +134,12 @@ async function adopt(session: SessionResponse) {
 }
 
 /**
- * Only a 401/403 from /auth/refresh proves the credential itself is dead. Everything else — a 429
- * from the throttle, a Render 502/503 during a cold start, a 500 while the database reconnects —
- * says nothing about the session.
- *
- * Treating every ApiError as a rejection is what produced the recurring "session expired" message:
- * one bad-tempered refresh during a cold start set `refreshBlocked`, dropped the access token and
- * forced a sign-in, even though the very same credential would have worked a second later.
+ * Only a 401/403 in which the server actually examined a credential proves that credential is dead.
+ * Everything else — a 429 from the throttle, a Render 502/503 during a cold start, a 500 while the
+ * database reconnects, or a 401 saying no credential arrived at all — says nothing about the session.
+ * The rule lives in `session-policy.ts` so it can be unit-tested on its own.
  */
-const isDefinitiveRejection = (e: ApiError) => e.status === 401 || e.status === 403;
+const rejected = (e: ApiError) => refreshVerdict(e.status, e.body) === "rejected";
 
 /** The server rejected the refresh credential: the session is over until a new sign-in. */
 function blockSession(status: number, reason: string) {
@@ -188,7 +186,7 @@ function refreshSession(force = false): Promise<boolean> {
       try {
         session = await refreshOnce(body);
       } catch (e) {
-        if (e instanceof ApiError && isDefinitiveRejection(e)) { blockSession(e.status, String(e.message)); return false; }
+        if (e instanceof ApiError && rejected(e)) { blockSession(e.status, String(e.message)); return false; }
         // A transient answer (502/503/429/500) or a dropped connection: one immediate retry, then
         // back off for a while. The refresh credential was never declared invalid, so the session stays.
         await new Promise((r) => setTimeout(r, 400));
@@ -198,7 +196,7 @@ function refreshSession(force = false): Promise<boolean> {
       return true;
     } catch (e) {
       if (e instanceof ApiError) {
-        if (isDefinitiveRejection(e)) blockSession(e.status, String(e.message));
+        if (rejected(e)) blockSession(e.status, String(e.message));
         else deferRefresh(e.status);
       } else refreshRetryAt = Date.now() + REFRESH_BACKOFF_MS;
       return false;

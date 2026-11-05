@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cookieCsrfOk, originIsCrossSite, sameSitePolicy, siteOf } from "../src/common/http";
+import { cookieCsrfOk, originIsCrossSite, sameSitePolicy, setAuthCookies, siteOf } from "../src/common/http";
 
 const req = (origin: string | undefined, host: string) => ({ headers: { origin, host } } as any);
 
@@ -56,6 +56,29 @@ test("CSRF: double submit same-site, allow-listed Origin cross-site, nothing els
   } finally {
     if (prevCors === undefined) delete process.env.CORS_ORIGINS; else process.env.CORS_ORIGINS = prevCors;
   }
+});
+
+test("the refresh cookie is partitioned exactly when it is cross-site", () => {
+  const capture = () => {
+    const calls: { name: string; opts: any }[] = [];
+    return { calls, cookie(name: string, _v: string, opts: any) { calls.push({ name, opts }); }, clearCookie() {} } as any;
+  };
+
+  const cross = capture();
+  setAuthCookies(req("https://idukaa-api.vercel.app", "idukaa-qqk2.onrender.com"), cross, "rt-token", 1000);
+  const rt = cross.calls.find((c) => c.name === "sms_rt")!;
+  assert.equal(rt.opts.sameSite, "none");
+  assert.equal(rt.opts.secure, true, "SameSite=None is only accepted with Secure");
+  assert.equal(rt.opts.httpOnly, true, "JavaScript must never read the refresh token");
+  assert.equal(rt.opts.path, "/auth", "the cookie is only sent to the auth endpoints");
+  assert.equal(rt.opts.partitioned, true,
+    "a SameSite=None cookie is third-party; without Partitioned, browsers that block third-party cookies drop it");
+
+  const same = capture();
+  setAuthCookies(req("https://app.example.rw", "api.example.rw"), same, "rt-token", 1000);
+  const firstParty = same.calls.find((c) => c.name === "sms_rt")!;
+  assert.equal(firstParty.opts.sameSite, "strict");
+  assert.ok(!("partitioned" in firstParty.opts), "a first-party cookie needs no partition");
 });
 
 test("an explicit COOKIE_SAMESITE always wins and is validated", () => {

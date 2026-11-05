@@ -61,6 +61,7 @@ export function authLog(
 export function refreshFailureCategory(message: string): AuthCategory {
   switch (message) {
     case "refresh_invalid": return "unknown_token";
+    case "refresh_missing_credential": return "missing_refresh_credential";
     case "refresh_expired": return "token_expired";
     case "refresh_reused": return "token_reused";
     case "session_revoked": return "session_revoked";

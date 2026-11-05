@@ -209,7 +209,11 @@ export class ReportsController {
       : null;
 
     // Product profitability slices for the charts (top by gross profit, weak margins). Owners only.
-    const productFin = canSeeFinancials ? await this.finance.productProfitability(shopId, from, to, moves) : [];
+    // Isolated like every other optional panel: if this one query cannot run, the owner still sees
+    // the period totals and stock, and `degraded` names the slice that is missing.
+    const productFin = canSeeFinancials
+      ? await this.section(req, "product_profitability", () => this.finance.productProfitability(shopId, from, to, moves), [])
+      : [];
     const topProductsByProfit = productFin.filter(i => i.units > 0)
       .sort((a, b) => b.grossProfit - a.grossProfit).slice(0, 5)
       .map(p => ({ productId: p.productId, name: p.name, units: p.units, revenue: p.revenue,

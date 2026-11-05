@@ -1,4 +1,4 @@
-import type { Request, Response } from "express";
+import type { CookieOptions, Request, Response } from "express";
 import { newOpaqueToken } from "../auth/security";
 
 /** Minimal cookie reader (no extra dependency). */
@@ -66,9 +66,16 @@ export function sameSitePolicy(req: Request): "strict" | "lax" | "none" {
   return originIsCrossSite(req) ? "none" : "strict";
 }
 
-const cookieBase = (req: Request) => {
+const cookieBase = (req: Request): CookieOptions => {
   const sameSite = sameSitePolicy(req);
-  return { secure: requestIsHttps(req) || sameSite === "none", sameSite };
+  const secure = requestIsHttps(req) || sameSite === "none";
+  // A SameSite=None cookie read by a different site (web on *.vercel.app, API on *.onrender.com)
+  // is a THIRD-PARTY cookie. Browsers that block third-party cookies drop it whatever SameSite
+  // says, which is indistinguishable from "the session vanished". Partitioned (CHIPS) keeps it
+  // in a per-top-level-site store where those browsers still send it. It stays HttpOnly + Secure
+  // and is still bound to this host and path, so nothing about the credential's strength changes.
+  const partitioned = sameSite === "none" && secure;
+  return { secure, sameSite, ...(partitioned ? ({ partitioned: true } as CookieOptions) : {}) };
 };
 
 /** Matches REFRESH_TOKEN_TTL_DAYS (clamped the same way as the server-side session). */

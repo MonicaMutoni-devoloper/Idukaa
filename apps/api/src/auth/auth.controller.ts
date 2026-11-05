@@ -64,7 +64,10 @@ export class AuthController {
       // Evidence for the transport question: on a cross-site deployment a Strict cookie is simply
       // never sent, so this category with crossSite=true means "the browser dropped the cookie".
       authLog(req, "refresh.failed", "missing_refresh_credential", { cookiePresent: fromCookie, bodyToken: !!b.success && !!b.data?.refreshToken });
-      throw new UnauthorizedException("refresh_invalid");
+      // Deliberately NOT `refresh_invalid`: no credential reached the server, so the server has
+      // learned nothing about whether the session is valid. A client that cannot tell these apart
+      // signs the user out for what is really a cookie-transport problem.
+      throw new UnauthorizedException("refresh_missing_credential");
     }
     try {
       const session = await this.auth.refresh(presented, clientMeta(req));
