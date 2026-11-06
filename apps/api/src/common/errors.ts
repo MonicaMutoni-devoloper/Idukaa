@@ -2,6 +2,7 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logge
 import type { Request } from "express";
 import { ZodError } from "zod";
 import { requestIdOf } from "./auth-log";
+import { SCHEMA_ERROR_CODES, migrationHint } from "../db/schema-hint";
 
 /**
  * The one place raw ZodErrors become HTTP 400s (everything else throws HttpException directly).
@@ -24,6 +25,17 @@ export class Filter implements ExceptionFilter {
       // A 5xx thrown deliberately (e.g. a dependency is down) still deserves a diagnostic line.
       if (e.getStatus() >= HttpStatus.INTERNAL_SERVER_ERROR) this.diagnose(e, ctx.getRequest(), e.getStatus());
       return res.status(e.getStatus()).json(typeof e.getResponse() === "string" ? { error: e.getResponse() } : e.getResponse());
+    }
+    // The database is older than this build: a column or table the code needs was never created by
+    // a migration. That is a deployment state, not a bug in the request, so it is the same 503 the
+    // reports already use (`schema_out_of_date`) — now answered for every route, and naming the
+    // migration to apply so nobody has to decode `42703` or guess which file is missing. Only
+    // schema object names travel in the body, never rows.
+    const pgCode = (e as { code?: string } | null)?.code;
+    if (pgCode && SCHEMA_ERROR_CODES.has(pgCode)) {
+      const requestId = this.diagnose(e, ctx.getRequest(), 503);
+      const detail = String((e as { message?: string })?.message ?? "").slice(0, 200);
+      return res.status(503).json({ error: "schema_out_of_date", requestId, detail, migration: migrationHint(detail) });
     }
     const requestId = this.diagnose(e, ctx.getRequest(), 500);
     // Never leak internals; the id is the only extra field and it contains no data.

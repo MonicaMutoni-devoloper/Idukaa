@@ -3,8 +3,11 @@
 **API**: Node 20+ container/VM + managed PostgreSQL 15+. Set `DATABASE_URL`, `JWT_SECRET` (≥48 random
 chars), `JWT_EXPIRES_IN` (default `15m`), `REFRESH_TOKEN_TTL_DAYS`, `TOTP_ENCRYPTION_KEY` (32 bytes
 base64 or 64 hex — required for 2FA), `PASSWORD_RESET_URL`, `PASSWORD_RESET_DEV_MODE=false`,
-`COOKIE_SECURE=true`, `CORS_ORIGINS` (the exact PWA origin) and `PORT`. Run `npm run migrate` on each
-release (idempotent, tracked in `schema_migrations`). Terminate TLS at a reverse proxy (nginx/Caddy) and
+`COOKIE_SECURE=true`, `CORS_ORIGINS` (the exact PWA origin) and `PORT`. Pending migrations are applied
+by the API itself before it opens the port (tracked in `schema_migrations`, serialized by a PostgreSQL
+advisory lock, `DIRECT_URL` preferred), so new code can never serve an older schema; a migration that
+fails stops that instance from starting. Set `AUTO_MIGRATE=false` to run `npm run migrate` out of band
+instead. Terminate TLS at a reverse proxy (nginx/Caddy) and
 forward `X-Forwarded-Proto: https` (`trust proxy` is enabled). Put monitoring on `GET /admin/health`
 (admin token).
 

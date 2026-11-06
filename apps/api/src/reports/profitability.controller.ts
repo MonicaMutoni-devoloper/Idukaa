@@ -5,9 +5,7 @@ import { FinanceService, parseRange } from "./finance.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { reportLog } from "../common/report-log";
 import { requestIdOf } from "../common/auth-log";
-
-/** PostgreSQL error codes that mean the schema is behind the code, not that the request was wrong. */
-const SCHEMA_ERROR_CODES = new Set(["42703", "42P01", "42883", "42702"]);
+import { SCHEMA_ERROR_CODES } from "../db/schema-hint";
 
 /**
  * Product profitability and pricing advice (spec §6–§7). One route: every number comes from the
