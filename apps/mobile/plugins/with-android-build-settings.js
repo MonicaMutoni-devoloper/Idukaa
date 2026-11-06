@@ -4,6 +4,7 @@ const { withAppBuildGradle, withProjectBuildGradle } = require('expo/config-plug
 // that this project actually builds with live here instead of hand-edited Gradle files.
 // See docs/CROSS_PLATFORM.md and docs/ANDROID_BUILD.md.
 const MARKER = 'idukaa-native-build-settings';
+const STAGING_MARKER = 'idukaa-cxx-staging-subprojects';
 
 const ROOT_BLOCK = `
 // ${MARKER}: React Native 0.88 / Expo SDK 58 AARs enforce compileSdk 37 via their AAR metadata,
@@ -32,10 +33,29 @@ const APP_BLOCK = `
     }
 `;
 
+// The app-level staging directory above is not enough: native modules (react-native-screens,
+// reanimated, expo modules) build their own CMake trees under `node_modules/<module>/android/.cxx`,
+// which is where the 260-character limit actually overflows on Windows. Give each library module a
+// staging directory under the same short root, keyed by project name so modules never collide.
+const STAGING_BLOCK = `
+// ${STAGING_MARKER}: Windows MAX_PATH (260) workaround for native modules too.\nif (System.getenv('IDUKAA_CXX_STAGING') != null) {
+  def idukaaStagingRoot = System.getenv('IDUKAA_CXX_STAGING')
+  subprojects { idukaaSub ->
+    idukaaSub.plugins.withId('com.android.library') {
+      idukaaSub.android.externalNativeBuild.cmake.buildStagingDirectory =
+        new File(idukaaStagingRoot, idukaaSub.name).absolutePath
+    }
+  }
+}
+`;
+
 module.exports = function withAndroidBuildSettings(config) {
   config = withProjectBuildGradle(config, (cfg) => {
     if (!cfg.modResults.contents.includes(MARKER)) {
       cfg.modResults.contents += ROOT_BLOCK;
+    }
+    if (!cfg.modResults.contents.includes(STAGING_MARKER)) {
+      cfg.modResults.contents += STAGING_BLOCK;
     }
     return cfg;
   });

@@ -1,7 +1,7 @@
 import type { Key } from "./en";
 // NOTE: have a native Kinyarwanda speaker (ideally a shop owner) review before release.
 export const rw: Record<Key, string> = {
-  "app.name": "Imicungire y'Iduka", "brand.tagline": "Ubucuruzi butakenera interineti · u Rwanda",
+  "app.name": "Idukaa", "brand.tagline": "Ubucuruzi butakenera interineti · u Rwanda",
 
   "login.welcome": "Injira mu iduka", "login.subtitle": "Koresha konti nyir'iduka yaguhaye.",
   "login.email": "Izina ry'umukoresha cyangwa imeri", "login.password": "Ijambobanga", "login.submit": "Injira", "login.signingIn": "Turi kwinjira…",

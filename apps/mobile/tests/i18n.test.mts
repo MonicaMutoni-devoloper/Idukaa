@@ -28,8 +28,8 @@ test("placeholders match between languages", () => {
   for (const k of keys) assert.equal(placeholders(rw[k]), placeholders(en[k]), `placeholders in ${k}`);
 });
 
-/** Keys where the Kinyarwanda value is intentionally identical (a loanword, a symbol or a code). */
-const IDENTICAL_BY_DESIGN = new Set(["stock.barcode", "receive.equals"]);
+/** Keys where the Kinyarwanda value is intentionally identical (a loanword, a symbol, a code, a brand). */
+const IDENTICAL_BY_DESIGN = new Set(["stock.barcode", "receive.equals", "app.name"]);
 
 test("no Kinyarwanda string is a copy of the English one", () => {
   for (const k of keys) {

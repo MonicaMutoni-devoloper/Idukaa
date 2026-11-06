@@ -1,5 +1,5 @@
 export const en = {
-  "app.name": "Shop Management", "brand.tagline": "Offline-first retail · Rwanda",
+  "app.name": "Idukaa", "brand.tagline": "Offline-first retail · Rwanda",
 
   "login.welcome": "Sign in", "login.subtitle": "Use the account your shop owner created for you.",
   "login.email": "Username or email", "login.password": "Password", "login.submit": "Sign in", "login.signingIn": "Signing in…",
