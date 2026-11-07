@@ -53,6 +53,9 @@ test("every other database failure keeps the opaque 500 and its request id", () 
 test("the migration hint follows the SQL, including columns added later", () => {
   assert.equal(migrationHint('column "qty_entered" of relation "sale_lines" does not exist'), "004_unit_conversion.sql");
   assert.equal(migrationHint('column "status" of relation "shops" does not exist'), "007_admin_platform.sql");
+  // PostgreSQL omits the relation for some statements; a column only one migration declares is
+  // still an unambiguous answer. (Seen in production as `units_per_purchase` with no relation.)
+  assert.equal(migrationHint('column "units_per_purchase" does not exist'), "004_unit_conversion.sql");
   // A column declared in the original schema points at that migration, not at a later one.
   assert.equal(migrationHint('column "gross_amount" of relation "sales" does not exist'), "001_init.sql");
   assert.equal(migrationHint('column "made_up" of relation "products" does not exist'), null);
