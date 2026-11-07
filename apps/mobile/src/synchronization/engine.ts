@@ -3,6 +3,7 @@ import { AppState } from "react-native";
 import { create } from "zustand";
 import { ApiError, ensureSession, getDeviceId, request, sessionRejected, useSession } from "../services/api";
 import { applyPull, applyResults, dueOps, kvGet, kvSet, markRetry, outboxCounts, retryNow } from "../database";
+import { failureMessage } from "./failure";
 import type { OpResult, PullResponse } from "@sms/shared";
 
 export const useSync = create<{ online: boolean; running: boolean; pending: number; issues: number; awaitingApproval: number; authRequired: boolean; lastSync: string | null; dataVersion: number; recordsVersion: number }>(() => ({ online: true, running: false, pending: 0, issues: 0, awaitingApproval: 0, authRequired: false, lastSync: null, dataVersion: 0, recordsVersion: 0 }));
@@ -51,7 +52,9 @@ async function runPass(force: boolean): Promise<void> {
         // Only a rejected credential needs the user to sign in; a token that is merely not available
         // yet (offline reload, refresh backing off) keeps the queue and retries on the next pass.
         if (e instanceof ApiError && e.status === 401 && sessionRejected()) { useSync.setState({ authRequired: true }); return; }
-        await markRetry(due.map(r => r.op_id), e instanceof ApiError ? `server_${e.status}` : "network"); break; // backoff; try again later
+        // A 503 `schema_out_of_date` is recorded with the migration the server named, so the sync
+        // screen can say "server update required" instead of showing a bare `server_503`.
+        await markRetry(due.map(r => r.op_id), e instanceof ApiError ? failureMessage(e.status, e.body) : "network"); break; // backoff; try again later
       }
     }
     for (;;) { // pull

@@ -5,6 +5,7 @@ import { listOutbox, storageBackend, type OutboxRow } from "../../src/database/l
 import { useT, type Key } from "../../src/localization";
 import { useSession } from "../../src/services/api";
 import { syncNow, useSync } from "../../src/synchronization/engine";
+import { schemaOutOfDate } from "../../src/synchronization/failure";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
 const tone = (s: string) => (s === "synced" ? "ok" : s === "conflict" || s === "rejected" ? "danger" : s === "pending_approval" ? "info" : "warn") as "ok" | "danger" | "info" | "warn";
@@ -20,12 +21,19 @@ export default function SyncScreen() {
   }, [user.id, dataVersion, pending, issues]);
 
   const storage = storageBackend();
+  // The server's database being older than its code is the one failure the user cannot fix from
+  // this screen; name it once, above the queue, instead of leaving a bare `server_503` in a row.
+  const stale = rows.map((r) => schemaOutOfDate(r.message)).find((s) => s !== null) ?? null;
   const statusLabel = (s: string): Key => (s === "synced" ? "sync.synced" : s === "conflict" || s === "rejected" ? "sync.conflict" : s === "pending_approval" ? "appr.pending" : "sync.pending");
 
   return (
     <Screen title={t("nav.sync")} subtitle={t("sync.subtitle")}
       actions={<Button testID="sync-now" label={running ? t("common.loading") : t("sync.now")} disabled={!online} onPress={() => void syncNow(true)} />}>
       {authRequired ? <Banner tone="danger" title={t("sync.failed")} text={t("sync.authRequired")} /> : null}
+      {stale ? (
+        <Banner tone="warn" title={t("sync.schemaOutOfDateTitle")}
+          text={`${t("sync.schemaOutOfDate")}${stale.migration ? ` (${stale.migration})` : ""}`} />
+      ) : null}
 
       <SyncProgress />
 
@@ -59,7 +67,10 @@ export default function SyncScreen() {
           { key: "status", title: t("common.status"), width: 1.2, render: (r) => <Badge tone={tone(r.status)} label={t(statusLabel(r.status))} /> },
           { key: "created_at", title: t("sync.savedAt"), width: 1.6, render: (r) => <Text style={{ color: c.inkSoft, fontSize: 12 }}>{new Date(r.created_at).toLocaleString()}</Text> },
           { key: "attempts", title: t("sync.attempts"), align: "right", width: 0.8, render: (r) => <Text style={{ color: c.muted, fontSize: 12 }}>{r.attempts}</Text> },
-          { key: "message", title: t("sync.message"), width: 2, render: (r) => <Text style={{ color: r.message ? c.danger : c.muted, fontSize: 12 }}>{r.message ?? "—"}</Text> },
+          { key: "message", title: t("sync.message"), width: 2, render: (r) => {
+            const rowStale = schemaOutOfDate(r.message);
+            return <Text style={{ color: r.message ? c.danger : c.muted, fontSize: 12 }}>{rowStale ? t("sync.schemaOutOfDateShort") : r.message ?? "—"}</Text>;
+          } },
         ]} empty={<Empty icon="sync" title={t("sync.emptyQueue")} description={t("sync.emptyQueueDesc")} />} />
       </View>
 
