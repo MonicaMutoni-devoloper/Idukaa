@@ -1,5 +1,5 @@
 import * as Crypto from "expo-crypto";
-import { formatQty, parseQty, presetRange as calendarRange } from "@sms/shared";
+import { dayRange, formatQty, kigaliDay, parseQty, presetRange as calendarRange } from "@sms/shared";
 
 export const uuid = () => Crypto.randomUUID();
 export type Preset = "today" | "yesterday" | "week" | "month" | "year";
@@ -27,17 +27,18 @@ export function dayToDate(day: string): Date | null {
   return d.getFullYear() === Number(m[1]) && d.getMonth() === Number(m[2]) - 1 && d.getDate() === Number(m[3]) ? d : null;
 }
 
-/** Inclusive custom range in local time; `toDay` is inclusive (end = the next midnight). */
+/**
+ * Inclusive custom range on the Kigali business calendar; `toDay` is inclusive (end = the next
+ * Kigali midnight). Device-local midnights would shift the report for a phone or browser set to
+ * another timezone, which is exactly what the shared `dayRange` prevents.
+ */
 export function customRange(fromDay: string, toDay: string): Range | null {
-  const from = dayToDate(fromDay); const to = dayToDate(toDay);
-  if (!from || !to || from > to) return null;
-  return { from: from.toISOString(), to: addDays(to, 1).toISOString() };
+  const from = dayRange(fromDay); const to = dayRange(toDay);
+  if (!from || !to || Date.parse(from.from) > Date.parse(to.from)) return null;
+  return { from: from.from, to: to.to };
 }
 
-export const todayDay = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-};
+export const todayDay = () => kigaliDay(Date.now());
 export const addDaysToDay = (day: string, n: number) => {
   const d = dayToDate(day) ?? new Date();
   const x = addDays(d, n);

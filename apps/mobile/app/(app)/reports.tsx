@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
-import { formatQty, formatRwf } from "@sms/shared";
+import { formatQty, formatRwf, kigaliDay } from "@sms/shared";
 import {
   Badge, Banner, Button, ConfirmDialog, Field, KeyValue, Loading, Modal, Screen, Segmented,
 } from "../../src/components/ui";
@@ -229,6 +229,10 @@ export default function Reports() {
           {rangeError ? <Text style={{ color: c.danger, fontSize: 12, alignSelf: "center" }}>{rangeError}</Text> : null}
         </View>
       ) : null}
+      {/* The inclusive Kigali business dates behind every figure, so the period is never implicit. */}
+      <Text testID="reports-range" style={{ color: c.muted, fontSize: 12 }}>
+        {kigaliDay(from)} → {kigaliDay(Date.parse(to) - 1)}
+      </Text>
 
       {notice ? <Banner tone={notice.tone} text={notice.text} /> : null}
 

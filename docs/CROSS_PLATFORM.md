@@ -7,7 +7,7 @@ One Expo/React Native codebase, one backend, one sync strategy. This report stat
 
 | Target | Local store | Status | Artifact |
 |---|---|---|---|
-| **Android (native)** | `expo-sqlite` | **Built and signed — installable APK exists, verified on a phone** | `dist/idukaa-1.0.4-android-release.apk` (48,631,488 bytes, SHA-256 `15e65c4e3427b82d0105749bfd0716b256347f5bdf3ce5174205eff61d25433a`, `versionCode 5`) |
+| **Android (native)** | `expo-sqlite` | **Built and signed — installable APK exists; 1.0.4 verified on a phone, 1.0.5 build not yet installed** | `dist/idukaa-1.0.5-android-release.apk` (48,733,668 bytes, SHA-256 `b6e5c32b9e9e47569a2e09aa065030235282c92201311858bb48ef65205cdb11`, `versionCode 6`) |
 | **iOS (native)** | `expo-sqlite` | Configured only — not built (needs macOS + Apple credentials) | none — see `docs/IOS_BUILD.md` |
 | **Web / PWA** | `local.web.ts` → IndexedDB | Built and deployed earlier in this project | `expo export --platform web` output with service worker (`dist/sw.js`) |
 | **Windows desktop** | IndexedDB (via the PWA) | Supported as an installable PWA | no native Windows target exists for Expo SDK 58 — see `docs/ANDROID_BUILD.md` §3 |
@@ -83,13 +83,13 @@ Result: `BUILD SUCCESSFUL in 11m 12s`, 639 tasks (120 executed), 4 ABIs bundled
 Verified on the produced file (`aapt2` / `apksigner` / `unzip -t`):
 
 ```
-package: name='rw.shop.management' versionCode='5' versionName='1.0.4'
+package: name='rw.shop.management' versionCode='6' versionName='1.0.5'
 compileSdkVersion='37'  sdkVersion:'24'  targetSdkVersion:'36'
 Signer #1 certificate DN: CN=Android Debug, OU=Android, O=Unknown, ...
 zip: "No errors detected in compressed data"
 ```
 
-Install: `adb install -r dist/idukaa-1.0.4-android-release.apk`, or copy the file to the phone and
+Install: `adb install -r dist/idukaa-1.0.5-android-release.apk`, or copy the file to the phone and
 open it with "install unknown apps" allowed.
 
 `npm run verify:apk -- dist/<apk>` adds two checks beyond the metadata above: every native library
@@ -127,6 +127,9 @@ prebuild:
   keystore exists yet. It installs and runs, but it must not be published: Play requires a release
   key, and updates signed with a different key are rejected. Generate one and rebuild before any
   real distribution (`eas build` handles this automatically, or `keytool` + `signingConfigs`).
+- **Physical device: 1.0.5 was not installed.** The Infinix X657 was not visible to `adb devices`
+  after the 1.0.5 build completed, so the new native PDF/print path and the split financial basis
+  have not been exercised on hardware yet. The results below remain the 1.0.4 evidence.
 - **Physical device: catalogue pull and offline persistence verified on 1.0.4; recording a sale is
   not.** 1.0.4 was installed over 1.0.3 on the Infinix X657 that produced the original crash report
   (`pm install -r`, `versionCode 5`, data kept) and Stock then listed all 5 server products with a

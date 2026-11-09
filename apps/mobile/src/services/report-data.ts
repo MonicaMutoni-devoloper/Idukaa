@@ -6,8 +6,8 @@ import type {
 } from "./local-reports";
 import { buildLocalReport, buildLocalSummary } from "./local-reports-data";
 import {
-  applyPendingStock, inventoryFromProducts, mergePendingItems, movementsFromRecords, salesTotals,
-  type InventoryRow, type MovementRow,
+  applyPendingStock, inventoryFromProducts, mergePendingItems, movementsFromRecords, pendingFinancials, salesTotals,
+  type InventoryRow, type MovementRow, type PendingFinancials,
 } from "./report-analytics";
 import type { LocalSummaryPayload } from "./local-reports";
 
@@ -290,13 +290,24 @@ export interface SummaryPayload {
 }
 
 export interface FinancialData {
+  /** Server-confirmed P&L: successfully synchronized records only. Null when no server answer is held. */
   summary: SummaryPayload | null;
+  /** P&L calculated on this device from every record it holds, queued operations included. */
+  localSummary: SummaryPayload | null;
+  /** Server-confirmed ledger rows, with no queued operation merged in. */
   expenses: ReportExpenseRow[];
   purchases: ReportPurchaseRow[];
   adjustments: ReportAdjustmentRow[];
   /** Posted sales in the period: the rows behind the revenue trend. */
   sales: ReportSaleRow[];
-  /** True when the summary was calculated on this device (cost basis may be incomplete). */
+  /** The same ledgers as this device holds them (synchronized records plus queued operations). */
+  localExpenses: ReportExpenseRow[];
+  localPurchases: ReportPurchaseRow[];
+  localAdjustments: ReportAdjustmentRow[];
+  localSales: ReportSaleRow[];
+  /** Value of queued operations in the period, shown separately — never folded into a confirmed total. */
+  pending: PendingFinancials;
+  /** True when the local ledger cannot price every movement (cost basis or history incomplete). */
   provisional: boolean;
 }
 
@@ -336,16 +347,40 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
     }
   };
 
+  /** Local operational view: every record on this device, each counted exactly once. */
+  const localBundle = async () => {
+    const [summary, rows] = await Promise.all([localSummary(ctx), localRows()]);
+    return { summary, rows, pending: pendingFinancials(rows) };
+  };
+  type LocalBundle = Awaited<ReturnType<typeof localBundle>>;
+  const withLocal = (base: Omit<FinancialData, "localSummary" | "localExpenses" | "localPurchases" | "localAdjustments" | "localSales" | "pending" | "provisional" | "summary"> & { summary: SummaryPayload | null }, local: LocalBundle): FinancialData => ({
+    ...base,
+    summary: base.summary,
+    localSummary: local.summary,
+    localExpenses: local.rows.expenses, localPurchases: local.rows.purchases,
+    localAdjustments: local.rows.adjustments, localSales: local.rows.sales,
+    pending: local.pending,
+    provisional: !local.summary || local.summary.provisional === true,
+  });
+  const emptyBase = { expenses: [], purchases: [], adjustments: [], sales: [] };
+
   const fromDevice = async (): Promise<FinancialData | null> => {
     if (!ctx.financials) return null;
-    const summary = await localSummary(ctx);
-    if (!summary) return null;
-    return { summary, ...(await localRows()), provisional: true };
+    const local = await localBundle();
+    if (!local.summary) return null;
+    return withLocal({ summary: null, ...emptyBase }, local);
   };
 
   if (!ctx.online) {
     const cached = await readCache<FinancialData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps }) };
+    if (cached) return {
+      data: withLocal({
+        summary: cached.data.summary ?? null,
+        expenses: cached.data.expenses ?? [], purchases: cached.data.purchases ?? [],
+        adjustments: cached.data.adjustments ?? [], sales: cached.data.sales ?? [],
+      }, await localBundle()),
+      meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps }),
+    };
     const device = await fromDevice();
     return device
       ? { data: device, meta: meta({ source: "device", pendingOps }) }
@@ -361,21 +396,23 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
       request<ReportAdjustmentRow[]>(`/reports/transactions?kind=adjustments&${q}`),
       request<ReportSaleRow[]>(`/reports/transactions?kind=sales&${q}`),
     ]);
-    const local = await localRows();
-    const pendingOf = <T extends { syncStatus?: string }>(rows: T[]) => rows.filter((r) => r.syncStatus && isUnsynced(r.syncStatus));
-    const data: FinancialData = {
-      summary,
-      expenses: mergePendingRows(expenses, pendingOf(local.expenses)),
-      purchases: mergePendingRows(purchases, pendingOf(local.purchases)),
-      adjustments: mergePendingRows(adjustments, pendingOf(local.adjustments)),
-      sales: mergePendingRows(sales, pendingOf(local.sales)),
-      provisional: false,
-    };
+    // Confirmed rows stay exactly as the server returned them; queued work lives in the local
+    // basis. This is what keeps a pending sale from appearing in both totals at once.
+    const data = withLocal({
+      summary, expenses, purchases, adjustments, sales,
+    }, await localBundle());
     void writeCache(ctx, view, data);
     return { data, meta: meta({ source: "server", pendingOps }) };
   } catch (e) {
     const cached = await readCache<FinancialData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps, ...failMeta(e) }) };
+    if (cached) return {
+      data: withLocal({
+        summary: cached.data.summary ?? null,
+        expenses: cached.data.expenses ?? [], purchases: cached.data.purchases ?? [],
+        adjustments: cached.data.adjustments ?? [], sales: cached.data.sales ?? [],
+      }, await localBundle()),
+      meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps, ...failMeta(e) }),
+    };
     const device = await fromDevice();
     if (device) return { data: device, meta: meta({ source: "device", pendingOps, ...failMeta(e) }) };
     return { data: null, meta: { ...EMPTY_META, pendingOps, ...failMeta(e) } };

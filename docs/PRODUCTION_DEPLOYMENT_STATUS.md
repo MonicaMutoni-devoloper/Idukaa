@@ -851,3 +851,29 @@ locally against the same cross-site shape (web.localhost → api.localhost: logi
 second refresh 201), and the unit/integration suites cover the rest. If a production reload still
 prompts for sign-in, check the Render logs for `auth.refresh.failed` — the `category` and `crossSite`
 fields now say exactly which step failed.
+
+---
+
+## 12. Production re-check (9 Nov 2026) — public and transport only
+
+Run against `main` at `e7f68ea`, before the uncommitted financial-basis changes:
+
+| Check | Result |
+|---|---|
+| `node scripts/verify-deployment.mjs` | **23/23 pass** (API health, 401s, CORS, web bundle, no loopback URL) |
+| `GET /reports/movements` and `GET /reports/items` without a session | **401** each; an unknown sibling route returns **404**, so the deployed API really carries the new reporting routes |
+| `GET /realtime` WebSocket upgrade | **101 Switching Protocols** through Render/Cloudflare; an upgrade to another path returns **404**. Unauthenticated sockets are closed after 5 s by design |
+| Production web bundle | `Reports & Analytics` is present in the deployed entry bundle; the deployed reports chunk predates the local/confirmed financial split (it is uncommitted) |
+| `GET /app/version` | serves `latest 1.0.2 (3)` — the Render `APP_*` variables still point at the older release, so installing 1.0.5 locally does not advertise it to 1.0.4 users |
+
+**Still unverified in production:** every authenticated flow (sign-in, owner/manager reports, the two
+financial bases, sync). No production credentials are held in this environment, and creating a shop
+or writing test records to the live database was deliberately not done. Realtime transport is live,
+but an authenticated `ready` frame and cross-device `change` delivery were not exercised against
+production; that remains covered by the server and mobile test suites and must be re-checked with a
+real shop account.
+
+**Release note:** `dist/idukaa-1.0.5-android-release.apk` is local only. `APP_LATEST_VERSION=1.0.5`,
+`APP_LATEST_VERSION_CODE=6` and a reachable `APP_UPDATE_URL` must be set on Render (and the APK
+published) before the update banner can offer it. Do not raise the manifest to a version with no
+download URL.

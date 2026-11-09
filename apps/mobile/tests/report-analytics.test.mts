@@ -12,8 +12,8 @@ import assert from "node:assert/strict";
 import { dayRange } from "@sms/shared";
 import {
   deltaOf, discountedSales, expenseBreakdown, expenseTotals, inventoryFromProducts, inventoryMetrics,
-  mergePendingItems, movementGroup, movementMetrics, movementSeries, movementsFromRecords, salesByCashier,
-  salesByCategory, salesSeries, salesTotals, seriesOf,
+  mergePendingItems, movementGroup, movementMetrics, movementSeries, movementsFromRecords, pendingFinancials,
+  salesByCashier, salesByCategory, salesSeries, salesTotals, seriesOf,
 } from "../src/services/report-analytics.ts";
 import { bucketKey, bucketKeys, bucketModeFor, previousRange } from "../src/services/report-period.ts";
 import type { LocalProduct, LocalRecord } from "../src/database/local.ts";
@@ -252,6 +252,32 @@ test("movements outside the period are excluded, and the series compares receive
   assert.equal(rows.length, 1);
   const series = movementSeries(rows, DAY.from, DAY.to, "day");
   assert.deepEqual(series, [{ date: "2026-11-03", received: 0, sold: 2000 }]);
+});
+
+/* ------------------------------------------------------------------ pending financials */
+
+test("pending financials sum only the queued rows, net of discounts, and expose their counts", () => {
+  const p = pendingFinancials({
+    sales: [sale(), sale({ id: "s2", gross_amount: 5000, discount: 0, units: 1000 }), sale({ id: "s3", status: "reversed" })] as any,
+    expenses: [{ id: "e1", category: "rent", amount: 500, paid: true }, { id: "e2", category: "transport", amount: 300, paid: false }] as any,
+    purchases: [{ id: "pu1", total_amount: 5000 }, { id: "pu2", total_amount: 2500 }] as any,
+  });
+  assert.equal(p.salesGross, 7000);
+  assert.equal(p.salesDiscounts, 200);
+  assert.equal(p.salesNet, 6800);
+  assert.equal(p.salesCount, 2, "a reversed sale is not pending revenue");
+  assert.equal(p.expenses, 800);
+  assert.equal(p.expenseCount, 2);
+  assert.equal(p.purchases, 7500);
+  assert.equal(p.purchaseCount, 2);
+});
+
+test("pending financials are zero only when there are no queued rows, never because cost is unknown", () => {
+  const p = pendingFinancials({ sales: [], expenses: [], purchases: [] });
+  assert.deepEqual(p, {
+    salesNet: 0, salesGross: 0, salesDiscounts: 0, salesCount: 0,
+    expenses: 0, expenseCount: 0, purchases: 0, purchaseCount: 0,
+  });
 });
 
 /* ------------------------------------------------------------------ reconciliation */

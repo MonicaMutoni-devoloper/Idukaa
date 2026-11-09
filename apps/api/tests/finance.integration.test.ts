@@ -197,6 +197,59 @@ test("sale detail splits the sale discount exactly across its lines", { skip }, 
   assert.equal(detail.lines[0].net, 4500, "line net sums to the sale net");
 });
 
+test("stock movements: real running balances, filters and manager cost gating", { skip }, async () => {
+  const all = await reports.stockMovements(owner, { from: JAN.from, to: JAN.to });
+  assert.equal(all.financials, true, "the owner sees cost");
+  assert.equal(all.truncated, false);
+  assert.ok(all.items.length >= 5, "receipts and sales from January are listed");
+  for (const row of all.items) {
+    assert.equal(row.balanceAfter, row.balanceBefore + row.qty,
+      `running balance is consistent for movement ${row.id}`);
+  }
+  // Newest first, and the balance window covers history before the period: the second receipt
+  // opens at the quantity left by the first, not at zero.
+  for (let i = 1; i < all.items.length; i++) assert.ok(all.items[i - 1].at >= all.items[i].at);
+  const receipts = await reports.stockMovements(owner, { from: JAN.from, to: JAN.to, type: "receipt" });
+  assert.ok(receipts.items.length >= 3);
+  assert.ok(receipts.items.every((r: any) => r.type === "receipt"));
+  assert.ok(receipts.items.every((r: any) => typeof r.unitCost === "number"), "owner receipts carry cost");
+
+  const forX = await reports.stockMovements(owner, { from: JAN.from, to: JAN.to, productId: prodX });
+  assert.ok(forX.items.length > 0);
+  assert.ok(forX.items.every((r: any) => r.productId === prodX), "the product filter never leaks another product");
+  assert.ok(forX.items.some((r: any) => r.type === "sale"));
+
+  await assert.rejects(() => reports.stockMovements(owner, { from: JAN.from, to: JAN.to, type: "nonsense" }),
+    (e: any) => e.getStatus?.() === 400 || e.status === 400, "an unknown movement type is a 400");
+  await assert.rejects(() => reports.stockMovements(owner, { from: JAN.from, to: JAN.to, productId: "not-a-uuid" }),
+    (e: any) => e.getStatus?.() === 400 || e.status === 400, "an invalid product id is a 400");
+
+  const mgr = await reports.stockMovements(manager, { from: JAN.from, to: JAN.to });
+  assert.equal(mgr.financials, false, "a manager without the grant is told costs are hidden");
+  assert.ok(mgr.items.every((r: any) => r.unitCost === null), "no unit cost reaches an unauthorized manager");
+  assert.equal(mgr.items.length, all.items.length, "quantities and balances stay visible");
+
+  const other = await reports.stockMovements(ownerB, { from: JAN.from, to: JAN.to });
+  assert.ok(other.items.every((r: any) => r.productId !== prodX && r.productId !== prodY),
+    "another shop's movements never enter the report");
+});
+
+test("items report includes the product category and stays shop-scoped", { skip }, async () => {
+  await pool.query("UPDATE products SET category='Groceries' WHERE id=$1", [prodX]);
+  const report = await reports.items(owner, { from: JAN.from, to: JAN.to });
+  const x = report.items.find((i: any) => i.productId === prodX);
+  assert.ok(x, "product X sold in January");
+  assert.equal(x.category, "Groceries", "the category is carried to the report for grouping");
+  assert.equal(report.totals.units, 8000);
+  assert.equal(report.totals.net, 7500);
+
+  const managerView = await reports.items(manager, { from: JAN.from, to: JAN.to });
+  assert.equal(managerView.totals.net, 7500, "operational sales totals stay visible without financial access");
+
+  const other = await reports.items(ownerB, { from: JAN.from, to: JAN.to });
+  assert.ok(other.items.every((i: any) => i.productId !== prodX), "no cross-shop product rows");
+});
+
 test("stock losses and sale returns are exact, separate and never double-counted", { skip }, async () => {
   // Manager requests a customer return; the owner approves it (movement stamped now).
   const retId = uuid();

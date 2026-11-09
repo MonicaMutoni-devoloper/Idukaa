@@ -131,6 +131,33 @@ export function expenseBreakdown(expenses: ReportExpenseRow[]): ExpenseCategory[
   return [...map.values()].sort((a, b) => b.amount - a.amount || a.label.localeCompare(b.label));
 }
 
+/* ------------------------------------------------------------------ pending financials */
+
+export interface PendingFinancials {
+  /** Sales, expenses and purchases queued in the period; other operation types are counted by LoadMeta. */
+  salesNet: number; salesGross: number; salesDiscounts: number; salesCount: number;
+  expenses: number; expenseCount: number;
+  purchases: number; purchaseCount: number;
+}
+
+/**
+ * The value of operations this device has not synchronized yet, using the same row formulas as the
+ * confirmed views. Deliberately limited to what can be stated without the server: pending COGS and
+ * profit are not invented here — they are only shown inside the local ledger summary, which costs
+ * every pending and synchronized movement together.
+ */
+export function pendingFinancials(input: {
+  sales: ReportSaleRow[]; expenses: ReportExpenseRow[]; purchases: ReportPurchaseRow[];
+}): PendingFinancials {
+  const s = salesTotals(input.sales);
+  const e = expenseTotals(input.expenses);
+  return {
+    salesNet: s.net, salesGross: s.gross, salesDiscounts: s.discounts, salesCount: s.transactions,
+    expenses: e.total, expenseCount: e.count,
+    purchases: input.purchases.reduce((sum, p) => sum + num(p.total_amount), 0), purchaseCount: input.purchases.length,
+  };
+}
+
 /* ------------------------------------------------------------------ inventory */
 
 export function inventoryFromProducts(products: LocalProduct[], includePending = true): InventoryRow[] {

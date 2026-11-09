@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { randomUUID as uuid } from "node:crypto";
+import { kigaliDay } from "@sms/shared";
+import { periodRange } from "../src/services/report-period.ts";
 
 const WEB = process.env.WEB_URL ?? "http://localhost:8081";
 const API = process.env.API_URL ?? "http://localhost:3000";
@@ -25,6 +27,8 @@ const CODE = `UIT-${Date.now().toString(36).slice(-5).toUpperCase()}`;
 const BARCODE = `B${Date.now().toString(36).toUpperCase()}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** The inclusive Kigali dates the screen shows for a half-open [from, to) range. */
+const rangeLabel = ({ from, to }) => `${kigaliDay(from)} → ${kigaliDay(Date.parse(to) - 1)}`;
 const profile = mkdtempSync(join(tmpdir(), "sms-e2e-"));
 const chrome = spawn(CHROME, [
   "--headless=new", `--remote-debugging-port=${DEBUG_PORT}`, `--user-data-dir=${profile}`,
@@ -119,10 +123,19 @@ let apiToken = null;
 let currentEmail = null;
 async function token() {
   if (apiToken) return apiToken;
-  const r = await fetch(`${API}/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: currentEmail, password: PASSWORD }) });
-  const body = await r.json();
-  assert.ok(body.token, `API sign-in for ${currentEmail} returned a token`);
-  apiToken = body.token;
+  const attempt = async () => {
+    const r = await fetch(`${API}/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: currentEmail, password: PASSWORD }) });
+    return { status: r.status, body: await r.json() };
+  };
+  let result = await attempt();
+  // The API deliberately limits sign-ins per minute; a long run can reach it even though the UI
+  // helper already backs off. Wait out the same sliding window once instead of failing the flow.
+  if (!result.body?.token && result.status === 429) {
+    await sleep(61000);
+    result = await attempt();
+  }
+  assert.ok(result.body.token, `API sign-in for ${currentEmail} returned a token (${result.status})`);
+  apiToken = result.body.token;
   return apiToken;
 }
 async function api(path, tk) {
@@ -465,6 +478,15 @@ try {
     const detail = await evaluate("document.body.innerText");
     assert.ok(detail.includes(PRODUCT), "the sale dialog lists the product that was sold");
     await clickText("Close", true);
+
+    // Financial figures stay owner-controlled: a manager without the grant gets the explanation,
+    // not cost, profit or an empty-looking report.
+    await clickTest("reports-back");
+    await waitTest("report-open-financial", 15000);
+    await clickTest("report-open-financial");
+    await waitText("Financial reports need profit access", 15000);
+    const locked = await evaluate("document.body.innerText");
+    assert.ok(!locked.includes("Net sales"), "no revenue or profit figure leaks into the locked view");
   });
 
   await step("settings: profile, security and password visibility", async () => {
@@ -617,6 +639,52 @@ try {
       await clickTest("reports-back");
       await waitTest("report-open-inventory", 15000);
     }
+  });
+
+  await step("reports: all seven Kigali presets, custom range and range persistence", async () => {
+    await clickTest("nav-reports");
+    await waitTest("report-open-inventory", 15000);
+
+    for (const preset of ["today", "yesterday", "week", "month", "lastMonth", "year"]) {
+      await clickTest(`segment-${preset}`);
+      await sleep(400);
+      const expected = rangeLabel(periodRange(preset));
+      const actual = await evaluate(`document.querySelector('[data-testid="reports-range"]')?.innerText`);
+      assert.equal(actual, expected, `${preset} covers the Kigali range ${expected}`);
+    }
+
+    // A custom range in Kigali days, including both endpoints, and the label must match exactly.
+    await clickTest("segment-custom");
+    await waitTest("reports-from", 10000);
+    await type("reports-from", "2026-10-05");
+    await type("reports-to", "2026-10-11");
+    await clickTest("reports-apply");
+    await waitText("2026-10-05 → 2026-10-11", 10000);
+
+    // Switching report sections keeps the chosen range, and the section still loads.
+    await clickTest("report-open-sales");
+    await waitTest("reports-export", 20000);
+    const kept = await evaluate(`document.querySelector('[data-testid="reports-range"]')?.innerText`);
+    assert.equal(kept, "2026-10-05 → 2026-10-11", "the custom range survives a section switch");
+    await clickTest("reports-back");
+    await waitTest("report-open-inventory", 10000);
+
+    // Back to a period with data for the remaining checks.
+    await clickTest("segment-month");
+
+    // The two financial bases are separate: local operational keeps its own ledger and states
+    // what is confirmed versus queued instead of folding pending work into the server totals.
+    await clickTest("report-open-financial");
+    await waitTest("reports-export", 20000);
+    await clickTest("segment-local");
+    await waitText("Confirmed and pending", 15000);
+    const localBasis = await evaluate("document.body.innerText");
+    assert.ok(localBasis.includes("Server-confirmed net sales"), "the local view names the server figure it sits beside");
+    assert.ok(localBasis.includes("Local operational net sales"), "the local view shows its own total");
+    assert.ok(localBasis.includes("Pending expenses"), "pending expenses are visible, not silently omitted");
+    await clickTest("segment-server");
+    await waitText("Server-confirmed figures include only operations", 10000);
+    await clickTest("reports-back");
   });
 
   await step("admin: separate area, no tenant financial access", async () => {

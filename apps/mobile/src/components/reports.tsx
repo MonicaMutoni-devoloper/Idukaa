@@ -652,6 +652,8 @@ export function SalesReport({ data, meta, online, lastSync, from, to, view, setV
 /* ------------------------------------------------------------------ financial */
 
 type FinancialView = "pnl" | "revenue" | "cogs" | "gross" | "expenses" | "net" | "breakdown" | "trends";
+/** The two deliberately separate financial bases. They are never added together in one figure. */
+type FinancialBasis = "server" | "local";
 
 export function FinancialReport({ data, meta, online, lastSync, from, to, view, setView, onBack, onRetry, shop, financialsAllowed }: {
   data: FinancialData | null; meta: LoadMeta; online: boolean; lastSync: string | null; from: string; to: string;
@@ -660,14 +662,23 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
 }) {
   const t = useT(); const c = useTheme();
   const [query, setQuery] = useState("");
+  const [basis, setBasis] = useState<FinancialBasis>("server");
   const mode = bucketModeFor(from, to);
-  const summary = data?.summary;
-  const cur: SummaryTotals | null = summary?.current ?? null;
-  const prev = summary?.previous ?? null;
-  const expenses = data?.expenses ?? [];
+  const summary = data?.summary ?? null;
+  const localSummaryData = data?.localSummary ?? null;
+  // "server" means server-confirmed. "local" is this device's complete operational ledger.
+  // A basis with no data is never selected silently: the other one is used and labelled.
+  const basisValue: FinancialBasis = basis === "local" && localSummaryData ? "local" : summary ? "server" : "local";
+  const usingLocal = basisValue === "local";
+  const active = usingLocal ? localSummaryData : summary;
+  const cur: SummaryTotals | null = active?.current ?? null;
+  const prev = active?.previous ?? null;
+  const expenses = usingLocal ? (data?.localExpenses ?? []) : (data?.expenses ?? []);
+  const activeSales = usingLocal ? (data?.localSales ?? []) : (data?.sales ?? []);
+  const pending = data?.pending ?? null;
   const breakdown = useMemo(() => expenseBreakdown(expenses), [expenses]);
   const eTotals = expenseTotals(expenses);
-  const revenueSeries = useMemo(() => seriesOf(data?.sales ?? [], from, to, mode, (r) => r.at, (r) => (r.status === "reversed" ? 0 : r.gross_amount - r.discount)), [data?.sales, from, to, mode]);
+  const revenueSeries = useMemo(() => seriesOf(activeSales, from, to, mode, (r) => r.at, (r) => (r.status === "reversed" ? 0 : r.gross_amount - r.discount)), [activeSales, from, to, mode]);
   const expenseSeries = useMemo(() => seriesOf(expenses, from, to, mode, (r) => r.at, (r) => r.amount), [expenses, from, to, mode]);
   const compareSeries = revenueSeries.map((p, i) => ({ date: p.date, a: p.value, b: expenseSeries[i]?.value ?? 0 }));
 
@@ -683,11 +694,11 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
     );
   }
   if (meta.failed && !data) return <ErrorState onRetry={onRetry} text={t(meta.authIssue ? "reports.sessionExpired" : meta.forbidden ? "ana.noFinancialAccess" : "reports.noData")} />;
-  if (!data || !summary || !cur || !prev) return (
+  if (!data || !active || !cur || !prev) return (
     <>
       <WorkspaceHeader category="financial" onBack={onBack} />
       <SourceCard meta={meta} online={online} lastSync={lastSync} onRefresh={onRetry} pendingNote />
-      <Loading />
+      {data ? <Banner tone="warn" text={t("ana.localUnavailable")} /> : <Loading />}
     </>
   );
 
@@ -743,18 +754,20 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
     [t("fin.stockLoss"), money(cur.stockLosses)],
   ] : pnlRows;
 
+  const basisLabel = t(usingLocal ? "ana.basisLocal" : "ana.basisServer");
   const spec: ExportSpec = view === "expenses" ? {
-    title: `${t("ana.cat.financial" as any)} · ${t("ana.sub.financial.expenses")}`,
+    title: `${t("ana.cat.financial" as any)} · ${t("ana.sub.financial.expenses")} · ${basisLabel}`,
     header: [t("common.date"), t("common.category"), t("common.note"), t("common.amount"), t("common.status")],
     rows: filteredExpenses.map((r) => [instantText(r.at), r.category, r.note ?? "", r.amount, r.paid ? t("expense.paid") : t("common.unpaid")]),
     metrics: [{ label: t("ana.metric.expenses"), value: money(eTotals.total) }, { label: t("common.unpaid"), value: money(eTotals.unpaid) }],
+    notes: [usingLocal ? t("ana.localPendingNote") : t("ana.serverBasisNote")],
   } : view === "breakdown" ? {
-    title: `${t("ana.cat.financial" as any)} · ${t("ana.sub.financial.breakdown")}`,
+    title: `${t("ana.cat.financial" as any)} · ${t("ana.sub.financial.breakdown")} · ${basisLabel}`,
     header: [t("common.category"), t("ana.metric.expenses"), t("common.unpaid"), t("dash.transactions")],
     rows: breakdown.map((b) => [b.label, b.amount, b.unpaid, b.count]),
     metrics: [{ label: t("ana.metric.expenses"), value: money(eTotals.total) }],
   } : {
-    title: `${t("ana.cat.financial" as any)} · ${t(`ana.sub.financial.${view}` as any)}`,
+    title: `${t("ana.cat.financial" as any)} · ${t(`ana.sub.financial.${view}` as any)} · ${basisLabel}`,
     header: [t("common.category"), t("ana.value")],
     rows: detailRows,
     metrics: cur ? [
@@ -763,13 +776,23 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
       { label: t("ana.metric.expenses"), value: money(cur.operatingExpenses) },
       { label: t("ana.metric.result"), value: money(cur.operatingResultAfterStockLosses) },
     ] : [],
-    notes: [t("fin.calculationNote"), ...(cur?.costBasisIncomplete ? [t("fin.provisional")] : [])],
+    notes: [t("fin.calculationNote"), usingLocal ? t("ana.localPendingNote") : t("ana.serverBasisNote"), ...(cur?.costBasisIncomplete ? [t("fin.provisional")] : [])],
   };
 
   return (
     <>
       <WorkspaceHeader category="financial" onBack={onBack} />
       <SourceCard meta={meta} online={online} lastSync={lastSync} onRefresh={onRetry} pendingNote />
+      <View style={{ gap: 6 }}>
+        <Text style={{ color: c.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.6 }}>{t("ana.basis")}</Text>
+        <Segmented<FinancialBasis> value={basisValue} onChange={setBasis} options={[
+          { value: "server", label: t("ana.basisServer") },
+          { value: "local", label: t("ana.basisLocal") },
+        ]} />
+        <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>
+          {usingLocal ? t("ana.localBasisNote") : t("ana.serverBasisNote")}
+        </Text>
+      </View>
       <Segmented<FinancialView> value={view} onChange={setView} options={[
         { value: "pnl", label: t("ana.sub.financial.pnl") }, { value: "revenue", label: t("ana.sub.financial.revenue") },
         { value: "cogs", label: t("ana.sub.financial.cogs") }, { value: "gross", label: t("ana.sub.financial.gross") },
@@ -778,9 +801,33 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
       ]} />
       {!data || !summary || !cur || !prev ? <Loading /> : (
         <>
-          {data.provisional ? <Banner tone="warn" text={t("ana.provisional")} /> : null}
-          {cur.costBasisIncomplete ? <Banner tone="warn" text={t("fin.provisional")} /> : null}
-          {meta.source === "server" && meta.pendingOps > 0 ? <Banner tone="warn" text={t("ana.pendingServerExcluded").replace("{n}", String(meta.pendingOps))} /> : null}
+          {usingLocal ? (
+            <>
+              {data.provisional ? <Banner tone="warn" text={t("ana.provisional")} /> : null}
+              {cur.costBasisIncomplete ? <Banner tone="warn" text={t("fin.provisional")} /> : null}
+              <Card tone="muted" style={{ gap: 2 }}>
+                <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("ana.localBreakdown")}</Text>
+                {([
+                  [t("ana.serverConfirmed"), summary ? money(summary.current.netSales) : t("ana.notHeld"), summary ? undefined : t("ana.serverNotHeld")],
+                  [t("ana.pendingSales"), pending ? money(pending.salesNet) : "—", pending ? t("reports.pendingOps").replace("{n}", String(pending.salesCount)) : undefined],
+                  [t("ana.localOperational"), money(cur.netSales), t("ana.records")],
+                  [t("ana.pendingExpenses"), pending ? money(pending.expenses) : "—", pending ? t("reports.pendingOps").replace("{n}", String(pending.expenseCount)) : undefined],
+                  [t("ana.localResult"), money(cur.operatingResultAfterStockLosses)],
+                ] as [string, string, string?][]).map(([label, value, note]) => (
+                  <View key={label} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", gap: space.md, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: c.line }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: c.inkSoft, fontSize: 13 }}>{label}</Text>
+                      {note ? <Text style={{ color: c.muted, fontSize: 11 }}>{note}</Text> : null}
+                    </View>
+                    <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{value}</Text>
+                  </View>
+                ))}
+                <Text style={{ color: c.muted, fontSize: 11, marginTop: 4 }}>{t("ana.localPendingNote")}</Text>
+              </Card>
+            </>
+          ) : meta.source === "server" && meta.pendingOps > 0 ? (
+            <Banner tone="warn" text={t("ana.pendingServerExcluded").replace("{n}", String(meta.pendingOps))} />
+          ) : null}
 
           {(view === "pnl" || view === "revenue" || view === "cogs" || view === "gross" || view === "net") ? (
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md }}>
@@ -902,7 +949,7 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
             </Card>
           ) : null}
 
-          <ExportBar spec={spec} from={from} to={to} source={meta.source} shop={shop} filename={`financial-${view}`} />
+          <ExportBar spec={spec} from={from} to={to} source={meta.source} shop={shop} filename={`financial-${view}-${basisValue}`} />
         </>
       )}
       <Text style={{ color: c.muted, fontSize: 12 }}>{t("ana.privacy")}</Text>
