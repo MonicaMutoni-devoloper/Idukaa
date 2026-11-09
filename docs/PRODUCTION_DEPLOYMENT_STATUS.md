@@ -856,14 +856,14 @@ fields now say exactly which step failed.
 
 ## 12. Production re-check (9 Nov 2026) — public and transport only
 
-Run against `main` at `e7f68ea`, before the uncommitted financial-basis changes:
+Run against `main` at `24c19a9`, after the financial-basis changes were pushed:
 
 | Check | Result |
 |---|---|
 | `node scripts/verify-deployment.mjs` | **23/23 pass** (API health, 401s, CORS, web bundle, no loopback URL) |
 | `GET /reports/movements` and `GET /reports/items` without a session | **401** each; an unknown sibling route returns **404**, so the deployed API really carries the new reporting routes |
 | `GET /realtime` WebSocket upgrade | **101 Switching Protocols** through Render/Cloudflare; an upgrade to another path returns **404**. Unauthenticated sockets are closed after 5 s by design |
-| Production web bundle | `Reports & Analytics` is present in the deployed entry bundle; the deployed reports chunk predates the local/confirmed financial split (it is uncommitted) |
+| Production web bundle | Redeployed commit `24c19a9`: entry bundle `entry-81feadba…`, reports chunk `reports-507eb9a…` contains `localSummary`/`pendingFinancials`, and the common bundle contains `Local operational` / `Server-confirmed`. GitHub checks: CI `test` **success**, Vercel **success** |
 | `GET /app/version` | serves `latest 1.0.2 (3)` — the Render `APP_*` variables still point at the older release, so installing 1.0.5 locally does not advertise it to 1.0.4 users |
 
 **Still unverified in production:** every authenticated flow (sign-in, owner/manager reports, the two
