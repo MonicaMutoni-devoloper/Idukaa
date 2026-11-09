@@ -2,7 +2,7 @@ import { compare, lineAmount, periodCosts, summarize, valueAt } from "@sms/share
 // Type-only: the calculation must stay independent of SQLite/IndexedDB so it runs in Node tests.
 import type { LocalProduct, LocalRecord } from "../database";
 // Explicit .ts so Node's test runner resolves it exactly as the tests do; tsconfig allows it.
-import { buildLedger, ledgerIsComplete, parseRecords } from "./local-dashboard.ts";
+import { buildLedger, isFailedSync, ledgerIsComplete, parseRecords } from "./local-dashboard.ts";
 
 /**
  * Offline reports — the rows and totals behind the Reports screen, calculated from the operations
@@ -114,6 +114,9 @@ export function computeLocalReport(input: LocalReportInput): LocalReportResult {
   const byId = new Map(products.map((p) => [p.id, p] as const));
   const nameOf = (id: unknown) => byId.get(String(id))?.name ?? String(id ?? "");
   const inPeriod = records.filter((r) => inRange(r.at, from, to));
+  // Failed/conflicting operations stay visible on the Sync screen for recovery, but they are not
+  // business rows: the server refused them, so nothing moved in stock or money.
+  const usable = records.filter((r) => !isFailedSync(r.status));
   const counts = {
     inRange: inPeriod.length,
     pending: inPeriod.filter((r) => isUnsynced(r.status)).length,
@@ -129,7 +132,7 @@ export function computeLocalReport(input: LocalReportInput): LocalReportResult {
 
   if (view === "sales") {
     const rows: ReportSaleRow[] = [];
-    for (const r of records) {
+    for (const r of usable) {
       if (r.type !== "sale.create") continue;
       const p = json(r.data);
       if (!p) continue;
@@ -155,7 +158,7 @@ export function computeLocalReport(input: LocalReportInput): LocalReportResult {
   if (view === "items") {
     const acc = new Map<string, { units: number; gross: number; sales: number }>();
     let grossAll = 0, discounts = 0;
-    for (const r of records) {
+    for (const r of usable) {
       if (r.type !== "sale.create") continue;
       const p = json(r.data);
       if (!p) continue;
@@ -191,7 +194,7 @@ export function computeLocalReport(input: LocalReportInput): LocalReportResult {
 
   if (view === "purchases") {
     const rows: ReportPurchaseRow[] = [];
-    for (const r of records) {
+    for (const r of usable) {
       if (r.type !== "purchase.create" && r.type !== "receipt.create") continue;
       const p = json(r.data);
       if (!p) continue;
@@ -217,7 +220,7 @@ export function computeLocalReport(input: LocalReportInput): LocalReportResult {
     // `expense.update` patches the row it names; without applying it here an edited expense would
     // be reported at its original amount offline and at its new amount online.
     const map = new Map<string, ReportExpenseRow>();
-    for (const r of records) {
+    for (const r of usable) {
       const p = json(r.data);
       if (!p) continue;
       if (r.type === "expense.create") {
@@ -242,7 +245,7 @@ export function computeLocalReport(input: LocalReportInput): LocalReportResult {
   }
 
   const rows: ReportAdjustmentRow[] = [];
-  for (const r of records) {
+  for (const r of usable) {
     if (r.type !== "adjustment.request") continue;
     const p = json(r.data);
     if (!p) continue;
@@ -284,22 +287,26 @@ export interface ReportCacheEntry {
   view: string;
   from: string;
   to: string;
+  /** Cost/profit scope. A manager without financial access can never read an owner's cached copy. */
+  access: "financial" | "operational";
   rows: unknown[];
   totals: unknown;
 }
 
-/** Per shop, per view, per period: a cached report can never be shown for another shop or range. */
-export const reportCacheKey = (shopId: string | null, view: string, from: string, to: string) =>
-  `report:v1:${shopId ?? "none"}:${view}:${from}:${to}`;
+const accessScope = (financials: boolean): "financial" | "operational" => financials ? "financial" : "operational";
+
+/** Per shop, per view, per period AND permission scope: a cached report can never cross any of them. */
+export const reportCacheKey = (shopId: string | null, view: string, from: string, to: string, financials = false) =>
+  `report:v2:${shopId ?? "none"}:${view}:${from}:${to}:${accessScope(financials)}`;
 
 /**
- * Validates a cached entry before it is rendered. Anything that does not match the shop, view and
- * exact period is rejected, so a corrupted entry or another account's copy can never stand in for
- * this report. Never throws.
+ * Validates a cached entry before it is rendered. Anything that does not match the shop, view,
+ * exact period or financial-permission scope is rejected, so a corrupted entry or another
+ * account's cost data can never stand in for this report. Never throws.
  */
 export function readReportCache(
   raw: string | null,
-  expect: { shopId: string | null; view: string; from: string; to: string },
+  expect: { shopId: string | null; view: string; from: string; to: string; financials?: boolean },
 ): ReportCacheEntry | null {
   if (!raw) return null;
   let e: any;
@@ -307,6 +314,7 @@ export function readReportCache(
   if (!e || typeof e !== "object" || !Array.isArray(e.rows)) return null;
   if (e.view !== expect.view || e.from !== expect.from || e.to !== expect.to) return null;
   if ((e.shopId ?? null) !== (expect.shopId ?? null)) return null;
+  if (e.access !== accessScope(expect.financials ?? false)) return null;
   if (typeof e.savedAt !== "string" || Number.isNaN(Date.parse(e.savedAt))) return null;
   return e as ReportCacheEntry;
 }

@@ -49,9 +49,11 @@ export class SyncService {
     }
     const out: OpResult[] = [];
     for (const raw of raws) out.push(await this.pushOne(user, raw)); // sequential: preserves client order
-    // One push = one notification for the shop, after the transactions have committed. Clients
-    // answer with their normal pull, so nobody is told what the change was before they may see it.
-    if (out.some((r) => r.status === "applied")) {
+    // One push = one notification for the shop, after the transactions have committed. A
+    // pending_approval result is a visible change too (the owner's approvals desk must wake up),
+    // even though no stock or money moved yet. Clients answer with their normal pull, so nobody
+    // is told what the change was before they may see it.
+    if (out.some((r) => r.status === "applied" || r.status === "pending_approval")) {
       emitShopChange(user.shopId, raws.map((raw) => String((raw as { type?: unknown })?.type ?? "")));
     }
     return out;

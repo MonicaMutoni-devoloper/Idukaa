@@ -221,6 +221,8 @@ const step = async (name, fn) => { process.stdout.write(`\n→ ${name}\n`); awai
 const ALL_TIME = `from=2000-01-01T00%3A00%3A00.000Z&to=2100-01-01T00%3A00%3A00.000Z`;
 let voidSaleId = null;
 let managerName = "Demo Manager";
+/** Account-switch regression: total sales before the manager's queued sale, and whether the queue was seeded. */
+let switchSalesBefore = 0;
 /** Registration journey (set by the registration steps below). */
 let REG_EMAIL = null, REJ_EMAIL = null, REG_SHOP = null;
 
@@ -480,7 +482,9 @@ try {
     await clickText("Close", true);
 
     // Financial figures stay owner-controlled: a manager without the grant gets the explanation,
-    // not cost, profit or an empty-looking report.
+    // not cost, profit or an empty-looking report. The detail close triggers a reload, so wait for
+    // the reports header to be interactive instead of clicking a button that is mid-replacement.
+    await waitTest("reports-back", 15000);
     await clickTest("reports-back");
     await waitTest("report-open-financial", 15000);
     await clickTest("report-open-financial");
@@ -555,8 +559,31 @@ try {
   });
 
   await step("owner: dashboard, sale void, report drill-down, approval and shop policy", async () => {
-    await logout();
+    // Account-switch regression: queue a real sale as the manager while offline, then sign out.
+    // The next account must not see or push it; it must sync only when the manager signs back in.
+    switchSalesBefore = (await api(`/reports/transactions?kind=sales&${ALL_TIME}`, await token())).body.length;
+    await send("Network.setBlockedURLs", { urls: [`${API}/*`] });
+    await clickTest("nav-sell");
+    await waitTest("sell-search", 15000);
+    await type("sell-search", PRODUCT);
+    await waitFor(`[...document.querySelectorAll('[data-testid^="sell-product-"]')].some(e=>e.innerText.includes(${JSON.stringify(PRODUCT)}))`, "product tile for the queued sale");
+    await clickContaining("sell-product-", PRODUCT);
+    await waitTest("sell-qty-0");
+    await type("sell-qty-0", "1");
+    await clickTest("sell-save");
+    await waitText("Sale saved", 10000);
+    await sleep(1200); // the outbox write is durable before the session is thrown away
+    await logout(); // sign-out is local-first even with the API blocked
+    await send("Network.setBlockedURLs", { urls: [] });
+
     await login("owner@demo.local");
+    await waitTest("kpi-netSales");
+    await clickTest("nav-sync");
+    await waitTest("sync-pending-count", 15000);
+    await waitFor(`(${q("sync-pending-count")}).innerText.trim() === "0"`, "the next account has none of the manager's queue");
+    assert.equal(await evaluate(`document.body.innerText.includes("sale.create")`), false,
+      "another account's queued sale is not listed or pushed");
+    await clickTest("nav-home");
     await waitTest("kpi-netSales");
     const dash = (await evaluate("document.body.innerText")).toLowerCase();
     for (const label of ["net sales", "gross profit", "operating profit", "cash collected"]) assert.ok(dash.includes(label), `dashboard shows ${label}`);
@@ -868,6 +895,21 @@ try {
     await logout();
     await login("manager@demo.local");
     await waitTest("home-action-sell");
+
+    // The sale queued before the account switch still exists and now syncs under its own user.
+    await clickTest("nav-sync");
+    await waitTest("sync-now", 15000);
+    await clickTest("sync-now");
+    await waitOutboxDrained("account switch recovery", 25000);
+    const salesEnd = Date.now() + 20000;
+    let switchedSales = 0;
+    while (Date.now() < salesEnd) {
+      switchedSales = (await api(`/reports/transactions?kind=sales&${ALL_TIME}`, await token())).body.length;
+      if (switchedSales === switchSalesBefore + 1) break;
+      await sleep(500);
+    }
+    assert.equal(switchedSales, switchSalesBefore + 1,
+      `the queued sale reached the server exactly once after switching back (${switchSalesBefore} → ${switchedSales})`);
 
     // Back on the demo shop: the wipe on the account switch is followed by a full re-pull, so
     // the shop's own catalogue reappears (cache rebinding must not lose the right data).

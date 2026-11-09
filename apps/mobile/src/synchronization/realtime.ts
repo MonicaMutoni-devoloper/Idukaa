@@ -1,6 +1,6 @@
 import { AppState } from "react-native";
 import NetInfo from "@react-native-community/netinfo";
-import { currentToken, ensureSession, sessionRejected, useSession } from "../services/api";
+import { currentToken, ensureSession, refreshAccessToken, sessionRejected, useSession } from "../services/api";
 import { API_URL } from "../services/api";
 import { parseRealtimeMessage, realtimeUrl, reconnectDelay } from "./transport";
 
@@ -87,9 +87,17 @@ async function connect(): Promise<void> {
       }
     };
     ws.onerror = () => { try { ws.close(); } catch { /* already closed */ } };
-    ws.onclose = () => {
+    ws.onclose = (event: { code?: number; reason?: string }) => {
       if (socket === ws) socket = null;
       opts?.onStatus(false);
+      // The socket is closed by the server when its access token expires or is revoked. Rotate
+      // once before reconnecting; retrying the same expired token would loop until an HTTP call
+      // happened to refresh it. The reconnect stays on the normal jittered backoff: a suspension
+      // or revocation that keeps answering 4001 must not become a refresh/reconnect storm.
+      if (event?.code === 4001 && /token_expired|unauthorized/i.test(event.reason ?? "") && useSession.getState().user) {
+        void refreshAccessToken().then(() => schedule(), () => schedule());
+        return;
+      }
       // A socket that never opened is an outage, not a slow response: back off like any other failure.
       if (!opened) attempt = Math.max(attempt, 1);
       schedule();

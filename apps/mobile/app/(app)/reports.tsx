@@ -131,11 +131,11 @@ export default function Reports() {
     let alive = true;
     void (async () => {
       let granted = user?.role === "owner";
-      if (!granted) granted = (await kvGet("dash.perms").catch(() => null)) === "1";
+      if (!granted) granted = (await kvGet(`dash.perms:${user?.id ?? "none"}`).catch(() => null)) === "1";
       if (alive) setFinancialsAllowed(granted);
     })();
     return () => { alive = false; };
-  }, [user?.role]);
+  }, [user?.role, user?.id]);
 
   const load = useCallback(() => {
     const seq = ++loadSeq.current;

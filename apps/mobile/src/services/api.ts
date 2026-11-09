@@ -353,4 +353,11 @@ export const ensureSession = async (force = false) => {
   return !!accessToken;
 };
 
+/**
+ * The realtime server closes an authorized socket when its access token expires. The HTTP layer may
+ * not have made a request yet, so the client explicitly rotates once before reconnecting instead
+ * of retrying the same expired token forever.
+ */
+export const refreshAccessToken = (force = true) => refreshSession(force);
+
 export const getDeviceId = async () => (await kvGet("device_id")) ?? "unknown";

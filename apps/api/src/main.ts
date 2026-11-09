@@ -39,14 +39,17 @@ async function bootstrap() {
   // dropped message costs one poll interval, never data.
   attachRealtime(app.getHttpServer() as Parameters<typeof attachRealtime>[0], {
     verify: async (token) => {
-      let claims: { sub?: string; tv?: number };
+      let claims: { sub?: string; tv?: number; exp?: number };
       try { claims = await app.get(JwtService).verifyAsync(token); } catch { return null; }
       const [u] = await app.get(Db).query(
         `SELECT u.id, u.role, u.shop_id, u.active, u.account_status, u.token_version, s.status AS shop_status
            FROM users u LEFT JOIN shops s ON s.id = u.shop_id WHERE u.id=$1`, [claims.sub]);
       if (!u || !u.active || u.account_status !== "active" || u.token_version !== claims.tv) return null;
       if (u.shop_id && u.shop_status === "suspended") return null;
-      return { id: u.id, role: u.role, shopId: u.shop_id };
+      return {
+        id: u.id, role: u.role, shopId: u.shop_id,
+        expiresAt: typeof claims.exp === "number" ? claims.exp * 1000 : undefined,
+      };
     },
     log: (evt, data) => console.log(JSON.stringify({ t: new Date().toISOString(), evt, ...data })),
   });

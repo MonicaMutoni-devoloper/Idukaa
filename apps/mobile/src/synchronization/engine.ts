@@ -12,14 +12,19 @@ import type { OpResult, PullResponse } from "@sms/shared";
  *  so an empty catalogue can say what is wrong instead of looking like an empty shop. */
 export const useSync = create<{ online: boolean; /** The push channel is open: other devices' changes arrive without waiting for the poll. */ live: boolean; running: boolean; pending: number; issues: number; awaitingApproval: number; authRequired: boolean; lastSync: string | null; lastError: string | null; dataVersion: number; recordsVersion: number }>(() => ({ online: true, live: false, running: false, pending: 0, issues: 0, awaitingApproval: 0, authRequired: false, lastSync: null, lastError: null, dataVersion: 0, recordsVersion: 0 }));
 /**
- * Refreshes the quality-of-sync counters AND bumps `recordsVersion`, the only signal the dashboard
- * listens to. It is called after every save and after every sync pass, so figures are recalculated
- * exactly when a record was added or its verdict changed — never on a timer of its own.
+ * Refreshes the quality-of-sync counters and, when a verdict or queue size changed, bumps
+ * `recordsVersion` so reports recalculate without reopening the screen. `forceVersion` is used once
+ * at the end of a pass: a pull can change server-side rows (another device's sale/expense) without
+ * changing any local outbox count, and the visible figures still need to reconcile.
  */
-export const refreshCounts = async () => {
+export const refreshCounts = async (forceVersion = false) => {
   const u = useSession.getState().user; if (!u) return;
-  const c = await outboxCounts(u.id);
-  useSync.setState((x) => ({ pending: c.pending, issues: c.issues, awaitingApproval: c.awaitingApproval, recordsVersion: x.recordsVersion + 1 }));
+  const c = await outboxCounts(u.id, u.shopId);
+  useSync.setState((x) => {
+    const countsChanged = c.pending !== x.pending || c.issues !== x.issues || c.awaitingApproval !== x.awaitingApproval;
+    if (!countsChanged && !forceVersion) return x;
+    return { pending: c.pending, issues: c.issues, awaitingApproval: c.awaitingApproval, recordsVersion: x.recordsVersion + 1 };
+  });
 };
 
 let inFlight: Promise<void> | null = null;
@@ -40,11 +45,15 @@ async function runPass(force: boolean): Promise<void> {
     return;
   }
   useSync.setState({ running: true, authRequired: false });
+  let pulled = false;
   try {
-    if (force) await retryNow(s.user.id);
+    if (force) await retryNow(s.user.id, s.user.shopId);
     const deviceId = await getDeviceId();
-    for (;;) {
-      const due = await dueOps(s.user.id); if (!due.length) break;
+    // A malformed/lost response must not turn into an endless hot loop. If a very large queue is
+    // still due after 100 batches, leave the rest for the next scheduled pass; every pushed
+    // operation is already durable and idempotent.
+    for (let batch = 0; batch < 100; batch++) {
+      const due = await dueOps(s.user.id, s.user.shopId); if (!due.length) break;
       const ops = due.map(r => ({ opId: r.op_id, deviceId, createdAt: r.created_at, type: r.type, payload: JSON.parse(r.payload) }));
       try {
         const { results } = await request<{ results: OpResult[] }>("/sync/push", { method: "POST", body: { operations: ops }, timeoutMs: SYNC_TIMEOUT_MS });
@@ -80,6 +89,7 @@ async function runPass(force: boolean): Promise<void> {
       }
       if (!r.hasMore) break;
     }
+    pulled = true;
     const at = new Date().toISOString(); await kvSet("last_sync", at);
     useSync.setState((x) => ({ lastSync: at, lastError: null, dataVersion: x.dataVersion + 1 }));
   } catch (e) {
@@ -88,14 +98,9 @@ async function runPass(force: boolean): Promise<void> {
     if (e instanceof ApiError && e.status === 401 && sessionRejected()) useSync.setState({ authRequired: true });
     else if (!(e instanceof ApiError) && !(e instanceof NetworkError)) console.warn("[sync] pass failed", e);
   }
-  finally { useSync.setState({ running: false }); await refreshCounts(); }
+  finally { useSync.setState({ running: false }); await refreshCounts(pulled); }
 }
 
-/**
- * A user press is never lost: when a pass is already running, `force` schedules one more pass that
- * first clears the retry backoff. Without this, pressing "Sync now" right after reconnecting could
- * be swallowed by the automatic pass that started at the same moment.
- */
 /**
  * Manual recovery for "the server has my products but this device shows none": forget the
  * incremental cursor and pull the whole catalogue again. Safe at any time — the pull upserts by id,
@@ -107,6 +112,11 @@ export async function fullResync(): Promise<void> {
   await syncNow(true);
 }
 
+/**
+ * A user press is never lost: when a pass is already running, `force` schedules one more pass that
+ * first clears the retry backoff. Without this, pressing "Sync now" right after reconnecting could
+ * be swallowed by the automatic pass that started at the same moment.
+ */
 export function syncNow(force = false): Promise<void> {
   if (inFlight) {
     if (force) rerunRequested = true;
@@ -123,17 +133,38 @@ export function syncNow(force = false): Promise<void> {
   return inFlight;
 }
 
+/**
+ * A realtime frame can arrive while a pass is already running. In that case the normal de-duplicating
+ * `syncNow()` would return the in-flight pass and the new event would be missed until the next poll.
+ * A nudge schedules exactly one extra pass after the current one, without pressing the manual
+ * "clear backoff" path. The pass's pull is what bumps the screen revision, so one remote change
+ * costs one reconciliation rather than one immediate reload plus another after the pull.
+ */
+export function nudgeSync() {
+  if (inFlight) { rerunRequested = true; return; }
+  void syncNow();
+}
+
 let started = false;
+let lastPoll = 0;
 export function startSyncEngine() {
   if (started) return; started = true;
   kvGet("last_sync").then(v => useSync.setState({ lastSync: v }));
   NetInfo.addEventListener(st => { const online = !!st.isConnected && st.isInternetReachable !== false; useSync.setState({ online }); if (online) void syncNow(); });
-  setInterval(() => { if (useSync.getState().online) void syncNow(); }, 30_000);
+  // The realtime channel already delivers changes instantly. When it is healthy, a 30-second full
+  // pass is wasted battery/data, so keep a five-minute safety poll; without it, poll normally.
+  setInterval(() => {
+    if (!useSync.getState().online) return;
+    const live = useSync.getState().live;
+    if (live && Date.now() - lastPoll < 5 * 60_000) return;
+    lastPoll = Date.now();
+    void syncNow();
+  }, 30_000);
   AppState.addEventListener("change", s => { if (s === "active") void syncNow(); });
   // Signing in again (after an expired session) resumes the queue immediately — the work recorded
   // while signed out was never discarded, so this is the only recovery step a user needs to take.
   useSession.subscribe((s, prev) => { if (s.token && !prev.token) void syncNow(); });
-  // Push channel. It never carries data: a change frame simply runs the pass above, so the poll
+  // Push channel. It never carries data: a change frame runs the same pass above, so the poll
   // remains a complete fallback and a missed frame cannot desynchronise a device.
-  startRealtime({ onChange: () => void syncNow(), onStatus: (live) => useSync.setState({ live }) });
+  startRealtime({ onChange: nudgeSync, onStatus: (live) => useSync.setState({ live }) });
 }

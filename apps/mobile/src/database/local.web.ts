@@ -75,8 +75,8 @@ function normalize(raw: unknown): State {
     kv: s.kv && typeof s.kv === "object" ? s.kv : {},
     products: Array.isArray(s.products) ? s.products.map(normalizeProduct) : [],
     suppliers: Array.isArray(s.suppliers) ? s.suppliers : [],
-    outbox: Array.isArray(s.outbox) ? s.outbox : [],
-    records: Array.isArray(s.records) ? s.records : [],
+    outbox: Array.isArray(s.outbox) ? s.outbox.map((r) => ({ ...r, shop_id: r.shop_id ?? null })) : [],
+    records: Array.isArray(s.records) ? s.records.map((r) => ({ ...r, shop_id: r.shop_id ?? null })) : [],
     seq: typeof s.seq === "number" ? s.seq : (Array.isArray(s.outbox) ? s.outbox.reduce((m, r) => Math.max(m, r.seq ?? 0), 0) : 0),
   };
 }
@@ -138,7 +138,16 @@ function mutate<T>(fn: (s: State) => T): Promise<T> {
 }
 
 export async function initDb() {
-  await readState();
+  const initial = await readState();
+  const bound = initial.kv["local.shop"] ?? null;
+  // Migrate rows written before shop-scoping existed. The previous adapter deleted another
+  // shop's records on every switch, so everything still present belongs to the bound shop.
+  if (bound && (initial.records.some((r) => !r.shop_id) || initial.outbox.some((r) => !r.shop_id))) {
+    await mutate((s) => {
+      for (const r of s.records) if (!r.shop_id) r.shop_id = bound;
+      for (const o of s.outbox) if (!o.shop_id) o.shop_id = bound;
+    });
+  }
   if (!hasIDB) writeLegacy(cache ?? empty()); // make sure a fresh store exists
 }
 
@@ -157,8 +166,10 @@ export const resetSyncCursor = async (userId: string) => mutate((s) => { delete 
  * Bind the cached catalogue to exactly one shop (web counterpart of local.ts#bindShop).
  * Products and suppliers are per-shop data, but the IndexedDB store is shared by every account
  * that signs in on this browser. On sign-in/session restore a different shop drops the previous
- * shop's cached rows and sync checkpoints (forcing a full re-pull); the outbox is never touched.
- * Same shop = no-op, so the offline cache survives reloads and connectivity loss.
+ * shop's cached catalogue and sync checkpoints (forcing a full re-pull).
+ *
+ * Records and outbox rows are retained and scoped by shop_id: the old shop can never read them,
+ * and its owner can still recover and sync them after signing back in. Same shop = no-op.
  */
 export async function bindShop(shopId: string | null) {
   if (!shopId) return; // platform administrator: no shop data to scope
@@ -167,7 +178,6 @@ export async function bindShop(shopId: string | null) {
     if (s.kv["local.shop"] === shopId) return; // another tab may have bound it already
     s.products = [];
     s.suppliers = [];
-    s.records = []; // another shop's saved records must never be reported
     for (const k of Object.keys(s.kv)) if (k.startsWith("cp:")) delete s.kv[k]; // full re-pull
     s.kv["local.shop"] = shopId;
   });
@@ -177,15 +187,16 @@ export async function bindShop(shopId: string | null) {
 export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>, recordAt?: string) {
   const now = new Date().toISOString();
   await mutate((s) => {
+    const shopId = s.kv["local.shop"] ?? null;
     s.seq += 1;
     s.outbox.push({
-      seq: s.seq, op_id: opId, user_id: userId, type, payload: JSON.stringify(payload), deltas: JSON.stringify(deltas),
+      seq: s.seq, op_id: opId, user_id: userId, shop_id: shopId, type, payload: JSON.stringify(payload), deltas: JSON.stringify(deltas),
       status: "pending", attempts: 0, next_attempt_at: 0, message: null, created_at: now, synced_at: null,
     });
     for (const [pid, q] of Object.entries(deltas)) { const p = s.products.find((p) => p.id === pid); if (p) p.pending_delta += q; }
     // Same single write as the outbox row: the reportable record and the queued operation commit together.
     if (!s.records.some((r) => r.op_id === opId)) {
-      s.records.push({ op_id: opId, type, at: recordAt ?? now, data: JSON.stringify(payload), actor: null, created_at: now, status: "pending" });
+      s.records.push({ op_id: opId, shop_id: shopId, type, at: recordAt ?? now, data: JSON.stringify(payload), actor: null, created_at: now, status: "pending" });
     }
   });
   await local?.();
@@ -194,10 +205,12 @@ export async function enqueue(userId: string, opId: string, type: string, payloa
 /** Every record saved in this browser, with its sync verdict (the dashboard's only data source offline). */
 export async function listRecords() {
   const s = await readState();
-  return [...s.records].sort((a, b) => a.at.localeCompare(b.at) || a.op_id.localeCompare(b.op_id)).map((r) => ({
-    ...r,
-    status: s.outbox.find((o) => o.op_id === r.op_id)?.status ?? "pending",
-  }));
+  const shop = s.kv["local.shop"] ?? null;
+  return s.records.filter((r) => (r.shop_id ?? null) === shop)
+    .sort((a, b) => a.at.localeCompare(b.at) || a.op_id.localeCompare(b.op_id)).map((r) => ({
+      ...r,
+      status: s.outbox.find((o) => o.op_id === r.op_id)?.status ?? "pending",
+    }));
 }
 
 export async function upsertLocalProduct(p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number }) {
@@ -230,18 +243,19 @@ export async function upsertLocalSupplier(x: { id: string; name: string; phone?:
   });
 }
 
-export const dueOps = async (userId: string, limit = 50) =>
+export const dueOps = async (userId: string, shopId: string | null, limit = 50) =>
   (await readState()).outbox
-    .filter((r) => r.user_id === userId && (r.status === "pending" || r.status === "retry") && r.next_attempt_at <= Date.now())
+    .filter((r) => r.user_id === userId && (r.shop_id ?? null) === shopId && (r.status === "pending" || r.status === "retry") && r.next_attempt_at <= Date.now())
     .sort((a, b) => a.seq - b.seq)
     .slice(0, limit)
     .map((r) => ({ ...r }));
 
-export const listOutbox = async (userId: string) =>
-  (await readState()).outbox.filter((r) => r.user_id === userId).sort((a, b) => b.seq - a.seq).slice(0, 200).map((r) => ({ ...r }));
+export const listOutbox = async (userId: string, shopId: string | null) =>
+  (await readState()).outbox.filter((r) => r.user_id === userId && (r.shop_id ?? null) === shopId)
+    .sort((a, b) => b.seq - a.seq).slice(0, 200).map((r) => ({ ...r }));
 
-export const outboxCounts = async (userId: string) => {
-  const rows = (await readState()).outbox.filter((r) => r.user_id === userId);
+export const outboxCounts = async (userId: string, shopId: string | null) => {
+  const rows = (await readState()).outbox.filter((r) => r.user_id === userId && (r.shop_id ?? null) === shopId);
   const g = (s: string) => rows.filter((r) => r.status === s).length;
   return { pending: g("pending") + g("retry"), issues: g("conflict") + g("rejected"), awaitingApproval: g("pending_approval") };
 };
@@ -272,8 +286,8 @@ export async function markRetry(opIds: string[], message: string) {
   });
 }
 
-export const retryNow = async (userId: string) =>
-  mutate((s) => { for (const r of s.outbox) if (r.user_id === userId && r.status === "retry") r.next_attempt_at = 0; });
+export const retryNow = async (userId: string, shopId: string | null) =>
+  mutate((s) => { for (const r of s.outbox) if (r.user_id === userId && (r.shop_id ?? null) === shopId && r.status === "retry") r.next_attempt_at = 0; });
 
 export async function applyPull(changes: { entity: string; id: string; data: any }[]) {
   await mutate((s) => {

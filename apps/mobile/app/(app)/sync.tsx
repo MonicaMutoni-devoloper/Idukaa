@@ -16,9 +16,9 @@ export default function SyncScreen() {
   const [rows, setRows] = useState<OutboxRow[]>([]);
 
   useEffect(() => {
-    const load = () => void listOutbox(user.id).then(setRows).catch(() => setRows([]));
+    const load = () => void listOutbox(user.id, user.shopId).then(setRows).catch(() => setRows([]));
     load(); const timer = setInterval(load, 3000); return () => clearInterval(timer);
-  }, [user.id, dataVersion, pending, issues]);
+  }, [user.id, user.shopId, dataVersion, pending, issues]);
 
   const storage = storageBackend();
   // The server's database being older than its code is the one failure the user cannot fix from

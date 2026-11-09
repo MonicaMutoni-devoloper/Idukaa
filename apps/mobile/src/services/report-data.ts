@@ -49,8 +49,8 @@ const meta = (over: Partial<LoadMeta>): LoadMeta => ({ ...EMPTY_META, failed: fa
 
 const readCache = async <T>(ctx: LoadContext, view: string): Promise<{ data: T; savedAt: string } | null> => {
   try {
-    const entry = readReportCache(await kvGet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to)), {
-      shopId: ctx.shopId, view, from: ctx.from, to: ctx.to,
+    const entry = readReportCache(await kvGet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to, ctx.financials)), {
+      shopId: ctx.shopId, view, from: ctx.from, to: ctx.to, financials: ctx.financials,
     });
     if (!entry?.totals || typeof entry.totals !== "object") return null;
     return { data: entry.totals as T, savedAt: entry.savedAt };
@@ -60,8 +60,9 @@ const readCache = async <T>(ctx: LoadContext, view: string): Promise<{ data: T; 
 };
 
 const writeCache = (ctx: LoadContext, view: string, data: unknown) =>
-  kvSet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to), JSON.stringify({
+  kvSet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to, ctx.financials), JSON.stringify({
     savedAt: new Date().toISOString(), shopId: ctx.shopId, view, from: ctx.from, to: ctx.to,
+    access: ctx.financials ? "financial" : "operational",
     rows: [], totals: data,
   })).catch(() => {});
 

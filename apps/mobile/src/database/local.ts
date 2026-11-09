@@ -14,8 +14,8 @@ export type StorageBackend = "sqlite" | "indexeddb" | "localstorage";
 export const storageBackend = (): StorageBackend => "sqlite";
 
 export type OutboxStatus = "pending" | "retry" | "synced" | "conflict" | "rejected" | "pending_approval";
-export interface OutboxRow { seq: number; op_id: string; user_id: string; type: string; payload: string; deltas: string; status: OutboxStatus; attempts: number; next_attempt_at: number; message: string | null; created_at: string; synced_at?: string | null }
-export interface LocalRecord { op_id: string; type: string; at: string; data: string; actor: string | null; created_at: string; status: string }
+export interface OutboxRow { seq: number; op_id: string; user_id: string; shop_id: string | null; type: string; payload: string; deltas: string; status: OutboxStatus; attempts: number; next_attempt_at: number; message: string | null; created_at: string; synced_at?: string | null }
+export interface LocalRecord { op_id: string; shop_id?: string | null; type: string; at: string; data: string; actor: string | null; created_at: string; status: string }
 
 export interface LocalProduct {
   id: string; code: string; barcode: string | null; name: string; unit: string; category: string | null;
@@ -31,14 +31,14 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, code TEXT, barcode TEXT, name TEXT NOT NULL, category TEXT, unit TEXT, selling_price INTEGER NOT NULL DEFAULT 0, low_threshold INTEGER NOT NULL DEFAULT 0, on_hand INTEGER NOT NULL DEFAULT 0, pending_delta INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE IF NOT EXISTS suppliers (id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT);
-    CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, deltas TEXT NOT NULL DEFAULT '{}',
+    CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, shop_id TEXT, type TEXT NOT NULL, payload TEXT NOT NULL, deltas TEXT NOT NULL DEFAULT '{}',
       status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, message TEXT, created_at TEXT NOT NULL, synced_at TEXT);
     CREATE INDEX IF NOT EXISTS outbox_status ON outbox(status, next_attempt_at);
     -- Business records saved on this device, keyed by the operation id that will sync them.
     -- The dashboard and every offline figure are calculated from THESE rows, never from a network
     -- response, so a sale, expense or delivery is reportable the moment it is saved. One row per
     -- operation means moving pending -> synced cannot be counted twice (the row is never duplicated).
-    CREATE TABLE IF NOT EXISTS records (op_id TEXT PRIMARY KEY, type TEXT NOT NULL, at TEXT NOT NULL, data TEXT NOT NULL, actor TEXT, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS records (op_id TEXT PRIMARY KEY, shop_id TEXT, type TEXT NOT NULL, at TEXT NOT NULL, data TEXT NOT NULL, actor TEXT, created_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS records_at ON records(at);`);
   // Incremental local migrations (SQLite has no ADD COLUMN IF NOT EXISTS): the unit-configuration
   // columns added with the purchase/base/selling-unit feature. No existing rows are touched.
@@ -47,6 +47,21 @@ export async function initDb() {
   if (!cols.includes("selling_unit")) await d.runAsync("ALTER TABLE products ADD COLUMN selling_unit TEXT");
   if (!cols.includes("units_per_purchase")) await d.runAsync("ALTER TABLE products ADD COLUMN units_per_purchase INTEGER NOT NULL DEFAULT 1");
   if (!cols.includes("units_per_selling")) await d.runAsync("ALTER TABLE products ADD COLUMN units_per_selling INTEGER NOT NULL DEFAULT 1");
+  // Shop-scoping arrived after the first offline installs. These columns let a device keep the
+  // records and queued work it already holds when a different account/shop signs in, instead of
+  // deleting them. Existing rows are attributed to the shop currently bound to this device, which
+  // is exactly the only shop the previous code allowed them to belong to.
+  const obCols = (await d.getAllAsync<{ name: string }>("PRAGMA table_info(outbox)")).map((r) => r.name);
+  if (!obCols.includes("shop_id")) await d.runAsync("ALTER TABLE outbox ADD COLUMN shop_id TEXT");
+  const recCols = (await d.getAllAsync<{ name: string }>("PRAGMA table_info(records)")).map((r) => r.name);
+  if (!recCols.includes("shop_id")) await d.runAsync("ALTER TABLE records ADD COLUMN shop_id TEXT");
+  await d.runAsync("CREATE INDEX IF NOT EXISTS outbox_shop ON outbox(shop_id, status, next_attempt_at)");
+  await d.runAsync("CREATE INDEX IF NOT EXISTS records_shop_at ON records(shop_id, at)");
+  const bound = (await d.getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k='local.shop'"))?.v ?? null;
+  if (bound) {
+    await d.runAsync("UPDATE outbox SET shop_id=? WHERE shop_id IS NULL", [bound]);
+    await d.runAsync("UPDATE records SET shop_id=? WHERE shop_id IS NULL", [bound]);
+  }
 }
 export const kvGet = async (k: string) => (await (await db()).getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k=?", [k]))?.v ?? null;
 export const kvSet = async (k: string, v: string) => { await (await db()).runAsync("INSERT INTO kv(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", [k, v]); };
@@ -63,8 +78,12 @@ export const resetSyncCursor = async (userId: string) => (await db()).runAsync("
  * Bind the cached catalogue to exactly one shop. Products and suppliers are per-shop data, but
  * the store itself is shared by every account that signs in on this device, so on each sign-in
  * and session restore this compares the bound shop against the signed-in user's: a different shop
- * drops the other shop's cached rows and sync checkpoints (forcing a full re-pull) while the outbox
- * is left untouched — unsynced work is never deleted. Same shop = no-op, so offline cache survives.
+ * drops the other shop's cached catalogue and sync checkpoints (forcing a full re-pull).
+ *
+ * Records and outbox rows are NOT deleted. They carry a shop_id, so another shop can never see or
+ * report them, and the original owner can still sync and report them after signing back in. This
+ * is the difference between "switch account" and "throw away saved business data". Same shop =
+ * no-op, so the offline cache survives.
  */
 export async function bindShop(shopId: string | null) {
   if (!shopId) return; // platform administrator: no shop data to scope
@@ -73,7 +92,6 @@ export async function bindShop(shopId: string | null) {
   await d.withTransactionAsync(async () => {
     await d.runAsync("DELETE FROM products");
     await d.runAsync("DELETE FROM suppliers");
-    await d.runAsync("DELETE FROM records"); // another shop's saved records must never be reported
     await d.runAsync("DELETE FROM kv WHERE k LIKE 'cp:%'"); // checkpoints: next pull starts from scratch for this shop
     await d.runAsync("INSERT INTO kv(k,v) VALUES ('local.shop',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", [shopId]);
   });
@@ -83,22 +101,25 @@ export async function bindShop(shopId: string | null) {
 export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>, recordAt?: string) {
   const d = await db();
   const now = new Date().toISOString();
+  const shopId = (await d.getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k='local.shop'"))?.v ?? null;
   await d.withTransactionAsync(async () => {
-    await d.runAsync("INSERT INTO outbox(op_id,user_id,type,payload,deltas,created_at) VALUES (?,?,?,?,?,?)", [opId, userId, type, JSON.stringify(payload), JSON.stringify(deltas), now]);
+    await d.runAsync("INSERT INTO outbox(op_id,user_id,shop_id,type,payload,deltas,created_at) VALUES (?,?,?,?,?,?,?)", [opId, userId, shopId, type, JSON.stringify(payload), JSON.stringify(deltas), now]);
     for (const [pid, q] of Object.entries(deltas)) await d.runAsync("UPDATE products SET pending_delta = pending_delta + ? WHERE id=?", [q, pid]);
     // The reportable record is committed in the same transaction as the outbox row: if the app dies
     // now, either both exist or neither does — a sale can never be shown as saved without being countable.
-    await d.runAsync("INSERT OR IGNORE INTO records(op_id,type,at,data,actor,created_at) VALUES (?,?,?,?,NULL,?)",
-      [opId, type, recordAt ?? now, JSON.stringify(payload), now]);
+    await d.runAsync("INSERT OR IGNORE INTO records(op_id,shop_id,type,at,data,actor,created_at) VALUES (?,?,?,?,?,NULL,?)",
+      [opId, shopId, type, recordAt ?? now, JSON.stringify(payload), now]);
     await local?.();
   });
 }
 
-/** Every record saved on this device, with its sync verdict (the dashboard's only data source offline). */
+/** Every record saved on this device for the bound shop, with its sync verdict. */
 export const listRecords = async () =>
   (await db()).getAllAsync<LocalRecord>(
     `SELECT r.op_id, r.type, r.at, r.data, r.actor, r.created_at, COALESCE(o.status, 'pending') AS status
-       FROM records r LEFT JOIN outbox o ON o.op_id = r.op_id ORDER BY r.at, r.op_id`);
+       FROM records r LEFT JOIN outbox o ON o.op_id = r.op_id
+      WHERE r.shop_id = (SELECT v FROM kv WHERE k='local.shop')
+      ORDER BY r.at, r.op_id`);
 export const upsertLocalProduct = async (p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number }) => {
   const d = await db();
   // Conversion config is part of the local product so offline sales/receipts convert on-device
@@ -116,10 +137,14 @@ export const upsertLocalProduct = async (p: { id: string; code: string; barcode?
 };
 export const upsertLocalSupplier = async (s: { id: string; name: string; phone?: string }) => (await db()).runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name", [s.id, s.name, s.phone ?? null]);
 
-export const dueOps = async (userId: string, limit = 50) => (await db()).getAllAsync<OutboxRow>("SELECT * FROM outbox WHERE user_id=? AND status IN ('pending','retry') AND next_attempt_at<=? ORDER BY seq LIMIT ?", [userId, Date.now(), limit]);
-export const listOutbox = async (userId: string) => (await db()).getAllAsync<OutboxRow>("SELECT * FROM outbox WHERE user_id=? ORDER BY seq DESC LIMIT 200", [userId]);
-export const outboxCounts = async (userId: string) => {
-  const rows = await (await db()).getAllAsync<{ status: string; n: number }>("SELECT status, COUNT(*) n FROM outbox WHERE user_id=? GROUP BY status", [userId]);
+export const dueOps = async (userId: string, shopId: string | null, limit = 50) => (await db()).getAllAsync<OutboxRow>(
+  "SELECT * FROM outbox WHERE user_id=? AND COALESCE(shop_id,'')=? AND status IN ('pending','retry') AND next_attempt_at<=? ORDER BY seq LIMIT ?",
+  [userId, shopId ?? "", Date.now(), limit]);
+export const listOutbox = async (userId: string, shopId: string | null) => (await db()).getAllAsync<OutboxRow>(
+  "SELECT * FROM outbox WHERE user_id=? AND COALESCE(shop_id,'')=? ORDER BY seq DESC LIMIT 200", [userId, shopId ?? ""]);
+export const outboxCounts = async (userId: string, shopId: string | null) => {
+  const rows = await (await db()).getAllAsync<{ status: string; n: number }>(
+    "SELECT status, COUNT(*) n FROM outbox WHERE user_id=? AND COALESCE(shop_id,'')=? GROUP BY status", [userId, shopId ?? ""]);
   const g = (s: string) => rows.find(r => r.status === s)?.n ?? 0;
   return { pending: g("pending") + g("retry"), issues: g("conflict") + g("rejected"), awaitingApproval: g("pending_approval") };
 };
@@ -146,7 +171,8 @@ export async function markRetry(opIds: string[], message: string) {
     }
   });
 }
-export const retryNow = async (userId: string) => (await db()).runAsync("UPDATE outbox SET next_attempt_at=0 WHERE user_id=? AND status='retry'", [userId]);
+export const retryNow = async (userId: string, shopId: string | null) => (await db()).runAsync(
+  "UPDATE outbox SET next_attempt_at=0 WHERE user_id=? AND COALESCE(shop_id,'')=? AND status='retry'", [userId, shopId ?? ""]);
 
 export async function applyPull(changes: { entity: string; id: string; data: any }[]) {
   const d = await db();

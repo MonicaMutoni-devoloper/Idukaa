@@ -141,6 +141,20 @@ test("a failed or conflicting record is reported as such", () => {
   assert.equal(run([sale("op1", "2026-11-03T09:00:00.000Z", {}, "conflict")], []).status, "conflict");
 });
 
+test("a rejected or conflicting operation is never counted as revenue, cost or stock", () => {
+  const products = [product({ on_hand: 8000 })];
+  for (const status of ["rejected", "conflict"] as const) {
+    const r = run([sale("op1", "2026-11-03T09:00:00.000Z", {}, status)], products);
+    assert.equal(r.data.operations.netSales, 0, `${status}: no revenue the server refused`);
+    assert.equal(r.data.operations.transactions, 0);
+    assert.equal(r.data.financials?.netSales, 0);
+    assert.equal(r.data.financials?.cogs, 0);
+    assert.equal(r.data.expensesByCategory.length, 0);
+    assert.equal(r.counts.total, 1, "the operation is still held on the device for recovery");
+    assert.equal(r.status, status === "rejected" ? "sync_failed" : "conflict");
+  }
+});
+
 test("empty records return valid zeros with an unavailable margin, not an error", () => {
   const r = run([], []);
   assert.equal(r.data.operations.netSales, 0);

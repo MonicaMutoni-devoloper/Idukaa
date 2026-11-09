@@ -14,21 +14,40 @@ import { WebSocket, WebSocketServer } from "ws";
  * re-read (active, account_status, token_version) and the shop is joined from that row, never
  * from the client. Two shops can therefore never share a room, even if a bug sent the wrong id.
  */
-export interface RealtimeIdentity { id: string; role: string; shopId: string | null }
+export interface RealtimeIdentity { id: string; role: string; shopId: string | null; expiresAt?: number }
 
 export interface RealtimeDeps {
   /** Same checks as AuthGuard, resolved from the token; null means "refuse this socket". */
   verify: (token: string) => Promise<RealtimeIdentity | null>;
   log?: (evt: string, data: Record<string, unknown>) => void;
+  /** How often a live socket re-checks its user/shop (default 2 minutes). */
+  revalidateMs?: number;
 }
 
-type Client = WebSocket & { authed?: boolean; shopId?: string; userId?: string; alive?: boolean };
+type Client = WebSocket & {
+  authed?: boolean; shopId?: string; userId?: string; alive?: boolean;
+  token?: string; verifiedAt?: number; expiresAt?: number; expiryTimer?: ReturnType<typeof setTimeout>; checking?: boolean;
+};
 
 const PATH = "/realtime";
 /** A browser tab or phone that connects must authenticate within this window. */
 const AUTH_TIMEOUT_MS = 5_000;
 /** Idle detection: ping every 25 s, drop a socket that missed one full round. */
 const HEARTBEAT_MS = 25_000;
+/** Access tokens last 15 minutes by default; re-check the account/shop sooner than that. */
+const REVALIDATE_MS = 120_000;
+
+/** Close a socket exactly when the access token it authenticated with expires. */
+function armExpiry(ws: Client) {
+  if (ws.expiryTimer) { clearTimeout(ws.expiryTimer); ws.expiryTimer = undefined; }
+  if (!ws.expiresAt) return;
+  const delay = ws.expiresAt - Date.now();
+  if (delay <= 0) { try { ws.close(4001, "token_expired"); } catch { /* already closed */ } return; }
+  ws.expiryTimer = setTimeout(() => {
+    try { ws.close(4001, "token_expired"); } catch { /* already closed */ }
+  }, Math.min(delay, 2_147_483_647));
+  ws.expiryTimer.unref?.();
+}
 
 let wss: WebSocketServer | null = null;
 const rooms = new Map<string, Set<Client>>();
@@ -70,10 +89,15 @@ export function attachRealtime(http: HttpServer, deps: RealtimeDeps): WebSocketS
         const token = typeof msg.token === "string" ? msg.token : "";
         const who = token ? await deps.verify(token).catch(() => null) : null;
         if (!who || !who.shopId) { ws.close(4001, "unauthorized"); return; }
+        if (who.expiresAt && who.expiresAt <= Date.now()) { ws.close(4001, "token_expired"); return; }
         clearTimeout(authTimer);
         ws.authed = true;
         ws.shopId = who.shopId;
         ws.userId = who.id;
+        ws.token = token;
+        ws.verifiedAt = Date.now();
+        ws.expiresAt = who.expiresAt;
+        armExpiry(ws);
         const room = rooms.get(who.shopId) ?? new Set<Client>();
         room.add(ws);
         rooms.set(who.shopId, room);
@@ -85,6 +109,10 @@ export function attachRealtime(http: HttpServer, deps: RealtimeDeps): WebSocketS
 
     ws.on("close", () => {
       clearTimeout(authTimer);
+      if (ws.expiryTimer) clearTimeout(ws.expiryTimer);
+      ws.expiryTimer = undefined;
+      // Never retain a credential after the socket is gone.
+      ws.token = undefined;
       const shop = ws.shopId;
       if (!shop) return;
       const room = rooms.get(shop);
@@ -94,12 +122,28 @@ export function attachRealtime(http: HttpServer, deps: RealtimeDeps): WebSocketS
     ws.on("error", () => ws.terminate());
   });
 
+  const revalidateMs = deps.revalidateMs ?? REVALIDATE_MS;
   const beat = setInterval(() => {
     for (const room of rooms.values()) {
       for (const ws of room) {
         if (ws.alive === false) { ws.terminate(); continue; }
         ws.alive = false;
         try { ws.ping(); } catch { ws.terminate(); }
+        if (ws.expiresAt && ws.expiresAt <= Date.now()) {
+          try { ws.close(4001, "token_expired"); } catch { /* already closed */ }
+          continue;
+        }
+        // Revocation (logout-all, password change, account suspension) must not wait for the
+        // access token to expire. Re-read the user at a bounded interval, not on every event.
+        if (!ws.checking && ws.token && ws.shopId && Date.now() - (ws.verifiedAt ?? 0) >= revalidateMs) {
+          ws.checking = true;
+          void deps.verify(ws.token).then((who) => {
+            ws.checking = false;
+            if (!who || who.shopId !== ws.shopId) { try { ws.close(4001, "unauthorized"); } catch { /* closed */ } return; }
+            ws.verifiedAt = Date.now();
+            if (who.expiresAt) { ws.expiresAt = who.expiresAt; armExpiry(ws); }
+          }).catch(() => { try { ws.close(1011, "internal"); } catch { /* closed */ } });
+        }
       }
     }
   }, HEARTBEAT_MS);
@@ -119,7 +163,9 @@ export function emitShopChange(shopId: string | null | undefined, entities: stri
     type: "change", shopId, entities: [...new Set(entities.filter(Boolean))], at: new Date().toISOString(),
   });
   let sent = 0;
+  const now = Date.now();
   for (const ws of rooms.get(shopId) ?? []) {
+    if (ws.expiresAt && ws.expiresAt <= now) continue;
     if (ws.authed && ws.readyState === WebSocket.OPEN) { ws.send(payload); sent++; }
   }
   return sent;

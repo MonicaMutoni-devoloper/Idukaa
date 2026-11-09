@@ -1,5 +1,5 @@
 # Offline & synchronization
-Flow: validate locally → one SQLite transaction (outbox row + optimistic delta) → UI shows "saved on device / waiting to sync" → engine pushes when online (NetInfo, app foreground, every 30 s, manual) → server verdict stored per op → pull changes.
+Flow: validate locally → one SQLite transaction (outbox row + optimistic delta) → UI shows "saved on device / waiting to sync" → engine pushes when online (NetInfo, app foreground, every 30 s without a live socket, every 5 minutes as a safety poll with one, manual) → server verdict stored per op → pull changes → any open dashboard/report recalculates in place.
 
 | Situation | Behaviour |
 |---|---|
@@ -10,6 +10,9 @@ Flow: validate locally → one SQLite transaction (outbox row + optimistic delta
 | Refresh failed / account revoked (401) | Queue kept, banner "sign in again"; ops are bound to `user_id` and only sync under that user |
 | Reload while offline (web) | The shell and cached data render; there is no access token until a refresh succeeds, and the UI never presents cached data as server-confirmed |
 | Conflict (oversell, over-receipt) | Not applied; visible in the Sync screen and the owner's Approvals; owner records a resolution; re-entry is a *new* operation |
+| Rejected / conflicting operation | Kept on the device for review, but excluded from local revenue, cost, stock and report rows; it is shown in the Sync screen with its server message |
+| Account or shop switch | The catalogue and checkpoints are reset for the new shop. `records` and `outbox` are **not deleted**: each row carries `shop_id`, so another shop can never read or sync it and the original account recovers it on sign-in |
+| Realtime socket outlives its access token | The server closes it (`4001 token_expired`); the client rotates the refresh token and reconnects. If rotation fails, normal jittered backoff applies |
 | Logout | Never deletes the outbox |
 
 ## Reports
@@ -21,9 +24,11 @@ Reports read this device first and the API second.
 - Rows are calculated by `src/services/local-reports.ts` with the same shared functions the API uses
   (`summarize`, `periodCosts`, `valueAt`), so an offline net sale, COGS, gross profit and operating
   result agree with what the server will report once the work synchronizes.
-- A successful API answer is cached per shop, view and **exact** period under
-  `report:v1:<shop>:<view>:<from>:<to>` with its `savedAt` time. The cache is validated on read
-  (shop, view, period, timestamp) and is never rendered for another shop or range.
+- A successful API answer is cached per shop, view, **exact** period and permission scope under
+  `report:v2:<shop>:<view>:<from>:<to>:<financial|operational>` with its `savedAt` time. The cache
+  is validated on read (shop, view, period, access, timestamp) and is never rendered for another
+  shop, range or role scope — an owner's cost-bearing copy cannot satisfy a manager without
+  financial access.
 - Offline, no request is made: the saved report renders with its synchronization time and a "may be
   out of date" label. With no saved copy yet, the device's own records are shown and labelled
   accordingly, rather than an error or a list of zeros.
@@ -32,6 +37,9 @@ Reports read this device first and the API second.
   pending_approval) are merged **by operation id**, so a sale that pushes successfully can never be
   counted twice. While anything is still queued the summary stays server-derived and says how many
   operations are not in it yet.
+- Rejected and conflicting operations are retained for recovery but are not posted rows and never
+  enter revenue, COGS, expenses, purchases, stock or profit; the report's `counts.failed` and
+  `counts.conflicts` say they exist.
 - Not available offline, shown as "—" instead of guessed: supplier and cashier names, approved
   adjustment cost, stock-loss cost and void state (all server-side).
 - Tests: `apps/mobile/tests/local-reports.test.mts` (`npm run test:reports -w @sms/mobile`).

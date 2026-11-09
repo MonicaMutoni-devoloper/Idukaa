@@ -24,9 +24,10 @@ modules, both resolved by Metro's platform extensions — no forks, no per-platf
 | Keyboard | `softwareKeyboardLayoutMode: resize` | browser default |
 
 Everything else is identical on all platforms: the outbox queue (`enqueue`, `applyResults`,
-`markRetry`), backoff, `op_id` idempotency, conflict handling, shop-scoped cache wipe
-(`bindShop()`), the sync engine (`src/synchronization/engine.ts`), the API client
-(`src/services/api.ts`), the UI kit, theming and localisation (rw/en).
+`markRetry`), backoff, `op_id` idempotency, conflict handling, shop-scoped catalogue reset
+(`bindShop()` — records and queued work carry a `shop_id` and are retained), the sync engine
+(`src/synchronization/engine.ts`), the API client (`src/services/api.ts`), the UI kit, theming and
+localisation (rw/en).
 
 Data safety is unchanged by this work: multi-shop isolation, pending offline transactions and the
 production database were not touched, and no sample/business data was seeded.

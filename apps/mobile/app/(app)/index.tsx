@@ -169,7 +169,9 @@ export default function Home() {
     if (!range) return;
     const seq = ++loadSeq.current;
     setLoading(true); setFailed(false); setAuthIssue(false);
-    const key = `dashboard:${user?.role}:${range.from}:${range.to}`;
+    // Per shop AND per user: a cached dashboard can carry cost/profit and must never be reused
+    // after switching shop or after a manager signs in on the owner's browser.
+    const key = `dashboard:v2:${user?.shopId ?? "none"}:${user?.id ?? "none"}:${range.from}:${range.to}`;
 
     // 1. Local figures first. They come from this device's own records, so they exist in
     //    milliseconds and do not depend on the network at all.
@@ -177,7 +179,7 @@ export default function Home() {
     try {
       // A manager only sees cost and profit when the owner granted it — remembered from the last
       // server answer so the local view does not invent a permission it cannot verify offline.
-      const granted = user?.role === "owner" ? true : (await kvGet("dash.perms").catch(() => null)) === "1";
+      const granted = user?.role === "owner" ? true : (await kvGet(`dash.perms:${user?.id ?? "none"}`).catch(() => null)) === "1";
       local = await buildLocalDashboard({ from: range.from, to: range.to, role: user?.role ?? "manager", financials: granted });
       if (seq !== loadSeq.current) return;
       setLocalInfo(local);
@@ -196,7 +198,7 @@ export default function Home() {
       if (seq !== loadSeq.current) return;
       setData(res); setSource("server"); setFailed(false); setStaleAt(null);
       void kvSet(key, JSON.stringify({ savedAt: new Date().toISOString(), data: res })).catch(() => {});
-      void kvSet("dash.perms", res.permissions?.financials ? "1" : "0").catch(() => {});
+      void kvSet(`dash.perms:${user?.id ?? "none"}`, res.permissions?.financials ? "1" : "0").catch(() => {});
     } catch (e) {
       if (seq !== loadSeq.current) return;
       // A 401 means "sign in again" only when the refresh credential was actually rejected. A token
@@ -214,7 +216,7 @@ export default function Home() {
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [range, user?.role]);
+  }, [range, user?.role, user?.id, user?.shopId]);
 
   // Recalculate when the range changes, when a record is saved or its verdict changes, or when a
   // new session replaces an expired one. Not on a timer, and never twice for the same change.

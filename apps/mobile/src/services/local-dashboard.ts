@@ -126,11 +126,18 @@ const clampDate = (v: unknown, fallback: string) => {
   return Number.isNaN(Date.parse(s)) ? fallback : new Date(s).toISOString();
 };
 
-/** Turns stored records into domain rows. Unknown types are ignored; malformed payloads are skipped. */
+/**
+ * A server-rejected/conflicting operation never happened on the shop ledger. It stays on the device
+ * for review and recovery, but it must not add revenue, cost or stock to locally calculated figures.
+ */
+export const isFailedSync = (status: string) => status === "rejected" || status === "conflict";
+
+/** Turns stored records into domain rows. Unknown types are ignored; malformed and failed payloads are skipped. */
 export function parseRecords(records: LocalRecord[]): RecordSet {
   const out: RecordSet = { sales: [], expenses: [], purchases: [], adjustments: [], openings: [] };
   const expenses = new Map<string, Expense>();
   for (const r of records) {
+    if (isFailedSync(r.status)) continue;
     let p: any;
     try { p = JSON.parse(r.data); } catch { continue; }
     if (!p || typeof p !== "object") continue;

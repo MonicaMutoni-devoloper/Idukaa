@@ -54,7 +54,7 @@ const summary = (records: LocalRecord[], products = [product()], range = DAY3) =
 
 test("a cached report is returned unchanged for the same shop, view and period", () => {
   const key = reportCacheKey("shop-1", "sales", DAY3.from, DAY3.to);
-  const raw = JSON.stringify({ savedAt: "2026-11-03T12:00:00.000Z", shopId: "shop-1", view: "sales", from: DAY3.from, to: DAY3.to, rows: [{ id: "s1", at: "2026-11-03T09:00:00.000Z" }], totals: null });
+  const raw = JSON.stringify({ savedAt: "2026-11-03T12:00:00.000Z", shopId: "shop-1", view: "sales", from: DAY3.from, to: DAY3.to, access: "operational", rows: [{ id: "s1", at: "2026-11-03T09:00:00.000Z" }], totals: null });
   const entry = readReportCache(raw, { shopId: "shop-1", view: "sales", from: DAY3.from, to: DAY3.to });
   assert.ok(entry, "the saved copy is usable offline");
   assert.equal(entry.rows.length, 1);
@@ -62,17 +62,22 @@ test("a cached report is returned unchanged for the same shop, view and period",
 });
 
 test("a cached report is rejected for another shop, another period, another view, or corruption", () => {
-  const raw = JSON.stringify({ savedAt: "2026-11-03T09:00:00.000Z", shopId: "shop-1", view: "sales", from: DAY3.from, to: DAY3.to, rows: [{ id: "s1" }], totals: null });
+  const raw = JSON.stringify({ savedAt: "2026-11-03T09:00:00.000Z", shopId: "shop-1", view: "sales", from: DAY3.from, to: DAY3.to, access: "operational", rows: [{ id: "s1" }], totals: null });
   const expect = { shopId: "shop-1", view: "sales", from: DAY3.from, to: DAY3.to };
   assert.equal(readReportCache(raw, { ...expect, shopId: "shop-2" }), null, "another shop's report must never render");
   assert.equal(readReportCache(raw, { ...expect, view: "expenses" }), null);
   assert.equal(readReportCache(raw, { ...expect, from: DAY2.from }), null);
   assert.equal(readReportCache("{not json", expect), null);
   assert.equal(readReportCache(null, expect), null, "no cache is not an error, just no saved copy");
+  assert.equal(readReportCache(raw, { ...expect, financials: true }), null,
+    "a manager without financial access cannot read an owner's cost-bearing cache");
+  assert.notEqual(reportCacheKey("shop-1", "inventory", DAY3.from, DAY3.to, false),
+    reportCacheKey("shop-1", "inventory", DAY3.from, DAY3.to, true),
+    "permission scope is part of the cache key");
 });
 
 test("a failed request falls back to the cached rows, not to an empty list", () => {
-  const cached = { savedAt: "2026-11-03T09:00:00.000Z", shopId: "shop-1", view: "sales", from: DAY3.from, to: DAY3.to, rows: [{ id: "s1", at: "2026-11-03T08:00:00.000Z" }], totals: null };
+  const cached = { savedAt: "2026-11-03T09:00:00.000Z", shopId: "shop-1", view: "sales", from: DAY3.from, to: DAY3.to, access: "operational", rows: [{ id: "s1", at: "2026-11-03T08:00:00.000Z" }], totals: null };
   const entry = readReportCache(JSON.stringify(cached), { shopId: "shop-1", view: "sales", from: DAY3.from, to: DAY3.to })!;
   // The screen renders mergePendingRows(entry.rows, pending) when the API throws.
   const rendered = mergePendingRows(entry.rows as ReportSaleRow[], []);
@@ -139,6 +144,26 @@ test("COGS uses the cost actually received, and expenses are deducted from opera
   assert.equal(s.current.openingInventoryUnits, 10000, "the delivery was the day before, so it opens the period");
   assert.equal(s.current.closingInventoryUnits, 8000);
   assert.equal(s.current.closingInventoryValue, 4000);
+});
+
+test("rejected and conflicting operations are kept for review but excluded from report totals", () => {
+  for (const status of ["rejected", "conflict"] as const) {
+    const records = [
+      sale("op1", "2026-11-03T09:00:00.000Z", {}, status),
+      expense("op2", "2026-11-03T10:00:00.000Z", {}, status),
+      purchase("op3", "2026-11-03T11:00:00.000Z", {}, status),
+    ];
+    const sales = report(records, "sales");
+    assert.equal(sales.rows.length, 0, `${status}: a refused sale is not shown as posted revenue`);
+    assert.equal(sales.counts[status === "rejected" ? "failed" : "conflicts"], 3);
+    assert.equal(report(records, "expenses").rows.length, 0);
+    assert.equal(report(records, "purchases").rows.length, 0);
+    const s = summary(records);
+    assert.equal(s.current.netSales, 0);
+    assert.equal(s.current.operatingExpenses, 0);
+    assert.equal(s.current.inventoryPurchases, 0);
+    assert.equal(s.current.transactions, 0);
+  }
 });
 
 test("one operation is counted exactly once, before and after it synchronizes", () => {

@@ -4,6 +4,7 @@ import { formatQty, formatRwf } from "@sms/shared";
 import { Badge, Banner, Button, Card, DataTable, Empty, ErrorState, Field, Loading, Screen, Segmented, useToasts } from "../../src/components/ui";
 import { useT, type Key } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
+import { useSync } from "../../src/synchronization/engine";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
 type Tab = "adjustments" | "investigations" | "conflicts" | "activity";
@@ -11,6 +12,9 @@ const statusTone = (s: string) => (s === "open" ? "danger" : s === "investigatin
 
 export default function Approvals() {
   const t = useT(); const c = useTheme(); const user = useSession((s) => s.user)!; const toast = useToasts((s) => s.push);
+  // A manager's adjustment/receipt can arrive while the owner is already looking at this screen.
+  // The realtime nudge runs a pull, whose revision bump reloads the pending decisions in place.
+  const recordsVersion = useSync((s) => s.recordsVersion);
   const [tab, setTab] = useState<Tab>("adjustments");
   const [adj, setAdj] = useState<any[]>([]); const [inv, setInv] = useState<any[]>([]); const [conf, setConf] = useState<any[]>([]); const [log, setLog] = useState<any[]>([]);
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -24,7 +28,7 @@ export default function Approvals() {
     } catch { setFailed(true); }
     finally { setLoading(false); }
   }, []);
-  useEffect(() => { if (user.role === "owner") void load(); else setLoading(false); }, [load, user.role]);
+  useEffect(() => { if (user.role === "owner") void load(); else setLoading(false); }, [load, user.role, recordsVersion]);
 
   const noteFor = (id: string) => {
     const n = (notes[id] ?? "").trim();
