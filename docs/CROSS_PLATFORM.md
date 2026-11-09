@@ -7,7 +7,7 @@ One Expo/React Native codebase, one backend, one sync strategy. This report stat
 
 | Target | Local store | Status | Artifact |
 |---|---|---|---|
-| **Android (native)** | `expo-sqlite` | **Built and signed — installable APK exists** | `dist/idukaa-1.0.0-android-release.apk` (98,370,284 bytes, SHA-256 `27ea6991206065fd38868c8bba3534934e603773dad72219f185a30d26ea11a4`) |
+| **Android (native)** | `expo-sqlite` | **Built and signed — installable APK exists, verified on a phone** | `dist/idukaa-1.0.4-android-release.apk` (48,631,488 bytes, SHA-256 `15e65c4e3427b82d0105749bfd0716b256347f5bdf3ce5174205eff61d25433a`, `versionCode 5`) |
 | **iOS (native)** | `expo-sqlite` | Configured only — not built (needs macOS + Apple credentials) | none — see `docs/IOS_BUILD.md` |
 | **Web / PWA** | `local.web.ts` → IndexedDB | Built and deployed earlier in this project | `expo export --platform web` output with service worker (`dist/sw.js`) |
 | **Windows desktop** | IndexedDB (via the PWA) | Supported as an installable PWA | no native Windows target exists for Expo SDK 58 — see `docs/ANDROID_BUILD.md` §3 |
@@ -31,6 +31,39 @@ Everything else is identical on all platforms: the outbox queue (`enqueue`, `app
 Data safety is unchanged by this work: multi-shop isolation, pending offline transactions and the
 production database were not touched, and no sample/business data was seeded.
 
+### What the app keeps offline (and how it repairs an empty list)
+
+The catalogue (products, suppliers, on-hand quantities) is stored in SQLite on the phone and
+IndexedDB in the browser, so Stock and Sell render from the device with no network at all. Every
+sale, expense, receipt and count is written to the outbox **and** to the local `records` table in one
+transaction before the UI reports success, then syncs when the connection returns — idempotent by
+`op_id`, so a retry can never duplicate a sale.
+
+The pull is incremental, keyed by a cursor saved on the device. If that cursor and the local rows
+ever get out of step (an interrupted first pull, a cache cleared by an older build, a shop re-bound
+mid-pull), every later pull legitimately answers "nothing changed" and the phone shows an empty
+catalogue while the web app shows the whole shop — retrying the same cursor can never fix it.
+`needsFullRepull()` (`src/synchronization/catalogue.ts`) detects exactly that shape — no products on
+the device, a cursor present, no product rows in the answer — and the engine drops the cursor once
+and re-pulls from the beginning. `fullResync()` exposes the same repair as "Reload stock list" on
+Stock, Sell and Sync. The outbox and saved records are never part of a pull, so this cannot lose
+work.
+
+A failed pull is no longer silent: the sync store keeps a stable code (`network`, `storage`,
+`server_<status>`) and the Sync, Stock and Sell screens say what happened instead of showing what
+looks like an empty shop. `storage` exists because a write that fails **on the device** must never be
+reported as the server's fault: in 1.0.3 the product INSERT bound 13 values to 14 columns, SQLite
+refused it at prepare time, every pull aborted, and the app blamed the server while the catalogue
+stayed one row deep. The browser stores the same data as objects in IndexedDB (no SQL), so it was
+unaffected — which is exactly how a phone/PC divergence appears when the fault is in the native
+storage layer rather than in the API.
+
+Verified against a real API and PostgreSQL (seeded demo shop, product created through
+`/sync/push`): a full pull delivers the product with the fields the device stores
+(`sellingPrice`, `onHand`, `active: true`, unit configuration), and the same pull repeated with the
+returned cursor answers 0 changes — the exact state that previously left the app looking empty and
+that `needsFullRepull()` now repairs.
+
 ## 3. Android build (what actually ran)
 
 Built **locally with Gradle**, not EAS, because no Expo account/credentials are available:
@@ -50,14 +83,18 @@ Result: `BUILD SUCCESSFUL in 11m 12s`, 639 tasks (120 executed), 4 ABIs bundled
 Verified on the produced file (`aapt2` / `apksigner` / `unzip -t`):
 
 ```
-package: name='rw.shop.management' versionCode='1' versionName='1.0.0'
+package: name='rw.shop.management' versionCode='5' versionName='1.0.4'
 compileSdkVersion='37'  sdkVersion:'24'  targetSdkVersion:'36'
 Signer #1 certificate DN: CN=Android Debug, OU=Android, O=Unknown, ...
 zip: "No errors detected in compressed data"
 ```
 
-Install: `adb install -r dist/idukaa-1.0.0-android-release.apk`, or copy the file to the phone and
+Install: `adb install -r dist/idukaa-1.0.4-android-release.apk`, or copy the file to the phone and
 open it with "install unknown apps" allowed.
+
+`npm run verify:apk -- dist/<apk>` adds two checks beyond the metadata above: every native library
+and symbol must resolve for every shipped ABI (the 1.0.1 startup crash), and the bundled JavaScript
+must not point at a loopback API URL (the empty-catalogue trap above).
 
 ## 4. iOS readiness
 
@@ -76,7 +113,9 @@ settings are committed as a config plugin instead of hand-edited Gradle files:
 prebuild:
 
 - `compileSdk 37` (React Native 0.88 / Expo SDK 58 AAR metadata refuses anything lower),
-  `targetSdk 36`, `buildTools 36.1.0`, `ndkVersion 28.2.13676358`.
+  `targetSdk 36`, `buildTools 36.1.0`, `ndkVersion 27.1.12297006` — React Native 0.88's own NDK.
+  Raising it alone rebuilds every native module against a newer libc++ than the packaged
+  `libc++_shared.so`, and the app then dies at startup; see `docs/ANDROID_BUILD.md` §1–2.
 - the `IDUKAA_CXX_STAGING` override for Gradle's CMake staging directory. On Windows the default
   `android/app/.cxx/...` tree overflows `MAX_PATH` (260) and `ninja` fails with
   `mkdir(...): No such file or directory`; pointing it at `C:/x` shortens those paths. This machine
@@ -88,9 +127,20 @@ prebuild:
   keystore exists yet. It installs and runs, but it must not be published: Play requires a release
   key, and updates signed with a different key are rejected. Generate one and rebuild before any
   real distribution (`eas build` handles this automatically, or `keytool` + `signingConfigs`).
-- **No physical device test was performed here.** The APK was validated statically (metadata,
-  signature, archive integrity, ABI set); the on-device offline flow (airplane mode → record sale →
-  force-stop → reopen → reconnect → sync twice) is still the acceptance test to run.
+- **Physical device: catalogue pull and offline persistence verified on 1.0.4; recording a sale is
+  not.** 1.0.4 was installed over 1.0.3 on the Infinix X657 that produced the original crash report
+  (`pm install -r`, `versionCode 5`, data kept) and Stock then listed all 5 server products with a
+  real `Last synced` time, down from 1 product and "Last synced: Never". With mobile data and Wi-Fi
+  off, after `force-stop` and relaunch the same 5 products still rendered from SQLite. Recording a
+  sale offline and syncing it back remains the one acceptance test outstanding on that handset: it
+  already holds a signed-in production session for a real shop and no credentials were available to
+  sign that account back in. The carrier link on that handset also drops intermittently (validated
+  cellular network, 100 % ICMP loss at times), so passes that report `network` there are the link,
+  not the app.
+- **The release APK must point at the deployed API.** `apps/mobile/.env` holds
+  `EXPO_PUBLIC_API_URL=http://localhost:3000` for local development; a release built with it signs in
+  on a laptop but can never reach the server from a phone (empty catalogue, nothing syncing).
+  `npm run verify:apk` now fails such a build, and the Gradle command above sets the URL explicitly.
 - No Android emulator run, no OTA updates (`expo-updates` is not configured — every change needs a
   new build), and `build-tools 37.0.0` was unavailable from Google's CDN during this build, hence
   36.1.0 in the plugin.

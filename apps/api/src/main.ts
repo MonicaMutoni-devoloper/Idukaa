@@ -1,7 +1,10 @@
 import "./env";
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
+import { JwtService } from "@nestjs/jwt";
 import helmet from "helmet";
+import { Db } from "./db/db.service";
+import { attachRealtime } from "./realtime/hub";
 import { AppModule } from "./app.module";
 import { requestIdMiddleware } from "./common/auth-log";
 import { allowedOrigins } from "./common/http";
@@ -31,6 +34,22 @@ async function bootstrap() {
   // so no other origin can send or read authenticated requests.
   app.enableCors({ origin: allowedOrigins(), credentials: true });
   app.getHttpAdapter().getInstance().set("trust proxy", 1);
+  // Real-time presence channel. It carries only "this shop changed" nudges: clients answer by
+  // running their own authorized incremental pull, so authorization stays in AuthGuard/pull and a
+  // dropped message costs one poll interval, never data.
+  attachRealtime(app.getHttpServer() as Parameters<typeof attachRealtime>[0], {
+    verify: async (token) => {
+      let claims: { sub?: string; tv?: number };
+      try { claims = await app.get(JwtService).verifyAsync(token); } catch { return null; }
+      const [u] = await app.get(Db).query(
+        `SELECT u.id, u.role, u.shop_id, u.active, u.account_status, u.token_version, s.status AS shop_status
+           FROM users u LEFT JOIN shops s ON s.id = u.shop_id WHERE u.id=$1`, [claims.sub]);
+      if (!u || !u.active || u.account_status !== "active" || u.token_version !== claims.tv) return null;
+      if (u.shop_id && u.shop_status === "suspended") return null;
+      return { id: u.id, role: u.role, shopId: u.shop_id };
+    },
+    log: (evt, data) => console.log(JSON.stringify({ t: new Date().toISOString(), evt, ...data })),
+  });
   await app.listen(Number(process.env.PORT ?? 3000), "0.0.0.0");
 }
 bootstrap();

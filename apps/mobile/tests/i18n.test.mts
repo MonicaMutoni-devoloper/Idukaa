@@ -29,7 +29,11 @@ test("placeholders match between languages", () => {
 });
 
 /** Keys where the Kinyarwanda value is intentionally identical (a loanword, a symbol, a code, a brand). */
-const IDENTICAL_BY_DESIGN = new Set(["stock.barcode", "receive.equals", "app.name"]);
+const IDENTICAL_BY_DESIGN = new Set([
+  "stock.barcode", "receive.equals", "app.name",
+  // File formats and the brand are not translated.
+  "ana.exportCsv", "ana.exportPdf", "ana.shopFallback",
+]);
 
 test("no Kinyarwanda string is a copy of the English one", () => {
   for (const k of keys) {

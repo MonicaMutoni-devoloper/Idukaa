@@ -320,6 +320,18 @@ try {
     await waitTest("nav-home", 20000); // app restarts from IndexedDB with the session intact
     const pending = await evaluate(`new Promise((resolve,reject)=>{const r=indexedDB.open('sms-local');r.onerror=()=>reject('idb');r.onsuccess=()=>{const db=r.result;const g=db.transaction('state','readonly').objectStore('state').get('state');g.onsuccess=()=>resolve((g.result?.outbox??[]).filter(o=>o.status==='pending'||o.status==='retry').length);};})`);
     assert.ok(pending >= 1, `queued operation should survive reload, found ${pending}`);
+
+    // Reports must work with the API blocked: no saved copy for this period yet, so the workspace
+    // is calculated from this device's records and the queued sale is already inside it.
+    await clickTest("nav-reports");
+    await waitText("From this device's records", 20000);
+    await clickTest("report-open-sales");
+    await clickTest("segment-product");
+    await waitText(PRODUCT, 15000);
+    const offlineReport = await evaluate("document.body.innerText");
+    assert.ok(offlineReport.includes("waiting to sync"), "the offline report names its queued operations");
+    await clickTest("reports-back");
+
     await clickTest("nav-sync");
     await waitText("Waiting to sync", 10000);
 
@@ -435,14 +447,16 @@ try {
 
   await step("sales: a manager sees sales, products sold and a sale's items", async () => {
     await clickTest("nav-reports");
-    await waitText("Period total", 15000);
+    await waitTest("report-open-sales", 15000);
+    await clickTest("report-open-sales");
+    await waitText("Net sales", 15000);
 
-    await clickTest("segment-items");
+    await clickTest("segment-product");
     await waitText(PRODUCT, 15000);
     const itemsText = await evaluate("document.body.innerText");
-    assert.ok(itemsText.includes("Products sold"), "managers get the products-sold view");
+    assert.ok(itemsText.includes("By product"), "managers get the products-sold view");
 
-    await clickTest("segment-sales");
+    await clickTest("segment-transactions");
     const latest = await newestPostedSale(await token());
     assert.ok(latest, "a posted sale is listed for the manager");
     await waitTest(`sale-open-${latest.id}`, 15000);
@@ -527,12 +541,18 @@ try {
 
     // Drill-down from the dashboard opens the same period's transactions in Reports.
     await clickText("Sales");
-    await waitText("Period total", 15000);
+    // The dashboard drill-down opens the Sales workspace on its Transactions subsection.
+    await waitText("Transactions", 15000);
     await waitText(managerName, 15000); // cashier column proves a sale row is listed
 
+    // Reports is now a directory: open the Sales category before expecting its rows and export.
     await clickTest("nav-reports");
-    await waitText("Period total", 15000);
+    await waitTest("report-open-sales", 15000);
+    await clickTest("report-open-sales");
+    await waitText("Sales overview", 15000);
     await waitTest("reports-export", 15000);
+    await clickTest("segment-transactions");
+    await waitText("Cashier", 15000);
 
     // Void the sale recorded in this run; stock must come back and the reason must be kept.
     const tkSales = await token();
@@ -570,6 +590,33 @@ try {
     await waitTest("policy-manager-finance", 15000);
     await clickTest("policy-save");
     await waitText("Shop policy saved", 15000);
+  });
+
+  await step("reports: every category and subsection opens with its own records and export", async () => {
+    // The four workspaces, with every subsection the brief requires. Each one must render without a
+    // crash, keep its own filters, and offer the same filtered export of what is on screen.
+    const categories = {
+      inventory: ["overview", "levels", "low", "out", "valuation", "issues"],
+      movements: ["all", "received", "sold", "loss", "adjust"],
+      sales: ["overview", "product", "category", "cashier", "trends", "discounts", "transactions"],
+      financial: ["pnl", "revenue", "cogs", "gross", "expenses", "net", "breakdown", "trends"],
+    };
+    await clickTest("nav-reports");
+    await waitTest("report-open-inventory", 15000);
+    for (const [category, subs] of Object.entries(categories)) {
+      await clickTest(`report-open-${category}`);
+      await waitTest("reports-back", 15000);
+      for (const sub of subs) {
+        await clickTest(`segment-${sub}`);
+        await sleep(250);
+        await waitTest("reports-export", 15000);
+        const text = await evaluate("document.body.innerText");
+        assert.ok(!text.includes("Something went wrong"), `${category}/${sub} rendered without a crash`);
+        assert.ok(text.includes("All reports"), `${category}/${sub} stayed inside its workspace`);
+      }
+      await clickTest("reports-back");
+      await waitTest("report-open-inventory", 15000);
+    }
   });
 
   await step("admin: separate area, no tenant financial access", async () => {

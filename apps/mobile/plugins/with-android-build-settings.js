@@ -7,16 +7,24 @@ const MARKER = 'idukaa-native-build-settings';
 const STAGING_MARKER = 'idukaa-cxx-staging-subprojects';
 
 const ROOT_BLOCK = `
-// ${MARKER}: React Native 0.88 / Expo SDK 58 AARs enforce compileSdk 37 via their AAR metadata,
-// and NDK 28.2 is the toolchain this project is built and verified with. Appended after Expo's
-// own defaults so these values always win.
+// ${MARKER}: React Native 0.88 / Expo SDK 58 AARs enforce compileSdk 37 via their AAR metadata.
+//
+// ndkVersion must stay on the NDK React Native 0.88 itself declares
+// (react-native/gradle/libs.versions.toml: 27.1.12297006), because the C++ runtime is shared:
+// react-android-0.88.0-release.aar ships libc++_shared.so built with NDK 27, and every module
+// compiled here from source links against the libc++ headers of the NDK below. With NDK 28.2,
+// libworklets.so referenced __cxa_init_primary_exception (added in libc++ 18), which the packaged
+// NDK 27 libc++_shared.so does not export, so dlopen failed on Android 10 and React Native
+// reported "couldn't find DSO to load: libworklets.so" before the first screen.
+// Keep this in step with React Native's own toolchain; scripts/verify-android-apk.mjs fails the
+// build if a packaged .so ever references a symbol the packaged runtime cannot supply.
 ext {
   compileSdkVersion = 37
   compileSdk = 37
   targetSdkVersion = 36
   targetSdk = 36
   buildToolsVersion = '36.1.0'
-  ndkVersion = '28.2.13676358'
+  ndkVersion = '27.1.12297006'
 }
 `;
 

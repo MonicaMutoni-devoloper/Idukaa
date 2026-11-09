@@ -461,9 +461,9 @@ export function ConfirmDialog({ open, title, message, confirmLabel, tone = "prim
 /* ------------------------------------------------------------------ sync */
 
 export function SyncBadge() {
-  const t = useT(); const { online, running, pending, issues, authRequired } = useSync();
+  const t = useT(); const { online, running, pending, issues, authRequired, live } = useSync();
   const tone: Tone = authRequired || issues ? "danger" : !online || pending ? "warn" : "ok";
-  const label = authRequired ? t("sync.failed") : !online ? `${t("sync.offline")}${pending ? ` · ${pending}` : ""}` : issues ? `${t("sync.conflict")} · ${issues}` : running ? t("common.loading") : pending ? `${t("sync.pending")} · ${pending}` : t("sync.synced");
+  const label = authRequired ? t("sync.failed") : !online ? `${t("sync.offline")}${pending ? ` · ${pending}` : ""}` : issues ? `${t("sync.conflict")} · ${issues}` : running ? t("common.loading") : pending ? `${t("sync.pending")} · ${pending}` : live ? t("sync.live") : t("sync.synced");
   return <Badge dot tone={tone} label={label} />;
 }
 

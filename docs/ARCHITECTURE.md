@@ -13,3 +13,19 @@
 - **Notifications**: `NotificationService` stores per-user preferences and generates optional alerts on read (low/out-of-stock from the ledger view, other users' sales/purchases), de-duplicated per entity per 12 hours. Security notifications are inserted directly by the auth flows and never gated by a preference; delivery is in-app only.
 - **Migrations**: `001_init` (schema, ledger, audit), `002_purchase_metadata`, `003_purchase_policy_and_sale_void`, `004_auth_security_and_notifications` (refresh sessions, reset tokens, notification preferences/inbox, 2FA secrets/recovery codes/challenges). Every migration is additive and tracked in `schema_migrations`.
 - **PWA**: `public/manifest.json` + `public/sw.js`. The service worker caches only same-origin static assets and the shell; it skips authorized requests and all API prefixes.
+
+## Real-time updates
+
+**Transport:** a WebSocket at `/realtime` (`apps/api/src/realtime/hub.ts`), authenticated by the same JWT rules as HTTP (signature, `token_version`, active account, shop not suspended) and joined to a room derived from the **database** `shop_id`, never from the client. It is a notification channel only: frames carry a shop id, a timestamp and the operation types that changed — no rows, no totals.
+
+**Why a nudge instead of a data stream:** the pull endpoint is already incremental (checkpoint per shop) and already re-authorized per request. Sending data over the socket would create a second, weaker copy of that authorization and a second merge path for offline operations. One `change` frame simply runs the existing sync pass (push outbox, then pull from checkpoint), so:
+
+- shop isolation, role checks and suspension are enforced where they already were;
+- a dropped frame costs one 30 s poll interval at worst, never a lost record;
+- reconnection is self-healing: every successful (re)connect runs a pass, which is exactly the "recover missed events" rule.
+
+**Lifecycle:** connect when a session exists, re-authenticate with a fresh access token when the socket closes after the 15-minute token expiry, exponential backoff with ±25 % jitter capped at 30 s, reconnect on foreground and on network return, drop on sign-out. Heartbeat: server `ping` every 25 s, a socket that misses one round is terminated.
+
+**Emitters:** successful `/sync/push` batches (after commit), adjustment decisions, sale voids, shop profile/policy updates.
+
+**Client status:** `useSync.live` drives a subtle "Live updates" label next to the existing online/pending indicator; nothing blocks the screen, nothing announces each record.

@@ -25,7 +25,7 @@ import { Badge, Banner, Button, Card, DataTable, Empty, Field, KeyValue, Modal, 
 import { enqueue, listProducts, listSuppliers, upsertLocalProduct, type LocalProduct } from "../../src/database/local";
 import { useT } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
-import { refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
+import { fullResync, refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
 import { dayToDate, parseRwf, qtyOrNull, todayDay, uuid } from "../../src/services/util";
 import { space, radius, type, useTheme } from "../../src/theme/tokens";
 
@@ -42,7 +42,8 @@ const unitsSellingOf = (p: LocalProduct) => p.units_per_selling ?? 1;
 
 export default function Stock() {
   const t = useT(); const c = useTheme(); const user = useSession((s) => s.user)!; const wide = useWide(); const v = useSync((s) => s.dataVersion);
-  const [q, setQ] = useState(""); const [filter, setFilter] = useState<Filter>("all"); const [rows, setRows] = useState<LocalProduct[]>([]);
+  const [q, setQ] = useState(""); const [filter, setFilter] = useState<Filter>("all");  const [rows, setRows] = useState<LocalProduct[]>([]);
+  const online = useSync((s) => s.online);
   const [counting, setCounting] = useState(false); const [counts, setCounts] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState<string | null>(null); const [err, setErr] = useState<string | null>(null); const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -226,6 +227,8 @@ export default function Stock() {
       await enqueue(user.id, uuid(), "product.upsert", payload, {}, () => upsertLocalProduct({
         id: editing.id, code: payload.code, barcode: payload.barcode, name: payload.name,
         unit: payload.unit, sellingPrice: price, lowStockThreshold: payload.lowStockThreshold,
+        purchaseUnit: editing.purchase_unit, sellingUnit: editing.selling_unit,
+        unitsPerPurchase: editing.units_per_purchase, unitsPerSelling: editing.units_per_selling,
       }));
       setEditing(null); setMsg(t("stock.productSaved"));
       await refreshCounts(); void syncNow();
@@ -382,6 +385,12 @@ export default function Stock() {
           <Button testID="stock-save-product" label={t("common.save")} loading={busy} onPress={() => void addProduct()} />
           <Text style={{ color: c.muted, fontSize: 11 }}>{t("sync.savedLocally")}</Text>
         </Card>
+      ) : null}
+
+      {!rows.length && !q.trim() ? (
+        <Banner tone="warn" title={t("catalogue.emptyTitle")}
+          text={online ? t("catalogue.emptyOnline") : t("catalogue.emptyOffline")}
+          action={<Button size="sm" kind="secondary" label={t("catalogue.reload")} onPress={() => void fullResync()} />} />
       ) : null}
 
       <View style={{ flexDirection: wide ? "row" : "column", gap: space.md, alignItems: wide ? "center" : "stretch" }}>

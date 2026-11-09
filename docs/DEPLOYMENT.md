@@ -15,6 +15,17 @@ forward `X-Forwarded-Proto: https` (`trust proxy` is enabled). Put monitoring on
 from the same registrable domain (for example `app.example.rw` and `api.example.rw`, or the API under
 `app.example.rw/api` with a proxy). A cross-site API cannot use the cookie flow.
 
+**Mobile update manifest**: `GET /app/version` (public, no session needed) tells an installed app what
+the current build is and whether its own build is still supported. It is configured from the
+environment, not from code: `APP_LATEST_VERSION` (default `1.0.2`), `APP_LATEST_VERSION_CODE` (`3`),
+`APP_MINIMUM_VERSION` (`1.0.0`), `APP_MINIMUM_VERSION_CODE` (`0`), `APP_UPDATE_URL` (where users
+download the new APK), `APP_RELEASE_NOTES`, `APP_CRITICAL`, `APP_API_VERSION` (`1`) and
+`APP_MINIMUM_API_VERSION` (`1`). An empty variable reads as “not set”, never as zero. Raise the
+minimum **only after** the new build has been verified on real devices: clients above the minimum keep
+working, so a backend release never strands a shop mid-shift. There is no OTA channel —
+`expo-updates` is not installed — so the manifest reports `ota.enabled: false` and points at a signed
+APK instead of pretending a JavaScript download can replace native code.
+
 **Web/PWA**: `npm run build:web -w @sms/mobile`, host `apps/mobile/dist` as static files over HTTPS
 (service workers and the install prompt require HTTPS) with a single-page fallback to `index.html`.
 Set `EXPO_PUBLIC_API_URL` at build time. The export ships `manifest.json` (name, icons, start URL,
@@ -26,8 +37,12 @@ caches authentication or API responses.
 tab; iOS Safari uses Share → “Add to Home Screen”. After installing, check sign-in, reload (the access
 token is refreshed from the HttpOnly cookie), sign-out, offline shell and reconnect + sync.
 
-**Android**: Expo EAS (`eas build -p android`) produces an APK/AAB; or use Expo Go for pilots. Set
-`EXPO_PUBLIC_API_URL` to your HTTPS API. Tokens are stored in the platform keystore through SecureStore.
+**Android**: build a signed APK/AAB locally with Gradle (see `docs/ANDROID_BUILD.md`) or with
+`eas build -p android`. Set `EXPO_PUBLIC_API_URL` to your HTTPS API before building — it is compiled
+into the bundle. Tokens are stored in the platform keystore through SecureStore. Before publishing,
+run `npm run verify:apk -- <file.apk>`: it fails if a required native library is missing or if any
+packaged `.so` references a symbol the packaged runtime cannot supply (the `libworklets.so` startup
+crash on Android 10 was exactly that).
 
 **Password-reset e-mail**: this repository has no e-mail/SMS provider. Until one is integrated, leave
 `PASSWORD_RESET_DEV_MODE=false` in production: reset requests answer generically but no message is

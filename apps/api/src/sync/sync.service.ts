@@ -4,6 +4,7 @@ import { Operation, lineAmount, priceBelowCost, toBaseQty, type OperationT, type
 import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
 import { canRunOp } from "./op-permissions";
+import { emitShopChange } from "../realtime/hub";
 import type { AuthUser } from "../common/auth";
 
 type Kind = "conflict" | "rejected" | "pending_approval";
@@ -48,6 +49,11 @@ export class SyncService {
     }
     const out: OpResult[] = [];
     for (const raw of raws) out.push(await this.pushOne(user, raw)); // sequential: preserves client order
+    // One push = one notification for the shop, after the transactions have committed. Clients
+    // answer with their normal pull, so nobody is told what the change was before they may see it.
+    if (out.some((r) => r.status === "applied")) {
+      emitShopChange(user.shopId, raws.map((raw) => String((raw as { type?: unknown })?.type ?? "")));
+    }
     return out;
   }
 

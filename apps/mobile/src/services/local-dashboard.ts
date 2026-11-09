@@ -127,7 +127,7 @@ const clampDate = (v: unknown, fallback: string) => {
 };
 
 /** Turns stored records into domain rows. Unknown types are ignored; malformed payloads are skipped. */
-function parseRecords(records: LocalRecord[]): RecordSet {
+export function parseRecords(records: LocalRecord[]): RecordSet {
   const out: RecordSet = { sales: [], expenses: [], purchases: [], adjustments: [], openings: [] };
   const expenses = new Map<string, Expense>();
   for (const r of records) {
@@ -209,7 +209,7 @@ function parseRecords(records: LocalRecord[]): RecordSet {
 }
 
 /** Sales, receipts and openings only: the movements the moving-average replay needs. */
-function buildLedger(recs: RecordSet): Map<string, Movement[]> {
+export function buildLedger(recs: RecordSet): Map<string, Movement[]> {
   const m = new Map<string, Movement[]>();
   const add = (productId: string, mv: Movement) => {
     const list = m.get(productId) ?? [];
@@ -230,7 +230,7 @@ function buildLedger(recs: RecordSet): Map<string, Movement[]> {
  * True when this device's ledger explains every outbound quantity: no sale left stock the history
  * never received. False means part of the cost basis happened before the records began.
  */
-function ledgerIsComplete(list: Movement[]): boolean {
+export function ledgerIsComplete(list: Movement[]): boolean {
   let onHand = 0;
   for (const mv of list) {
     if (mv.qty > 0) { onHand += mv.qty; continue; }

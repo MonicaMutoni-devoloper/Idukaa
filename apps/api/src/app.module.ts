@@ -6,6 +6,7 @@ import { Db } from "./db/db.service";
 import { AuthGuard } from "./common/auth";
 import { Filter } from "./common/errors";
 import { HealthController } from "./common/health.controller";
+import { AppVersionController } from "./app-version/app-version.controller";
 import { AuthController } from "./auth/auth.controller";
 import { AuthService } from "./auth/auth.service";
 import { AdminController } from "./auth/admin.controller";
@@ -31,7 +32,7 @@ import { StaffInvitationsController } from "./onboarding/staff-invitations.contr
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 240 }]),
     JwtModule.register({ global: true, secret: process.env.JWT_SECRET, signOptions: { expiresIn: process.env.JWT_EXPIRES_IN ?? "15m" } }),
   ],
-  controllers: [HealthController, AuthController, AdminController, NotificationsController, SyncController, ReportsController, ProfitabilityController, AuditsController, PurchasesController, SalesController, ShopController, StaffController, ApplicationsController, AdminApplicationsController, StaffInvitationsController],
+  controllers: [HealthController, AppVersionController, AuthController, AdminController, NotificationsController, SyncController, ReportsController, ProfitabilityController, AuditsController, PurchasesController, SalesController, ShopController, StaffController, ApplicationsController, AdminApplicationsController, StaffInvitationsController],
   providers: [
     Db, SyncService, AuthService, NotificationService, FinanceService, OnboardingService,
     { provide: APP_GUARD, useClass: ThrottlerGuard }, { provide: APP_GUARD, useClass: AuthGuard },

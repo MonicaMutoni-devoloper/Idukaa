@@ -144,6 +144,14 @@ export async function initDb() {
 
 export const kvGet = async (k: string) => (await readState()).kv[k] ?? null;
 export const kvSet = async (k: string, v: string) => mutate((s) => { s.kv[k] = v; });
+/** How many products this browser holds for the bound shop (empty catalogue detection). */
+export const productCount = async () => (await readState()).products.length;
+/**
+ * Forget this account's incremental pull cursor so the next pull starts from the beginning.
+ * Only used to repair a browser whose cursor says "up to date" while the catalogue is empty —
+ * the outbox and every saved record are untouched, and the re-pull is an idempotent upsert.
+ */
+export const resetSyncCursor = async (userId: string) => mutate((s) => { delete s.kv[`cp:${userId}`]; });
 
 /**
  * Bind the cached catalogue to exactly one shop (web counterpart of local.ts#bindShop).

@@ -38,6 +38,12 @@ const USER_KEY = "user";
 // mid-rotation is what loses the rotated cookie, so the refresh gets more room than a normal call.
 const REFRESH_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 20_000;
+// Sync is background work with its own retry/backoff, so it can afford to wait longer than a screen
+// that a person is staring at. Measured on the production API: a sleeping free-tier instance took
+// 32.9 s to answer its first request, which the 20 s default aborted — the pass then reported "no
+// internet" while the phone was online, and the catalogue never arrived. A failed pass is retried;
+// a pass cut off mid-download is not.
+export const SYNC_TIMEOUT_MS = 60_000;
 const REFRESH_BACKOFF_MS = 15_000;
 
 let accessToken: string | null = null;
@@ -51,15 +57,28 @@ let refreshRetryAt = 0;
 const storage = {
   async get(key: string): Promise<string | null> {
     if (WEB) return typeof localStorage === "undefined" ? null : localStorage.getItem(key);
-    return SecureStore.getItemAsync(key);
+    try {
+      return await SecureStore.getItemAsync(key);
+    } catch (e) {
+      console.warn("[storage] SecureStore read failed", key, e);
+      return null;
+    }
   },
   async set(key: string, value: string) {
     if (WEB) { if (typeof localStorage !== "undefined") localStorage.setItem(key, value); return; }
-    await SecureStore.setItemAsync(key, value);
+    try {
+      await SecureStore.setItemAsync(key, value);
+    } catch (e) {
+      console.warn("[storage] SecureStore write failed", key, e);
+    }
   },
   async del(key: string) {
     if (WEB) { if (typeof localStorage !== "undefined") localStorage.removeItem(key); return; }
-    await SecureStore.deleteItemAsync(key);
+    try {
+      await SecureStore.deleteItemAsync(key);
+    } catch (e) {
+      console.warn("[storage] SecureStore delete failed", key, e);
+    }
   },
 };
 
@@ -80,11 +99,15 @@ export class ApiError extends Error {
     super(named ?? (typeof body?.message === "string" ? body.message : `HTTP ${status}`));
   }
 }
-export class NetworkError extends Error {}
+// Named so failures the app reports can say "no internet" instead of a generic error: the sync store
+// stores this name as its failure code (see synchronization/catalogue.ts).
+export class NetworkError extends Error {
+  constructor(message = "network_unavailable") { super(message); this.name = "NetworkError"; }
+}
 
-interface RequestOptions { method?: string; body?: unknown; auth?: boolean }
+export interface RequestOptions { method?: string; body?: unknown; auth?: boolean; timeoutMs?: number }
 
-async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = o.timeoutMs ?? REQUEST_TIMEOUT_MS): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (o.auth !== false && accessToken) headers.Authorization = `Bearer ${accessToken}`;
   const csrf = WEB ? readCookie("sms_csrf") : null;
@@ -319,6 +342,9 @@ export async function request<T>(path: string, o: RequestOptions = {}): Promise<
     throw e;
   }
 }
+
+/** The live access token, for transports that authenticate outside an HTTP header (WebSocket). */
+export const currentToken = () => accessToken;
 
 /** Called by the sync engine: makes sure an expired session has been refreshed once before pushing. */
 export const ensureSession = async (force = false) => {

@@ -103,8 +103,10 @@ export interface ComparePoint { date: string; a: number; b: number }
  * negative values drop below the zero line (a loss), and the selected bucket is spelled out
  * in text so the numbers are never chart-only.
  */
-export function CompareBars({ data, labelA, labelB, height = 150, labelMode = "day" }: {
+export function CompareBars({ data, labelA, labelB, height = 150, labelMode = "day", format = formatRwf }: {
   data: ComparePoint[]; labelA: string; labelB: string; height?: number; labelMode?: "day" | "month";
+  /** Value formatter; defaults to money. Pass formatQty/String for non-money series. */
+  format?: (n: number) => string;
 }) {
   const c = useTheme();
   const fmt = labels(labelMode);
@@ -122,8 +124,8 @@ export function CompareBars({ data, labelA, labelB, height = 150, labelMode = "d
   return (
     <View style={{ gap: space.sm }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md, minHeight: 22 }}>
-        <Text style={{ color: c.primaryStrong, fontSize: 12, fontWeight: "700" }}>{labelA}: <Text style={{ color: c.ink, fontVariant: ["tabular-nums"] }}>{formatRwf(totalA)}</Text></Text>
-        <Text style={{ color: c.accent, fontSize: 12, fontWeight: "700" }}>{labelB}: <Text style={{ color: c.ink, fontVariant: ["tabular-nums"] }}>{formatRwf(totalB)}</Text></Text>
+        <Text style={{ color: c.primaryStrong, fontSize: 12, fontWeight: "700" }}>{labelA}: <Text style={{ color: c.ink, fontVariant: ["tabular-nums"] }}>{format(totalA)}</Text></Text>
+        <Text style={{ color: c.accent, fontSize: 12, fontWeight: "700" }}>{labelB}: <Text style={{ color: c.ink, fontVariant: ["tabular-nums"] }}>{format(totalB)}</Text></Text>
       </View>
       <View style={{ position: "relative", height }}>
         {[0.25, 0.5, 0.75, 1].map((p) => (
@@ -135,7 +137,7 @@ export function CompareBars({ data, labelA, labelB, height = 150, labelMode = "d
             const active = selected === i;
             return (
               <Pressable key={d.date} accessibilityRole="button"
-                accessibilityLabel={`${fmt.long(d.date)}: ${labelA} ${formatRwf(d.a)}, ${labelB} ${formatRwf(d.b)}`}
+                accessibilityLabel={`${fmt.long(d.date)}: ${labelA} ${format(d.a)}, ${labelB} ${format(d.b)}`}
                 accessibilityState={{ selected: active }} onPress={() => setSelected(active ? null : i)}
                 onHoverIn={() => setSelected(i)} onHoverOut={() => setSelected((v) => (v === i ? null : v))}
                 style={{ flex: 1, height, flexDirection: "row", alignItems: "flex-end", justifyContent: "center", gap: 2, cursor: "pointer" } as any}>
@@ -163,7 +165,7 @@ export function CompareBars({ data, labelA, labelB, height = 150, labelMode = "d
       <View style={{ flexDirection: "row", justifyContent: "space-between", gap: space.sm }}>
         <Text style={{ color: c.muted, fontSize: 11 }}>{fmt.short(data[0]!.date)}</Text>
         <Text style={{ color: point ? c.inkSoft : c.muted, fontSize: 11, fontWeight: point ? "600" : "400" }}>
-          {point ? `${fmt.long(point.date)} · ${formatRwf(point.a)} / ${formatRwf(point.b)}` : `${data.length}`}
+          {point ? `${fmt.long(point.date)} · ${format(point.a)} / ${format(point.b)}` : `${data.length}`}
         </Text>
         <Text style={{ color: c.muted, fontSize: 11 }}>{fmt.short(data[data.length - 1]!.date)}</Text>
       </View>

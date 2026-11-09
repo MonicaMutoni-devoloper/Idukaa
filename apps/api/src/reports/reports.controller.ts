@@ -57,7 +57,7 @@ export class ReportsController {
 
   private async inventoryData(u: AuthUser, moves?: Map<string, Movement[]>) {
     const canSeeFinancials = await this.canSeeFinancials(u);
-    const products = await this.db.query("SELECT id, code, name, unit, selling_price, low_stock_threshold FROM products WHERE shop_id=$1 AND active ORDER BY name", [u.shopId]);
+    const products = await this.db.query("SELECT id, code, name, unit, category, selling_price, low_stock_threshold FROM products WHERE shop_id=$1 AND active ORDER BY name", [u.shopId]);
     const mv = moves ?? await this.finance.movements(u.shopId!);
     // Average cost and inventory value are cost data: managers only receive them when the owner allows it.
     const items = products.map(p => {
@@ -325,7 +325,7 @@ export class ReportsController {
   async items(@Me() u: AuthUser, @Query() q: unknown) {
     const { from, to } = parse(q);
     const rows = await this.db.query(
-      `SELECT p.id, p.name, p.code, p.unit,
+      `SELECT p.id, p.name, p.code, p.unit, p.category,
               COALESCE(SUM(sl.qty),0)::bigint AS units,
               COALESCE(SUM(sl.line_amount),0)::bigint AS gross,
               COUNT(DISTINCT s.id)::int AS sales
@@ -336,7 +336,7 @@ export class ReportsController {
       `SELECT COALESCE(SUM(gross_amount - discount),0)::bigint AS net, COALESCE(SUM(discount),0)::bigint AS discounts
        FROM sales WHERE shop_id=$1 AND status='posted' AND sold_at>=$2 AND sold_at<$3`, [u.shopId, from, to]);
     const items = rows.map((r: any) => ({
-      productId: r.id, name: r.name, code: r.code, unit: r.unit,
+      productId: r.id, name: r.name, code: r.code, unit: r.unit, category: r.category ?? null,
       units: Number(r.units), gross: Number(r.gross), sales: Number(r.sales),
       avgUnitPrice: Number(r.units) > 0 ? Math.round(Number(r.gross) / (Number(r.units) / 1000)) : 0,
     }));
@@ -349,6 +349,51 @@ export class ReportsController {
         net: Number(totals.net), discounts: Number(totals.discounts),
       },
     };
+  }
+
+  /**
+   * Stock movements in a period, with the balance before and after each one.
+   *
+   * Balances come from a window over the product's WHOLE history (not just the visible range), so
+   * the first row of a week still shows the true running quantity. `unit_cost` is cost data: a
+   * manager without the financials permission receives it as null and the UI prints "—".
+   * Optional `type` and `productId` filters are applied after the window, so they never change a
+   * balance. Newest first, capped; `truncated` says the cap was hit rather than silently shortening.
+   */
+  @Get("movements") @Roles("owner", "manager")
+  async stockMovements(@Me() u: AuthUser, @Query() q: any) {
+    const { from, to } = parse(q);
+    const type = typeof q.type === "string" && q.type ? q.type : null;
+    const productId = typeof q.productId === "string" && z.string().uuid().safeParse(q.productId).success ? q.productId : null;
+    const TYPES = new Set(["opening", "receipt", "sale", "sale_return", "supplier_return", "damage", "expiry", "adjustment", "count_correction", "transfer_in", "transfer_out"]);
+    if (type && !TYPES.has(type)) throw new BadRequestException("invalid_type");
+    if (q.productId && !productId) throw new BadRequestException("invalid_product");
+    const canSeeFinancials = await this.canSeeFinancials(u);
+    const LIMIT = 1001;
+    const rows = await this.db.query(
+      `WITH led AS (
+         SELECT m.id, m.product_id, m.type, m.qty, m.unit_cost, m.reason, m.source_id,
+                m.occurred_at, m.user_id,
+                SUM(m.qty) OVER (PARTITION BY m.product_id ORDER BY m.occurred_at, m.seq) AS balance_after
+         FROM stock_movements m WHERE m.shop_id=$1
+       )
+       SELECT led.id, to_char(led.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
+              led.product_id, p.name AS product, p.code, p.unit, led.type, led.qty,
+              led.unit_cost, led.reason, led.source_id, us.full_name AS by,
+              led.balance_after, (led.balance_after - led.qty) AS balance_before
+       FROM led JOIN products p ON p.id=led.product_id
+       LEFT JOIN users us ON us.id=led.user_id
+       WHERE led.occurred_at>=$2 AND led.occurred_at<$3
+         AND ($4::text IS NULL OR led.type=$4)
+         AND ($5::uuid IS NULL OR led.product_id=$5)
+       ORDER BY led.occurred_at DESC, led.id DESC LIMIT ${LIMIT}`, [u.shopId, from, to, type, productId]);
+    const items = rows.slice(0, LIMIT - 1).map((r: any) => ({
+      id: r.id, at: r.at, productId: r.product_id, product: r.product, code: r.code, unit: r.unit,
+      type: r.type, qty: Number(r.qty), unitCost: canSeeFinancials && r.unit_cost !== null ? Number(r.unit_cost) : null,
+      reason: r.reason, reference: r.source_id ?? null, by: r.by ?? null,
+      balanceBefore: Number(r.balance_before), balanceAfter: Number(r.balance_after),
+    }));
+    return { range: { from, to }, financials: canSeeFinancials, items, truncated: rows.length >= LIMIT };
   }
 
   /** One sale with its line items, including each line's share of the sale discount. Same data for owner and manager, shop-scoped. */

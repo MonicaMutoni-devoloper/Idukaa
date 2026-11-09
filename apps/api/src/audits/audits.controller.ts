@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { audit } from "./audit";
+import { emitShopChange } from "../realtime/hub";
 
 const Decision = z.object({ approve: z.boolean(), note: z.string().min(3).max(500) });
 const InvPatch = z.object({ notes: z.string().max(4000).optional(), correctiveAction: z.string().max(2000).optional(), status: z.enum(["open", "investigating", "resolved", "closed"]).optional(), assignedTo: z.string().uuid().nullable().optional() });
@@ -27,7 +28,7 @@ export class AuditsController {
   @Post("adjustments/:id/decide") @Roles("owner")
   async decide(@Me() u: AuthUser, @Param("id") id: string, @Body() body: unknown) {
     const d = Decision.parse(body);
-    return this.db.tx(async (c) => {
+    const out = await this.db.tx(async (c) => {
       const { rows: [a] } = await c.query("SELECT * FROM adjustments WHERE id=$1 AND shop_id=$2 FOR UPDATE", [id, u.shopId]);
       if (!a) throw new NotFoundException();
       if (a.status !== "pending") throw new BadRequestException("already_decided");
@@ -49,6 +50,10 @@ export class AuditsController {
       await audit(c, { shopId: u.shopId, actorId: u.id, action: d.approve ? "adjustment.approved" : "adjustment.rejected", entity: "adjustment", entityId: id, oldValue: { status: "pending" }, newValue: { status: d.approve ? "approved" : "rejected", qty: a.qty, reason: a.reason }, reason: d.note, approvalRef: id });
       return { ok: true };
     });
+    // After commit: the requester's device (and every other till) must see the decision without
+    // pulling the whole shop on a timer.
+    emitShopChange(u.shopId, ["adjustment", "product"]);
+    return out;
   }
 
   @Get("conflicts") @Roles("owner")

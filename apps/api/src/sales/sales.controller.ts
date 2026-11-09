@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { audit } from "../audits/audit";
+import { emitShopChange } from "../realtime/hub";
 
 const VoidRequest = z.object({ reason: z.string().trim().min(3).max(500) });
 
@@ -19,7 +20,7 @@ export class SalesController {
   async voidSale(@Me() u: AuthUser, @Param("id") id: string, @Body() body: unknown) {
     if (!z.string().uuid().safeParse(id).success) throw new NotFoundException("sale_not_found");
     const { reason } = VoidRequest.parse(body);
-    return this.db.tx(async (c) => {
+    const out = await this.db.tx(async (c) => {
       const { rows: [sale] } = await c.query(
         "SELECT id, status, gross_amount, discount, amount_paid, payment_method, sold_at FROM sales WHERE id=$1 AND shop_id=$2 FOR UPDATE",
         [id, u.shopId]);
@@ -52,5 +53,8 @@ export class SalesController {
       });
       return { ok: true, saleId: id, status: "reversed" };
     });
+    // The returned stock and the reversed sale are visible to every connected device at once.
+    emitShopChange(u.shopId, ["sale", "product"]);
+    return out;
   }
 }

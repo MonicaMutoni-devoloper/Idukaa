@@ -4,6 +4,7 @@ import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { audit } from "../audits/audit";
 import { OnboardingService } from "../onboarding/onboarding.service";
+import { emitShopChange } from "../realtime/hub";
 
 export interface ShopPolicy {
   managerFinancialAccess: boolean;
@@ -68,7 +69,7 @@ export class ShopController {
     const b = ProfilePatch.safeParse(body);
     if (!b.success) throw new BadRequestException(b.error.issues[0]?.message);
     const name = b.data.name;
-    return this.db.tx(async (c) => {
+    const out = await this.db.tx(async (c) => {
       const { rows: [old] } = await c.query("SELECT id, name FROM shops WHERE id=$1 FOR UPDATE", [u.shopId]);
       if (!old) throw new BadRequestException("unknown_shop");
       const { rows: [row] } = await c.query(`UPDATE shops SET name=$2 WHERE id=$1 RETURNING ${PROFILE_COLS}`, [u.shopId, name]);
@@ -77,13 +78,15 @@ export class ShopController {
       }
       return profileShape(row);
     });
+    if (out.name !== undefined) emitShopChange(u.shopId, ["shop"]);
+    return out;
   }
 
   @Patch("settings") @Roles("owner") async patch(@Me() u: AuthUser, @Body() body: unknown): Promise<ShopPolicy> {
     const b = PolicyPatch.safeParse(body);
     if (!b.success) throw new BadRequestException(b.error.issues[0]?.message);
     const v = b.data;
-    return this.db.tx(async (c) => {
+    const out = await this.db.tx(async (c) => {
       const { rows: [old] } = await c.query("SELECT manager_financial_access, below_cost_policy, max_discount_percent FROM shops WHERE id=$1 FOR UPDATE", [u.shopId]);
       const { rows: [row] } = await c.query(
         `UPDATE shops SET manager_financial_access=COALESCE($2,manager_financial_access),
@@ -94,5 +97,7 @@ export class ShopController {
       await audit(c, { shopId: u.shopId, actorId: u.id, action: "shop.policy.update", entity: "shop", entityId: u.shopId ?? undefined, oldValue: shape(old), newValue: shape(row) });
       return shape(row);
     });
+    emitShopChange(u.shopId, ["shop"]);
+    return out;
   }
 }

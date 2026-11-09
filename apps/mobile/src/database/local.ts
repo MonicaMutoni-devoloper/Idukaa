@@ -50,6 +50,14 @@ export async function initDb() {
 }
 export const kvGet = async (k: string) => (await (await db()).getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k=?", [k]))?.v ?? null;
 export const kvSet = async (k: string, v: string) => { await (await db()).runAsync("INSERT INTO kv(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", [k, v]); };
+/** How many products this device holds for the bound shop (empty catalogue detection). */
+export const productCount = async () => ((await (await db()).getFirstAsync<{ n: number }>("SELECT COUNT(*) n FROM products"))?.n ?? 0);
+/**
+ * Forget this account's incremental pull cursor so the next pull starts from the beginning.
+ * Only used to repair a device whose cursor says "up to date" while the catalogue is empty —
+ * the outbox and every saved record are untouched, and the re-pull is an idempotent upsert.
+ */
+export const resetSyncCursor = async (userId: string) => (await db()).runAsync("DELETE FROM kv WHERE k=?", [`cp:${userId}`]);
 
 /**
  * Bind the cached catalogue to exactly one shop. Products and suppliers are per-shop data, but
@@ -94,8 +102,9 @@ export const listRecords = async () =>
 export const upsertLocalProduct = async (p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number }) => {
   const d = await db();
   // Conversion config is part of the local product so offline sales/receipts convert on-device
-  // exactly like the server will verify them. COALESCE keeps an edit that omits the config from
-  // wiping it (mirrors the server's unit_config_locked behaviour).
+  // exactly like the server will verify them. In SQLite, NOT NULL columns must not receive explicit
+  // NULL values, so factors default to 1 for standard 1:1 products. COALESCE keeps an edit that
+  // omits the config from wiping it (mirrors the server's unit_config_locked behaviour).
   await d.runAsync(`INSERT INTO products(id,code,barcode,name,category,unit,selling_price,low_threshold,pending_delta,purchase_unit,selling_unit,units_per_purchase,units_per_selling)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET code=excluded.code,barcode=excluded.barcode,name=excluded.name,category=COALESCE(excluded.category,products.category),unit=excluded.unit,
@@ -103,7 +112,7 @@ export const upsertLocalProduct = async (p: { id: string; code: string; barcode?
       purchase_unit=COALESCE(excluded.purchase_unit,products.purchase_unit),selling_unit=COALESCE(excluded.selling_unit,products.selling_unit),
       units_per_purchase=COALESCE(excluded.units_per_purchase,products.units_per_purchase),units_per_selling=COALESCE(excluded.units_per_selling,products.units_per_selling)`,
     [p.id, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold, p.initialQty ?? 0,
-     p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? null, p.unitsPerSelling ?? null]);
+     p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1]);
 };
 export const upsertLocalSupplier = async (s: { id: string; name: string; phone?: string }) => (await db()).runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name", [s.id, s.name, s.phone ?? null]);
 
@@ -143,7 +152,7 @@ export async function applyPull(changes: { entity: string; id: string; data: any
   const d = await db();
   await d.withTransactionAsync(async () => {
     for (const c of changes) {
-      if (c.entity === "product") { const p = c.data; await d.runAsync("INSERT INTO products(id,code,barcode,name,category,unit,selling_price,low_threshold,on_hand,active,purchase_unit,selling_unit,units_per_purchase,units_per_selling) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET code=excluded.code,barcode=excluded.barcode,name=excluded.name,category=excluded.category,unit=excluded.unit,selling_price=excluded.selling_price,low_threshold=excluded.low_threshold,on_hand=excluded.on_hand,active=excluded.active,purchase_unit=excluded.purchase_unit,selling_unit=excluded.selling_unit,units_per_purchase=excluded.units_per_purchase,units_per_selling=excluded.units_per_selling", [p.id, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold, p.onHand, p.active ? 1 : 0, p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1]); }
+      if (c.entity === "product") { const p = c.data; await d.runAsync("INSERT INTO products(id,code,barcode,name,category,unit,selling_price,low_threshold,on_hand,active,purchase_unit,selling_unit,units_per_purchase,units_per_selling) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET code=excluded.code,barcode=excluded.barcode,name=excluded.name,category=excluded.category,unit=excluded.unit,selling_price=excluded.selling_price,low_threshold=excluded.low_threshold,on_hand=excluded.on_hand,active=excluded.active,purchase_unit=excluded.purchase_unit,selling_unit=excluded.selling_unit,units_per_purchase=excluded.units_per_purchase,units_per_selling=excluded.units_per_selling", [p.id, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold, p.onHand, p.active ? 1 : 0, p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1]); }
       if (c.entity === "supplier") await d.runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone", [c.data.id, c.data.name, c.data.phone ?? null]);
     }
   });

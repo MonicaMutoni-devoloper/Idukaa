@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Animated, Easing, Pressable, Text, View } from "react-native";
+import { Animated, Easing, Linking, Pressable, Text, View } from "react-native";
+import Constants from "expo-constants";
 import { Redirect, Slot, usePathname, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Banner, Button, SyncBadge, useWide } from "../../src/components/ui";
@@ -11,6 +12,7 @@ import { activeNav, allNav, bottomNav, NAV } from "../../src/navigation";
 import { kvGet, kvSet } from "../../src/database";
 import { motion, radius, space, type, useTheme } from "../../src/theme/tokens";
 import { useSync } from "../../src/synchronization/engine";
+import { startUpdateChecks, useAppUpdate } from "../../src/services/updates";
 
 const testId = (prefix: string, href: string) => `${prefix}-${href === "/" ? "home" : href.replace(/^\/+/, "").replace(/\//g, "-")}`;
 const SIDEBAR_KEY = "sidebar_collapsed";
@@ -53,6 +55,7 @@ export default function AppLayout() {
   const t = useT(); const c = useTheme(); const wide = useWide(); const path = usePathname(); const router = useRouter();
   const { lang, set } = useLang(); const insets = useSafeAreaInsets();
   const online = useSync((s) => s.online);
+  const verdict = useAppUpdate((s) => s.verdict);
   const [collapsed, setCollapsed] = useState(false);
   const sidebar = useRef(new Animated.Value(1)).current;
 
@@ -65,6 +68,11 @@ export default function AppLayout() {
   useEffect(() => {
     Animated.timing(sidebar, { toValue: collapsed ? 0 : 1, duration: motion.slow, easing: Easing.inOut(Easing.cubic), useNativeDriver: false }).start();
   }, [collapsed, sidebar]);
+
+  // Asks the server whether this build is behind — at start, on foreground and when connectivity
+  // returns, throttled inside so a screen bounce never becomes a request loop. Nothing here blocks
+  // the app or touches local data.
+  useEffect(() => { startUpdateChecks(); }, []);
 
   // The web keeps only a short-lived access token in memory. After an offline reload there is no
   // token until the network returns, but the signed-in user is known and cached data stays usable.
@@ -97,6 +105,17 @@ export default function AppLayout() {
         action={<Button testID="session-signin" label={t("session.signIn")} onPress={() => void logout().then(() => router.replace("/login"))} />} />
     </View>
   ) : null;
+
+  // A build the server says is behind. It is a prompt, not a gate: selling offline keeps working,
+  // and the queued records stay on the device through the APK upgrade.
+  const updateBanner = verdict.kind === "up-to-date" ? null : (
+    <View style={{ paddingHorizontal: wide ? space.xl : space.lg, paddingTop: space.sm }}>
+      <Banner tone={verdict.kind === "required" ? "danger" : "warn"}
+        title={t(verdict.kind === "required" ? "update.requiredTitle" : "update.availableTitle")}
+        text={t(verdict.kind === "required" ? "update.required" : "update.available")}
+        action={<Button testID="update-open" label={t("update.download")} onPress={() => { const url = verdict.latest.url; if (url) void Linking.openURL(url); }} />} />
+    </View>
+  );
 
   const syncControl = (
     <Pressable onPress={() => user.role !== "system_admin" && router.push("/sync")} disabled={user.role === "system_admin"}
@@ -179,7 +198,7 @@ export default function AppLayout() {
             {collapsed ? null : (
               <Animated.View style={{ gap: 3, flex: 1, opacity: labelOpacity }}>
                 <Text style={{ color: c.sidebarMuted, fontSize: 11 }}>{t("shell.offlineNote")}</Text>
-                <Text style={{ color: c.sidebarMuted, fontSize: 10 }}>v1.0.0</Text>
+                <Text style={{ color: c.sidebarMuted, fontSize: 10 }}>v{Constants.expoConfig?.version ?? "1.0.0"}</Text>
               </Animated.View>
             )}
             <Pressable testID="sidebar-toggle" accessibilityRole="button" accessibilityLabel={collapsed ? t("shell.expand") : t("shell.collapse")}
@@ -192,6 +211,7 @@ export default function AppLayout() {
         <View style={{ flex: 1, minWidth: 0 }}>
           {top}
           {expiredBanner}
+          {updateBanner}
           <Slot />
         </View>
       </View>
@@ -203,6 +223,7 @@ export default function AppLayout() {
     <View style={{ flex: 1, backgroundColor: c.bg }}>
       {top}
       {expiredBanner}
+      {updateBanner}
       <View style={{ flex: 1 }}><Slot /></View>
       <View style={{ flexDirection: "row", borderTopWidth: 1, borderTopColor: c.line, backgroundColor: c.surface, paddingBottom: insets.bottom }}>
         {tabs.map((item) => {
@@ -223,13 +244,14 @@ export default function AppLayout() {
 
 function SyncStatusDot() {
   const c = useTheme(); const t = useT();
-  const { online, pending, issues, running } = useSync();
-  const tone = issues ? c.danger : !online || pending ? c.accent : c.success;
+  const { online, pending, issues, running, live } = useSync();
+  const tone = issues ? c.danger : !online ? c.accent : pending ? c.accent : live ? c.success : c.inkSoft;
+  const state = online ? (live ? t("sync.live") : t("sync.online")) : t("sync.offline");
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 5, height: 32, paddingHorizontal: 8, borderRadius: radius.sm, borderWidth: 1, borderColor: c.lineStrong, backgroundColor: c.surface }}
-      accessibilityLabel={`${online ? t("sync.online") : t("sync.offline")}${pending ? `, ${pending} ${t("sync.pending")}` : ""}`}>
+      accessibilityLabel={`${state}${pending ? `, ${pending} ${t("sync.pending")}` : ""}`}>
       <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: tone, opacity: running ? 0.6 : 1 }} />
-      <Text style={{ color: c.inkSoft, fontSize: 11, fontWeight: "600" }}>{online ? t("sync.online") : t("sync.offline")}</Text>
+      <Text style={{ color: c.inkSoft, fontSize: 11, fontWeight: "600" }}>{state}</Text>
     </View>
   );
 }

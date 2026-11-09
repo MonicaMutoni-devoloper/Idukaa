@@ -4,7 +4,7 @@ import { Badge, Banner, Button, Card, DataTable, Empty, Screen, SyncProgress } f
 import { listOutbox, storageBackend, type OutboxRow } from "../../src/database/local";
 import { useT, type Key } from "../../src/localization";
 import { useSession } from "../../src/services/api";
-import { syncNow, useSync } from "../../src/synchronization/engine";
+import { fullResync, syncNow, useSync } from "../../src/synchronization/engine";
 import { schemaOutOfDate } from "../../src/synchronization/failure";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
@@ -12,7 +12,7 @@ const tone = (s: string) => (s === "synced" ? "ok" : s === "conflict" || s === "
 
 export default function SyncScreen() {
   const t = useT(); const c = useTheme(); const user = useSession((s) => s.user)!;
-  const { online, running, lastSync, authRequired, pending, issues, awaitingApproval, dataVersion } = useSync();
+  const { online, live, running, lastSync, lastError, authRequired, pending, issues, awaitingApproval, dataVersion } = useSync();
   const [rows, setRows] = useState<OutboxRow[]>([]);
 
   useEffect(() => {
@@ -30,6 +30,11 @@ export default function SyncScreen() {
     <Screen title={t("nav.sync")} subtitle={t("sync.subtitle")}
       actions={<Button testID="sync-now" label={running ? t("common.loading") : t("sync.now")} disabled={!online} onPress={() => void syncNow(true)} />}>
       {authRequired ? <Banner tone="danger" title={t("sync.failed")} text={t("sync.authRequired")} /> : null}
+      {lastError && !authRequired ? (
+        <Banner tone="warn" title={t("sync.lastErrorTitle")}
+          text={lastError === "network" ? t("sync.errNetwork") : lastError === "storage" ? t("sync.errStorage") : t("sync.errServer")}
+          action={<Button size="sm" kind="secondary" label={t("sync.reloadCatalogue")} onPress={() => void fullResync()} />} />
+      ) : null}
       {stale ? (
         <Banner tone="warn" title={t("sync.schemaOutOfDateTitle")}
           text={`${t("sync.schemaOutOfDate")}${stale.migration ? ` (${stale.migration})` : ""}`} />
@@ -40,8 +45,9 @@ export default function SyncScreen() {
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md }}>
         <Card style={{ flexGrow: 1, flexBasis: 200, gap: 6 }}>
           <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("sync.connection")}</Text>
-          <Badge dot tone={online ? "ok" : "warn"} label={online ? t("sync.online") : t("sync.offline")} />
+          <Badge dot tone={online ? "ok" : "warn"} label={online ? (live ? t("sync.live") : t("sync.online")) : t("sync.offline")} />
           <Text style={{ color: c.muted, fontSize: 12 }}>{t("sync.lastSync")}: {lastSync ? new Date(lastSync).toLocaleString() : t("common.never")}</Text>
+          {online && live ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("sync.liveHelp")}</Text> : null}
         </Card>
         <Card style={{ flexGrow: 1, flexBasis: 150, gap: 4 }}>
           <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("sync.pending")}</Text>

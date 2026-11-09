@@ -6,7 +6,7 @@ import { Appear, Disclosure, Dismiss, Shake } from "../../src/components/motion"
 import { enqueue, listProducts, type LocalProduct } from "../../src/database/local";
 import { useT } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
-import { refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
+import { fullResync, refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
 import { parseRwf, qtyOrNull, uuid } from "../../src/services/util";
 import { radius, space, type, useTheme } from "../../src/theme/tokens";
 
@@ -21,6 +21,7 @@ const unitsSellingOf = (p: LocalProduct) => p.units_per_selling ?? 1;
 export default function Sell() {
   const t = useT(); const c = useTheme(); const wide = useWide();
   const user = useSession((s) => s.user)!; const v = useSync((s) => s.dataVersion);
+  const online = useSync((s) => s.online); const lastError = useSync((s) => s.lastError);
   const [q, setQ] = useState(""); const [list, setList] = useState<LocalProduct[]>([]); const [lines, setLines] = useState<Line[]>([]);
   const [discount, setDiscount] = useState("0"); const [paid, setPaid] = useState<string | null>(null);
   const [method, setMethod] = useState<PaymentMethod>("cash");
@@ -156,6 +157,13 @@ export default function Sell() {
         </>
       ) : null}
       {saveError ? <Banner tone="danger" title={t("sell.notSaved")} text={saveError} /> : null}
+      {/* An empty shelf must never look like an empty shop: say whether the catalogue has simply
+          not arrived on this device yet, and offer the one repair that works (a full re-pull). */}
+      {!list.length ? (
+        <Banner tone="warn" title={t("catalogue.emptyTitle")}
+          text={online ? t("catalogue.emptyOnline") : t("catalogue.emptyOffline")}
+          action={<Button size="sm" kind="secondary" label={t("catalogue.reload")} onPress={() => void fullResync()} />} />
+      ) : null}
 
       <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg, alignItems: "flex-start" }}>
         <View style={{ flex: wide ? 1.35 : undefined, width: wide ? undefined : "100%", gap: space.md }}>

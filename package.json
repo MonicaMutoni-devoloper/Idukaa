@@ -13,7 +13,7 @@
   "scripts": {
     "test:shared": "npm run test -w @sms/shared",
     "test:api": "node scripts/require-test-db.mjs && npm run test -w @sms/api",
-    "test:mobile": "npm run test:i18n -w @sms/mobile && npm run test:dashboard -w @sms/mobile && npm run test:policy -w @sms/mobile && npm run test:sections -w @sms/mobile && npm run test:roles -w @sms/mobile && npm run test:sync -w @sms/mobile",
+    "test:mobile": "npm run test:i18n -w @sms/mobile && npm run test:dashboard -w @sms/mobile && npm run test:reports -w @sms/mobile && npm run test:realtime -w @sms/mobile && npm run test:policy -w @sms/mobile && npm run test:sections -w @sms/mobile && npm run test:roles -w @sms/mobile && npm run test:sync -w @sms/mobile && npm run test:update -w @sms/mobile && npm run test:catalogue -w @sms/mobile",
     "migrate": "npm run migrate -w @sms/api",
     "seed": "npm run seed -w @sms/api",
     "api": "npm run start:dev -w @sms/api",
@@ -21,6 +21,7 @@
     "web": "npm run web -w @sms/mobile",
     "db:up": "docker compose -f infrastructure/docker-compose.yml up -d",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "verify:apk": "node scripts/verify-android-apk.mjs",
     "postinstall": "npm run build -w @sms/shared",
     "android": "npm run android -w @sms/mobile",
     "ios": "npm run ios -w @sms/mobile"

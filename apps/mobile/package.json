@@ -11,10 +11,14 @@
     "build:web": "node scripts/check-api-url.mjs && expo export --platform web",
     "test:i18n": "node --test tests/i18n.test.mts",
     "test:dashboard": "node --test tests/local-dashboard.test.mts",
+    "test:reports": "node --test tests/local-reports.test.mts tests/report-analytics.test.mts tests/report-format.test.mts",
+    "test:realtime": "node --test tests/realtime.test.mts",
     "test:policy": "node --test tests/session-policy.test.mts",
     "test:sections": "node --test tests/report-sections.test.mts",
     "test:roles": "node --test tests/permissions.test.mts",
     "test:sync": "node --test tests/schema-out-of-date.test.mts",
+    "test:update": "node --test tests/app-update.test.mts",
+    "test:catalogue": "node --test tests/catalogue.test.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -24,6 +28,7 @@
     "expo-constants": "~58.0.4",
     "expo-crypto": "~58.0.7",
     "expo-linking": "~58.0.14",
+    "expo-print": "~58.0.8",
     "expo-router": "~58.0.26",
     "expo-secure-store": "~58.0.2",
     "expo-splash-screen": "~58.0.12",
