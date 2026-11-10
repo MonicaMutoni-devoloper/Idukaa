@@ -19,6 +19,7 @@
     "test:sync": "node --test tests/schema-out-of-date.test.mts",
     "test:update": "node --test tests/app-update.test.mts",
     "test:catalogue": "node --test tests/catalogue.test.mts",
+    "test:pwa": "node --test tests/pwa.test.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

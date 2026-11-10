@@ -42,7 +42,7 @@
       "bundler": "metro",
       "output": "single",
       "name": "Idukaa",
-      "themeColor": "#172B4D",
+      "themeColor": "#0F5C4D",
       "favicon": "./assets/favicon.png"
     },
     "plugins": [

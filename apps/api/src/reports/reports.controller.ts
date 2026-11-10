@@ -363,13 +363,17 @@ export class ReportsController {
   @Get("movements") @Roles("owner", "manager")
   async stockMovements(@Me() u: AuthUser, @Query() q: any) {
     const { from, to } = parse(q);
+    // Pages are explicit so the client can walk the whole period instead of silently losing rows
+    // after the first 1,000 movements. A page may contain limit rows; the client asks again.
     const type = typeof q.type === "string" && q.type ? q.type : null;
     const productId = typeof q.productId === "string" && z.string().uuid().safeParse(q.productId).success ? q.productId : null;
     const TYPES = new Set(["opening", "receipt", "sale", "sale_return", "supplier_return", "damage", "expiry", "adjustment", "count_correction", "transfer_in", "transfer_out"]);
     if (type && !TYPES.has(type)) throw new BadRequestException("invalid_type");
     if (q.productId && !productId) throw new BadRequestException("invalid_product");
     const canSeeFinancials = await this.canSeeFinancials(u);
-    const LIMIT = 1001;
+    const limit = Math.min(1000, Math.max(1, Number(q.limit) || 1000));
+    const offset = Math.max(0, Number(q.offset) || 0);
+    const LIMIT = limit + 1; // one extra row tells us whether another page exists
     const rows = await this.db.query(
       `WITH led AS (
          SELECT m.id, m.product_id, m.type, m.qty, m.unit_cost, m.reason, m.source_id,
@@ -386,14 +390,14 @@ export class ReportsController {
        WHERE led.occurred_at>=$2 AND led.occurred_at<$3
          AND ($4::text IS NULL OR led.type=$4)
          AND ($5::uuid IS NULL OR led.product_id=$5)
-       ORDER BY led.occurred_at DESC, led.id DESC LIMIT ${LIMIT}`, [u.shopId, from, to, type, productId]);
-    const items = rows.slice(0, LIMIT - 1).map((r: any) => ({
+       ORDER BY led.occurred_at DESC, led.id DESC LIMIT ${LIMIT} OFFSET $6`, [u.shopId, from, to, type, productId, offset]);
+    const items = rows.slice(0, limit).map((r: any) => ({
       id: r.id, at: r.at, productId: r.product_id, product: r.product, code: r.code, unit: r.unit,
       type: r.type, qty: Number(r.qty), unitCost: canSeeFinancials && r.unit_cost !== null ? Number(r.unit_cost) : null,
       reason: r.reason, reference: r.source_id ?? null, by: r.by ?? null,
       balanceBefore: Number(r.balance_before), balanceAfter: Number(r.balance_after),
     }));
-    return { range: { from, to }, financials: canSeeFinancials, items, truncated: rows.length >= LIMIT };
+    return { range: { from, to }, financials: canSeeFinancials, items, truncated: rows.length > limit, offset, limit };
   }
 
   /** One sale with its line items, including each line's share of the sale discount. Same data for owner and manager, shop-scoped. */
@@ -432,22 +436,37 @@ export class ReportsController {
 
   /** Drill-down: every transaction behind a total (paginated by LIMIT for large datasets). */
   @Get("transactions") @Roles("owner", "manager") async tx(@Me() u: AuthUser, @Query() q: any) {
-    const { from, to } = parse(q); const p = [u.shopId, from, to];
+    const { from, to } = parse(q);
+    // The client walks these pages until a short page: the previous hard LIMIT silently dropped
+    // rows from busy periods, which made an offline copy (and a drill-down) look complete when it was not.
+    const limit = Math.min(500, Math.max(1, Number(q.limit) || 500));
+    const offset = Math.max(0, Number(q.offset) || 0);
+    const p = [u.shopId, from, to, limit, offset];
     const kind = q.kind;
     if (kind === "sales") return this.db.query(`SELECT s.id, s.sold_at AT TIME ZONE 'UTC' AS at, s.gross_amount, s.discount, s.amount_paid, s.payment_method, s.status, us.full_name AS by,
         (SELECT COALESCE(SUM(sl.qty),0)::bigint FROM sale_lines sl WHERE sl.sale_id=s.id) AS units,
-        (SELECT COALESCE(string_agg(pr.name, ', ' ORDER BY pr.name), '') FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS products
-      FROM sales s JOIN users us ON us.id=s.user_id WHERE s.shop_id=$1 AND s.sold_at>=$2 AND s.sold_at<$3 ORDER BY s.sold_at DESC LIMIT 500`, p);
-    if (kind === "purchases") return this.db.query(`SELECT pu.id, pu.ordered_at AT TIME ZONE 'UTC' AS at, pu.total_amount, pu.amount_paid, pu.reference, pu.notes, su.name AS supplier FROM purchases pu LEFT JOIN suppliers su ON su.id=pu.supplier_id WHERE pu.shop_id=$1 AND pu.ordered_at>=$2 AND pu.ordered_at<$3 ORDER BY pu.ordered_at DESC LIMIT 500`, p);
+        (SELECT COALESCE(string_agg(pr.name, ', ' ORDER BY pr.name), '') FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS products,
+        (SELECT COALESCE(json_agg(json_build_object(
+          'productId', sl.product_id, 'name', pr.name, 'code', pr.code, 'unit', pr.unit,
+          'qty', sl.qty, 'unitPrice', sl.unit_price, 'lineAmount', sl.line_amount
+        ) ORDER BY sl.id), '[]'::json) FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS lines
+      FROM sales s JOIN users us ON us.id=s.user_id WHERE s.shop_id=$1 AND s.sold_at>=$2 AND s.sold_at<$3 ORDER BY s.sold_at DESC, s.id DESC LIMIT $4 OFFSET $5`, p);
+    if (kind === "purchases") return this.db.query(`SELECT pu.id, pu.ordered_at AT TIME ZONE 'UTC' AS at, pu.total_amount, pu.amount_paid, pu.reference, pu.notes, su.name AS supplier,
+        (SELECT COALESCE(json_agg(json_build_object(
+          'productId', pl.product_id, 'name', pr.name, 'code', pr.code, 'unit', pr.unit,
+          'qty', pl.qty_ordered, 'qtyReceived', pl.qty_received, 'unitCost', pl.unit_cost,
+          'lineAmount', (pl.qty_ordered * pl.unit_cost) / 1000
+        ) ORDER BY pl.id), '[]'::json) FROM purchase_lines pl JOIN products pr ON pr.id=pl.product_id WHERE pl.purchase_id=pu.id) AS lines
+      FROM purchases pu LEFT JOIN suppliers su ON su.id=pu.supplier_id WHERE pu.shop_id=$1 AND pu.ordered_at>=$2 AND pu.ordered_at<$3 ORDER BY pu.ordered_at DESC, pu.id DESC LIMIT $4 OFFSET $5`, p);
     if (kind === "expenses") return this.db.query(`SELECT e.id, e.incurred_at AT TIME ZONE 'UTC' AS at, e.category, e.amount, e.paid, e.note, e.user_id, us.full_name AS by
-      FROM expenses e LEFT JOIN users us ON us.id=e.user_id WHERE e.shop_id=$1 AND e.incurred_at>=$2 AND e.incurred_at<$3 ORDER BY e.incurred_at DESC LIMIT 500`, p);
+      FROM expenses e LEFT JOIN users us ON us.id=e.user_id WHERE e.shop_id=$1 AND e.incurred_at>=$2 AND e.incurred_at<$3 ORDER BY e.incurred_at DESC, e.id DESC LIMIT $4 OFFSET $5`, p);
     if (kind === "adjustments") return this.db.query(`SELECT a.id, COALESCE(a.decided_at, o.received_at) AT TIME ZONE 'UTC' AS at, p.name AS product, a.qty, a.reason, a.note,
         a.status, a.refund_amount, m.unit_cost, rb.full_name AS requested_by, du.full_name AS decided_by, a.decision_note
       FROM adjustments a JOIN operations o ON o.op_id=a.op_id JOIN products p ON p.id=a.product_id
       LEFT JOIN users rb ON rb.id=a.requested_by LEFT JOIN users du ON du.id=a.decided_by
       LEFT JOIN stock_movements m ON m.source_type='adjustment' AND m.source_id=a.id
       WHERE a.shop_id=$1 AND COALESCE(a.decided_at, o.received_at)>=$2 AND COALESCE(a.decided_at, o.received_at)<$3
-      ORDER BY 2 DESC LIMIT 500`, p);
+      ORDER BY 2 DESC, a.id DESC LIMIT $4 OFFSET $5`, p);
     throw new BadRequestException("kind must be sales|purchases|expenses|adjustments");
   }
 

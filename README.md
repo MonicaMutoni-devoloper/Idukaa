@@ -105,6 +105,7 @@ on a pre-existing build.
 End-to-end web check (API + web export running, Chrome installed):
 ```bash
 node apps/mobile/tests/e2e-web.mjs   # logs in, sells, receives, reloads offline, approves, checks admin
+node apps/mobile/tests/e2e-pwa.mjs   # manifest/installability, offline download, cached report with API blocked
 ```
 It writes demo records to the development database. See `docs/STATUS.md` for the latest results.
 

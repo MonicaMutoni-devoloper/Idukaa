@@ -3,6 +3,8 @@ import { Switch, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { Badge, Banner, Button, Card, ConfirmDialog, Field, PasswordField, Screen, Segmented, useWide } from "../../src/components/ui";
 import { AppearanceSettings } from "../../src/components/theme-switcher";
+import { PwaInstallCard } from "../../src/components/pwa-install";
+import { OfflineDownloadCard } from "../../src/components/offline-download";
 import { storageBackend } from "../../src/database/local";
 import { useLang, useT, type Key } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
@@ -246,6 +248,9 @@ export default function Settings() {
           <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("appearance.persistHelp")}</Text>
         </Card>
       </View>
+
+      <PwaInstallCard />
+      <OfflineDownloadCard />
 
       <Card style={{ gap: space.md }}>
         <View style={{ gap: 2 }}>

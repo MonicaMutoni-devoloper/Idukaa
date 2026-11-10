@@ -45,6 +45,10 @@ Reports read this device first and the API second.
   `counts.conflicts` say they exist.
 - Not available offline, shown as "—" instead of guessed: supplier and cashier names, approved
   adjustment cost, stock-loss cost and void state (all server-side).
+- Transaction and movement endpoints are paginated (`limit`/`offset`); the client walks every page
+  instead of stopping at the first 500 transactions or 1,000 movements, so a large period is not
+  silently truncated. Sale and purchase rows include their `lines`, which lets a saved sales report
+  open a sale's items offline without one request per sale.
 - Tests: `apps/mobile/tests/local-reports.test.mts` (`npm run test:reports -w @sms/mobile`).
 
 ## Dashboard
@@ -55,13 +59,26 @@ Reports read this device first and the API second.
 - Access-token rotation is authentication only and is not a dashboard dependency; it cannot trigger a loading cycle.
 
 ## PC / PWA
+- The manifest identifies the app as **Idukaa** with 192/512/maskable icons, `standalone` display,
+  `/` start URL and scope, and the `#0F5C4D` theme colour. The shell cache is `idukaa-shell-v4`;
+  bumping the name removes the previous branded shell on activation.
+- **Install:** Settings shows an install card. When Chrome fires `beforeinstallprompt` the button
+  opens the native prompt; otherwise the card explains the real Chrome/Edge menu path and the iOS
+  Share → Add to Home Screen path. The `beforeinstallprompt` listener starts at the app root, so an
+  event fired before Settings is opened is not lost. An installed window is detected with
+  `display-mode: standalone` (and `navigator.standalone` on iOS).
+- **Offline download:** Settings → *Download for offline* fetches the current month and year for the
+  dashboard, inventory, stock movements, sales and (for users allowed financials) the financial
+  report. Each payload is written with the same shop/user/period/permission cache key the screens
+  use, and the durable `offline.data:<shop>` status is written only after the modules finish. Partial
+  downloads are labelled partial; repeat taps share one in-flight download.
 - Service worker caches only the app shell. Business data lives in the local database, never in the HTTP cache. API calls are never cached.
 - **Web storage is IndexedDB** (`sms-local`), not SQLite. The web build has no SQLite backend, so `src/database/local.web.ts` implements the same interface over IndexedDB. One record holds the whole local state, so an outbox row and its optimistic stock delta are committed together.
 - The first web load imports any state left by the older `localStorage` adapter (`sms.localdb.v1`) and keeps that key as a recovery copy.
 - Writes are serialized with the Web Locks API where available and re-read the latest state under the lock, so two tabs cannot silently lose each other's queued operations. Other tabs are notified through `BroadcastChannel` and drop their read cache.
 - **Clearing browser data, using private windows, or switching browsers/devices loses any operations that were not yet synced.** Synced data is safe on the server and re-downloaded on next login. Tell PC users to sync before clearing data; the Sync screen and Settings show the unsynced count.
 - **Web authentication:** the access token lives in memory only; the refresh token is an HttpOnly cookie. After a reload the app performs one refresh to get a new access token. The service worker never caches API responses, so an offline reload shows the cached shell and local data, not a stale authenticated API response.
-- The adapter is exercised by `apps/mobile/tests/e2e-web.mjs`: it saves a sale with the API blocked, reloads the page, confirms the queue survived in IndexedDB, and syncs after reconnecting.
+- The adapter is exercised by `apps/mobile/tests/e2e-web.mjs`: it saves a sale with the API blocked, reloads the page, confirms the queue survived in IndexedDB, and syncs after reconnecting. `apps/mobile/tests/e2e-pwa.mjs` additionally checks the manifest/installability, install instructions, the offline download and a cached report with every API request blocked.
 - IndexedDB quotas are browser-managed and much larger than localStorage; the single-record design is intended for a shop-sized catalogue, not tens of thousands of products.
 
 ## Checkpoints

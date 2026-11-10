@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Text, View } from "react-native";
+import { ActivityIndicator, Text, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { formatQty, formatRwf, kigaliDay } from "@sms/shared";
 import {
@@ -12,7 +12,7 @@ import { useT } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
 import { ApiError, request, useSession } from "../../src/services/api";
 import {
-  loadFinancial, loadInventory, loadMovements, loadSales,
+  loadFinancial, loadInventory, loadMovements, loadSales, peekCachedReport,
   type FinancialData, type InventoryData, type Loaded, type MovementsData, type ReportCategory, type SalesData,
 } from "../../src/services/report-data";
 import { customRange, todayDay, addDaysToDay } from "../../src/services/util";
@@ -61,7 +61,7 @@ const RECENT_KEY = "reports.recent.v1";
 
 export default function Reports() {
   const t = useT(); const c = useTheme();
-  const { user, token } = useSession();
+  const { user } = useSession();
   const online = useSync((s) => s.online);
   const lastSync = useSync((s) => s.lastSync);
   const recordsVersion = useSync((s) => s.recordsVersion);
@@ -89,7 +89,9 @@ export default function Reports() {
   const [landing, setLanding] = useState<{ sales: Loaded<SalesData>; inventory: Loaded<InventoryData> } | null>(null);
   const [loaded, setLoaded] = useState<Loaded<SalesData | InventoryData | MovementsData | FinancialData> | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const loadSeq = useRef(0);
+  const loadScope = useRef("");
 
   const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<SaleDetail | null>(null);
@@ -141,16 +143,48 @@ export default function Reports() {
   const load = useCallback(() => {
     const seq = ++loadSeq.current;
     const live = () => seq === loadSeq.current;
-    setLoading(true);
     const ctx = { online, shopId, from, to, financials: financialsAllowed };
+    // Only a different section needs its old payload cleared (the shapes differ). A new date range
+    // keeps the current figures on screen and refreshes them quietly; it never blanks the report.
+    const scope = `${category ?? "home"}:${shopId ?? "none"}:${financialsAllowed ? "fin" : "ops"}`;
+    const scopeChanged = loadScope.current !== scope;
+    if (scopeChanged) {
+      loadScope.current = scope;
+      setLoaded(null); setLanding(null); setLoading(true);
+    }
+    setRefreshing(true);
     if (category === "financial" && !financialsAllowed) {
       // Do not ask for a report the role cannot read: the server would answer 403 and the UI would
       // briefly show a failure instead of the explanation the user needs.
       setLoaded({ data: null, meta: { ...failedMeta(), forbidden: true } });
-      setLoading(false);
+      setLoading(false); setRefreshing(false);
       return;
     }
     void (async () => {
+      const viewOf = (c: ReportCategory) => c === "inventory" ? "analytics:inventory"
+        : c === "movements" ? "analytics:movements" : c === "sales" ? "analytics:sales" : "analytics:financial";
+
+      // Read the saved copy first: opening a report must show the last known figures immediately,
+      // then reconcile quietly instead of replacing them with a full-screen spinner.
+      if (!category) {
+        const [sales, inventory] = await Promise.all([
+          peekCachedReport<SalesData>(ctx, viewOf("sales")),
+          peekCachedReport<InventoryData>(ctx, viewOf("inventory")),
+        ]);
+        if (!live()) return;
+        if (sales || inventory) {
+          setLanding({
+            sales: sales ?? { data: null, meta: failedMeta() },
+            inventory: inventory ?? { data: null, meta: failedMeta() },
+          });
+          setLoading(false);
+        }
+      } else {
+        const cached = await peekCachedReport<SalesData | InventoryData | MovementsData | FinancialData>(ctx, viewOf(category));
+        if (!live()) return;
+        if (cached) { setLoaded(cached); setLoading(false); }
+      }
+
       if (!category) {
         const [sales, inventory] = await Promise.all([loadSales(ctx), loadInventory(ctx)]);
         if (!live()) return;
@@ -165,10 +199,14 @@ export default function Reports() {
         setLoaded(result);
         setLanding(null);
       }
-      if (live()) setLoading(false);
-    })();
+      if (live()) { setLoading(false); setRefreshing(false); }
+    })().catch(() => {
+      if (live()) { setLoading(false); setRefreshing(false); }
+    });
   }, [category, from, to, online, shopId, financialsAllowed, recordsVersion, businessVersion]);
-  useEffect(() => { load(); }, [load, token, reload]);
+  // A rotating access token is not a data change. Server changes arrive through businessVersion,
+  // local verdicts through recordsVersion; reloading here would turn token refresh into a spinner.
+  useEffect(() => { load(); }, [load, reload]);
 
   const open = (next: ReportCategory) => {
     setCategory(next);
@@ -186,8 +224,39 @@ export default function Reports() {
 
   const openSale = async (id: string) => {
     setDetailOpen(true); setDetail(null); setDetailFailed(false);
-    try { setDetail(await request<SaleDetail>(`/reports/sales/${id}`)); }
-    catch { setDetailFailed(true); }
+    let shown = false;
+    // The transaction cache carries the sale lines, so a saved report can open its details with
+    // no connection. The dedicated endpoint is still fetched when online for cashier/audit fields.
+    const rows = category === "sales"
+      ? ((loaded?.data as SalesData | undefined)?.sales ?? [])
+      : (landing?.sales.data?.sales ?? []);
+    const row = rows.find((r) => r.id === id);
+    if (row?.lines?.length) {
+      const net = Number(row.gross_amount) - Number(row.discount);
+      const cachedDetail: SaleDetail = {
+        sale: {
+          id: row.id, at: row.at, cashier: row.by ?? "—", paymentMethod: row.payment_method,
+          status: row.status, grossAmount: Number(row.gross_amount), discount: Number(row.discount),
+          amountPaid: Number(row.amount_paid), net,
+          balance: Math.max(0, net - Number(row.amount_paid)), reversedAt: null, reversalReason: null,
+        },
+        lines: row.lines.map((l) => ({ ...l, discount: 0, net: l.lineAmount })),
+      };
+      setDetail(cachedDetail); shown = true;
+    }
+    const cacheKey = `sale:${shopId ?? "none"}:${id}`;
+    try {
+      const raw = await kvGet(cacheKey);
+      const cached = raw ? JSON.parse(raw) : null;
+      if (cached?.detail) { setDetail(cached.detail); shown = true; }
+    } catch { /* the report row above is still usable */ }
+    try {
+      const fresh = await request<SaleDetail>(`/reports/sales/${id}`);
+      setDetail(fresh);
+      void kvSet(cacheKey, JSON.stringify({ savedAt: new Date().toISOString(), detail: fresh })).catch(() => {});
+    } catch {
+      if (!shown) setDetailFailed(true);
+    }
   };
 
   const confirmVoid = async () => {
@@ -231,9 +300,17 @@ export default function Reports() {
         </View>
       ) : null}
       {/* The inclusive Kigali business dates behind every figure, so the period is never implicit. */}
-      <Text testID="reports-range" style={{ color: c.muted, fontSize: 12 }}>
-        {kigaliDay(from)} → {kigaliDay(Date.parse(to) - 1)}
-      </Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
+        <Text testID="reports-range" style={{ color: c.muted, fontSize: 12 }}>
+          {kigaliDay(from)} → {kigaliDay(Date.parse(to) - 1)}
+        </Text>
+        {refreshing && !loading ? (
+          <View testID="reports-refreshing" style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+            <ActivityIndicator size="small" color={c.muted} />
+            <Text style={{ color: c.muted, fontSize: 11 }}>{t("common.loading")}</Text>
+          </View>
+        ) : null}
+      </View>
 
       {notice ? <Banner tone={notice.tone} text={notice.text} /> : null}
 
@@ -325,5 +402,5 @@ export default function Reports() {
 }
 
 const failedMeta = (): Loaded<never>["meta"] => ({
-  source: null, savedAt: null, pendingOps: 0, authIssue: false, forbidden: false, failed: true,
+  source: null, savedAt: null, savedLocally: false, pendingOps: 0, authIssue: false, forbidden: false, failed: true,
 });

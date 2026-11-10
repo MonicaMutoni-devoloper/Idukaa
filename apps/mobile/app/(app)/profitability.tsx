@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import {
@@ -7,7 +7,7 @@ import {
 import { Badge, Banner, Button, Card, DataTable, Empty, ErrorState, Field, Loading, Screen, Segmented, useWide } from "../../src/components/ui";
 import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
-import { request } from "../../src/services/api";
+import { request, useSession } from "../../src/services/api";
 import { addDaysToDay, customRange, parseRwf, presetRange, todayDay, type Preset, type Range } from "../../src/services/util";
 import { useSync } from "../../src/synchronization/engine";
 import { space, type, useTheme } from "../../src/theme/tokens";
@@ -79,6 +79,7 @@ export default function Profitability() {
   const t = useT(); const c = useTheme(); const wide = useWide(); const router = useRouter();
   const online = useSync((s) => s.online);
   const lastSync = useSync((s) => s.lastSync);
+  const user = useSession((s) => s.user);
 
   const [period, setPeriod] = useState<Period>("month");
   const [customFrom, setCustomFrom] = useState(addDaysToDay(todayDay(), -6));
@@ -90,6 +91,7 @@ export default function Profitability() {
   const [failed, setFailed] = useState(false);
   const [denied, setDenied] = useState(false);
   const [staleAt, setStaleAt] = useState<string | null>(null);
+  const loadedKey = useRef("");
 
   // Pricing calculator inputs (rows can be tapped to prefill cost and price).
   const [unitCost, setUnitCost] = useState("");
@@ -102,21 +104,31 @@ export default function Profitability() {
 
   const load = useCallback(async () => {
     if (!range) return;
-    setLoading(true); setFailed(false); setDenied(false);
-    const key = `profitability:${range.from}:${range.to}`;
+    setFailed(false); setDenied(false);
+    // Profitability is financial data: its saved copy is scoped to the shop AND the signed-in user.
+    const key = `profitability:${user?.shopId ?? "none"}:${user?.id ?? "none"}:${range.from}:${range.to}`;
+    if (loadedKey.current !== key) {
+      loadedKey.current = key;
+      setData(null); setStaleAt(null); setLoading(true);
+    }
+    let hadCache = false;
+    try {
+      const raw = await kvGet(key);
+      if (raw) {
+        const cached = JSON.parse(raw);
+        if (cached?.data) { setData(cached.data); setStaleAt(cached.savedAt ?? null); setLoading(false); hadCache = true; }
+      }
+    } catch { /* the live request below can still succeed */ }
+    if (!hadCache) setLoading(true);
     try {
       const res = await request<ProfitPayload>(`/reports/profitability?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { auth: true });
       setData(res); setStaleAt(null);
-      void kvSet(key, JSON.stringify({ savedAt: new Date().toISOString(), data: res })).catch(() => {});
+      await kvSet(key, JSON.stringify({ savedAt: new Date().toISOString(), data: res })).catch(() => {});
     } catch (e: any) {
       if (e?.status === 403 || e?.body?.message === "financials_not_permitted") { setDenied(true); setLoading(false); return; }
       setFailed(true);
-      try {
-        const raw = await kvGet(key);
-        if (raw) { const cached = JSON.parse(raw); if (cached?.data) { setData(cached.data); setStaleAt(cached.savedAt ?? null); } }
-      } catch { /* keep whatever is on screen */ }
     } finally { setLoading(false); }
-  }, [range]);
+  }, [range, user?.shopId, user?.id]);
 
   useEffect(() => { void load(); }, [load, lastSync]);
 

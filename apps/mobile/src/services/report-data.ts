@@ -31,6 +31,8 @@ export type FigureSource = "server" | "cached" | "device";
 export interface LoadMeta {
   source: FigureSource | null;
   savedAt: string | null;
+  /** True only after this exact payload was durably written to the device cache. */
+  savedLocally: boolean;
   pendingOps: number;
   authIssue: boolean;
   forbidden: boolean;
@@ -43,7 +45,7 @@ export interface LoadContext {
   online: boolean; shopId: string | null; from: string; to: string; financials: boolean;
 }
 
-const EMPTY_META: LoadMeta = { source: null, savedAt: null, pendingOps: 0, authIssue: false, forbidden: false, failed: true };
+const EMPTY_META: LoadMeta = { source: null, savedAt: null, savedLocally: false, pendingOps: 0, authIssue: false, forbidden: false, failed: true };
 
 const meta = (over: Partial<LoadMeta>): LoadMeta => ({ ...EMPTY_META, failed: false, ...over });
 
@@ -59,15 +61,57 @@ const readCache = async <T>(ctx: LoadContext, view: string): Promise<{ data: T; 
   }
 };
 
-const writeCache = (ctx: LoadContext, view: string, data: unknown) =>
-  kvSet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to, ctx.financials), JSON.stringify({
-    savedAt: new Date().toISOString(), shopId: ctx.shopId, view, from: ctx.from, to: ctx.to,
-    access: ctx.financials ? "financial" : "operational",
-    rows: [], totals: data,
-  })).catch(() => {});
+const writeCache = async (ctx: LoadContext, view: string, data: unknown): Promise<boolean> => {
+  try {
+    await kvSet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to, ctx.financials), JSON.stringify({
+      savedAt: new Date().toISOString(), shopId: ctx.shopId, view, from: ctx.from, to: ctx.to,
+      access: ctx.financials ? "financial" : "operational",
+      rows: [], totals: data,
+    }));
+    return true;
+  } catch {
+    // The live answer can still be shown, but it must never be labelled as available offline.
+    return false;
+  }
+};
+
+/** The saved copy for the exact scope, without making a request. Used for cache-first rendering. */
+export async function peekCachedReport<T>(ctx: LoadContext, view: string): Promise<Loaded<T> | null> {
+  const cached = await readCache<T>(ctx, view);
+  return cached
+    ? { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps: 0 }) }
+    : null;
+}
 
 const pendingIn = (records: { status: string; at: string }[], from: string, to: string) =>
   records.filter((r) => isUnsynced(r.status) && r.at >= from && r.at < to).length;
+
+const TX_PAGE = 500;
+/** Walk every transaction page for the range. Stopping at the first page would silently hide history. */
+async function allTransactions<T>(kind: string, ctx: LoadContext): Promise<T[]> {
+  const out: T[] = [];
+  for (let offset = 0; offset < 500_000; offset += TX_PAGE) {
+    const q = `kind=${kind}&from=${encodeURIComponent(ctx.from)}&to=${encodeURIComponent(ctx.to)}&limit=${TX_PAGE}&offset=${offset}`;
+    const page = await request<T[]>(`/reports/transactions?${q}`);
+    out.push(...page);
+    if (page.length < TX_PAGE) break;
+  }
+  return out;
+}
+
+const MOVEMENT_PAGE = 1000;
+async function allMovements(ctx: LoadContext): Promise<ApiMovements> {
+  const items: ApiMovements["items"] = [];
+  let financials = false;
+  for (let offset = 0; offset < 500_000; offset += MOVEMENT_PAGE) {
+    const q = `from=${encodeURIComponent(ctx.from)}&to=${encodeURIComponent(ctx.to)}&limit=${MOVEMENT_PAGE}&offset=${offset}`;
+    const page = await request<ApiMovements>(`/reports/movements?${q}`);
+    items.push(...page.items);
+    financials = page.financials;
+    if (page.items.length < MOVEMENT_PAGE) break;
+  }
+  return { items, truncated: false, financials };
+}
 
 const failMeta = (e: unknown): Partial<LoadMeta> => ({
   authIssue: e instanceof ApiError && e.status === 401,
@@ -102,7 +146,7 @@ export async function loadInventory(ctx: LoadContext): Promise<Loaded<InventoryD
 
   if (!ctx.online) {
     const cached = await readCache<InventoryData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps }) };
+    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }) };
     const device = fromDevice();
     return device
       ? { data: device, meta: meta({ source: "device", pendingOps }) }
@@ -119,11 +163,11 @@ export async function loadInventory(ctx: LoadContext): Promise<Loaded<InventoryD
       value: i.value === undefined || i.value === null ? null : Number(i.value),
     })), products);
     const data: InventoryData = { items, totalValue: r.totalValue === null ? null : Number(r.totalValue), financials: r.totalValue !== null };
-    void writeCache(ctx, view, data);
-    return { data, meta: meta({ source: "server", pendingOps }) };
+    const savedLocally = await writeCache(ctx, view, data);
+    return { data, meta: meta({ source: "server", savedLocally, pendingOps }) };
   } catch (e) {
     const cached = await readCache<InventoryData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps, ...failMeta(e) }) };
+    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }) };
     const device = fromDevice();
     if (device) return { data: device, meta: meta({ source: "device", pendingOps, ...failMeta(e) }) };
     return { data: null, meta: { ...EMPTY_META, pendingOps, ...failMeta(e) } };
@@ -160,7 +204,7 @@ export async function loadMovements(ctx: LoadContext): Promise<Loaded<MovementsD
 
   if (!ctx.online) {
     const cached = await readCache<MovementsData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps }) };
+    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }) };
     const device = fromDevice();
     return device
       ? { data: device, meta: meta({ source: "device", pendingOps }) }
@@ -168,17 +212,17 @@ export async function loadMovements(ctx: LoadContext): Promise<Loaded<MovementsD
   }
 
   try {
-    const r = await request<ApiMovements>(`/reports/movements?from=${encodeURIComponent(ctx.from)}&to=${encodeURIComponent(ctx.to)}`);
+    const r = await allMovements(ctx);
     // Pending movements cannot be on the server yet (that is what pending means), so appending
     // them cannot double count; once synchronized the record is no longer unsynced and only the
     // server row remains.
     const items = [...pending, ...r.items].sort((a, b) => b.at.localeCompare(a.at));
     const data: MovementsData = { items, truncated: r.truncated, financials: r.financials };
-    void writeCache(ctx, view, data);
-    return { data, meta: meta({ source: "server", pendingOps }) };
+    const savedLocally = await writeCache(ctx, view, data);
+    return { data, meta: meta({ source: "server", savedLocally, pendingOps }) };
   } catch (e) {
     const cached = await readCache<MovementsData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps, ...failMeta(e) }) };
+    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }) };
     const device = fromDevice();
     if (device) return { data: device, meta: meta({ source: "device", pendingOps, ...failMeta(e) }) };
     return { data: null, meta: { ...EMPTY_META, pendingOps, ...failMeta(e) } };
@@ -227,7 +271,7 @@ export async function loadSales(ctx: LoadContext): Promise<Loaded<SalesData>> {
 
   if (!ctx.online) {
     const cached = await readCache<SalesData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps }) };
+    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }) };
     const device = await fromDevice();
     return device
       ? { data: device, meta: meta({ source: "device", pendingOps }) }
@@ -237,7 +281,7 @@ export async function loadSales(ctx: LoadContext): Promise<Loaded<SalesData>> {
   try {
     const q = `from=${encodeURIComponent(ctx.from)}&to=${encodeURIComponent(ctx.to)}`;
     const [tx, itemReport] = await Promise.all([
-      request<ReportSaleRow[]>(`/reports/transactions?kind=sales&${q}`),
+      allTransactions<ReportSaleRow>("sales", ctx),
       request<ApiItems>(`/reports/items?${q}`),
     ]);
     let pendingSales: ReportSaleRow[] = [];
@@ -255,11 +299,11 @@ export async function loadSales(ctx: LoadContext): Promise<Loaded<SalesData>> {
     const sales = mergePendingRows(tx, pendingSales);
     const items = mergePendingItems(itemReport.items, pendingItems);
     const data: SalesData = { sales, items, totals: totalsFrom(sales, items) };
-    void writeCache(ctx, view, data);
-    return { data, meta: meta({ source: "server", pendingOps }) };
+    const savedLocally = await writeCache(ctx, view, data);
+    return { data, meta: meta({ source: "server", savedLocally, pendingOps }) };
   } catch (e) {
     const cached = await readCache<SalesData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps, ...failMeta(e) }) };
+    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }) };
     const device = await fromDevice();
     if (device) return { data: device, meta: meta({ source: "device", pendingOps, ...failMeta(e) }) };
     return { data: null, meta: { ...EMPTY_META, pendingOps, ...failMeta(e) } };
@@ -367,6 +411,9 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
 
   const fromDevice = async (): Promise<FinancialData | null> => {
     if (!ctx.financials) return null;
+    // A brand-new device has the catalogue but no business history. Rendering an all-zero P&L
+    // would present "never downloaded" as a genuine zero, so ask for the first online download.
+    if (!records.length) return null;
     const local = await localBundle();
     if (!local.summary) return null;
     return withLocal({ summary: null, ...emptyBase }, local);
@@ -380,7 +427,7 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
         expenses: cached.data.expenses ?? [], purchases: cached.data.purchases ?? [],
         adjustments: cached.data.adjustments ?? [], sales: cached.data.sales ?? [],
       }, await localBundle()),
-      meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps }),
+      meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }),
     };
     const device = await fromDevice();
     return device
@@ -392,18 +439,18 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
     const q = `from=${encodeURIComponent(ctx.from)}&to=${encodeURIComponent(ctx.to)}`;
     const [summary, expenses, purchases, adjustments, sales] = await Promise.all([
       request<SummaryPayload>(`/reports/summary?${q}`),
-      request<ReportExpenseRow[]>(`/reports/transactions?kind=expenses&${q}`),
-      request<ReportPurchaseRow[]>(`/reports/transactions?kind=purchases&${q}`),
-      request<ReportAdjustmentRow[]>(`/reports/transactions?kind=adjustments&${q}`),
-      request<ReportSaleRow[]>(`/reports/transactions?kind=sales&${q}`),
+      allTransactions<ReportExpenseRow>("expenses", ctx),
+      allTransactions<ReportPurchaseRow>("purchases", ctx),
+      allTransactions<ReportAdjustmentRow>("adjustments", ctx),
+      allTransactions<ReportSaleRow>("sales", ctx),
     ]);
     // Confirmed rows stay exactly as the server returned them; queued work lives in the local
     // basis. This is what keeps a pending sale from appearing in both totals at once.
     const data = withLocal({
       summary, expenses, purchases, adjustments, sales,
     }, await localBundle());
-    void writeCache(ctx, view, data);
-    return { data, meta: meta({ source: "server", pendingOps }) };
+    const savedLocally = await writeCache(ctx, view, data);
+    return { data, meta: meta({ source: "server", savedLocally, pendingOps }) };
   } catch (e) {
     const cached = await readCache<FinancialData>(ctx, view);
     if (cached) return {
@@ -412,7 +459,7 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
         expenses: cached.data.expenses ?? [], purchases: cached.data.purchases ?? [],
         adjustments: cached.data.adjustments ?? [], sales: cached.data.sales ?? [],
       }, await localBundle()),
-      meta: meta({ source: "cached", savedAt: cached.savedAt, pendingOps, ...failMeta(e) }),
+      meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }),
     };
     const device = await fromDevice();
     if (device) return { data: device, meta: meta({ source: "device", pendingOps, ...failMeta(e) }) };

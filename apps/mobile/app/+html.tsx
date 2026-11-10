@@ -23,7 +23,7 @@ export default function Root({ children }: PropsWithChildren) {
     <html lang="en"><head>
       <meta charSet="utf-8" /><meta httpEquiv="X-UA-Compatible" content="IE=edge" />
       <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
-      <link rel="manifest" href="/manifest.json" /><meta name="theme-color" content="#172B4D" />
+      <link rel="manifest" href="/manifest.json" /><meta name="theme-color" content="#0F5C4D" /><meta name="apple-mobile-web-app-title" content="Idukaa" />
       <ScrollViewStyleReset />
       <script dangerouslySetInnerHTML={{ __html: boot }} />
       <script dangerouslySetInnerHTML={{ __html: "if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js')})}" }} />

@@ -32,10 +32,14 @@ export type ReportView = "sales" | "items" | "purchases" | "expenses" | "adjustm
 /** Sync verdict of the record a row was calculated from (undefined for server rows). */
 export type RowSyncStatus = "pending" | "retry" | "synced" | "conflict" | "rejected" | "pending_approval";
 
+export interface CachedSaleLine {
+  productId: string; name: string; code: string; unit: string;
+  qty: number; unitPrice: number; lineAmount: number;
+}
 export interface ReportSaleRow {
   id: string; at: string; by: string | null; payment_method: string;
   gross_amount: number; discount: number; amount_paid: number; status: string;
-  units: number; products: string; local?: boolean; syncStatus?: RowSyncStatus;
+  units: number; products: string; lines?: CachedSaleLine[]; local?: boolean; syncStatus?: RowSyncStatus;
 }
 export interface ReportItemRow {
   productId: string; name: string; code: string; unit: string;
@@ -44,9 +48,13 @@ export interface ReportItemRow {
   units: number; gross: number; sales: number; avgUnitPrice: number;
   local?: boolean; syncStatus?: RowSyncStatus;
 }
+export interface CachedPurchaseLine {
+  productId: string; name: string; code: string; unit: string;
+  qty: number; qtyReceived?: number; unitCost: number; lineAmount: number;
+}
 export interface ReportPurchaseRow {
   id: string; at: string; supplier: string | null; reference: string | null; notes: string | null;
-  total_amount: number; amount_paid: number; balance: number;
+  total_amount: number; amount_paid: number; balance: number; lines?: CachedPurchaseLine[];
   local?: boolean; syncStatus?: RowSyncStatus;
 }
 export interface ReportExpenseRow {
@@ -149,6 +157,14 @@ export function computeLocalReport(input: LocalReportInput): LocalReportResult {
         status: "posted",
         units: lines.reduce((s, l) => s + num(l.qty), 0),
         products: lines.map((l) => nameOf(l.productId)).filter(Boolean).join(", "),
+        lines: lines.map((l) => {
+          const product = byId.get(String(l.productId));
+          return {
+            productId: String(l.productId), name: product?.name ?? String(l.productId),
+            code: product?.code ?? "—", unit: product?.unit ?? "unit",
+            qty: num(l.qty), unitPrice: num(l.unitPrice), lineAmount: lineValue(l),
+          };
+        }),
         local: r.status !== "synced", syncStatus: r.status as RowSyncStatus,
       });
     }

@@ -55,6 +55,9 @@ export function SourceCard({ meta, online, lastSync, onRefresh, pendingNote }: {
       </View>
       <Text style={{ color: c.muted, fontSize: 12 }}>{t("reports.lastSyncedAt").replace("{time}", lastSync ? new Date(lastSync).toLocaleString() : t("reports.never"))}</Text>
       {meta.source === "cached" && meta.savedAt ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("reports.staleAt").replace("{time}", new Date(meta.savedAt).toLocaleString())}</Text> : null}
+      {meta.source === "server" ? <Text testID="reports-cache-state" style={{ color: meta.savedLocally ? c.muted : c.danger, fontSize: 12 }}>
+        {t(meta.savedLocally ? "reports.savedForOffline" : "reports.cacheFailed")}
+      </Text> : null}
       {meta.source === "device" ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("reports.deviceOnly")}</Text> : null}
       {pendingNote && meta.source === "server" && meta.pendingOps > 0 ? (
         <Text style={{ color: c.muted, fontSize: 12 }}>{t("reports.pendingNotIncluded").replace("{n}", String(meta.pendingOps))}</Text>

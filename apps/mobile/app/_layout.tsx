@@ -5,6 +5,7 @@ import { StatusBar } from "expo-status-bar";
 import * as Crypto from "expo-crypto";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useSession } from "../src/services/api";
+import { usePwaInstall } from "../src/services/pwa-install";
 import { initDb, kvGet, kvSet } from "../src/database";
 import { refreshCounts, startSyncEngine, syncNow } from "../src/synchronization/engine";
 import { Banner, Button, Toaster } from "../src/components/ui";
@@ -18,6 +19,8 @@ async function initDbPlatform() {
 
 export default function Root() {
   const [ready, setReady] = useState(false);
+  // Listen from the first paint: Chrome can offer installation before Settings is ever opened.
+  useEffect(() => { usePwaInstall.getState().start(); }, []);
   const [updateReady, setUpdateReady] = useState(false);
   const token = useSession((s) => s.token);
   const c = useTheme();
