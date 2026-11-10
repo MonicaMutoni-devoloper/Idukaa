@@ -88,13 +88,13 @@ export interface Dashboard {
 
 /** Where the figures the user is looking at came from. */
 export type FigureSource = "server" | "local" | "cached";
-/** The five states the dashboard must distinguish (never claim synced for locally saved work). */
-export type FigureStatus = "synchronized" | "calculated_local" | "pending_sync" | "sync_failed" | "conflict";
+/** The states the dashboard must distinguish (never claim synced for locally saved or cached work). */
+export type FigureStatus = "synchronized" | "cached" | "calculated_local" | "pending_sync" | "sync_failed" | "conflict";
 
 export interface LocalDashboardResult {
   data: Dashboard;
   source: "local";
-  status: Exclude<FigureStatus, "synchronized">;
+  status: Exclude<FigureStatus, "synchronized" | "cached">;
   calculatedAt: string;
   /** Earliest instant this device holds a record for; null when it holds none. */
   coverageFrom: string | null;

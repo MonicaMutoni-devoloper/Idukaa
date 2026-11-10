@@ -3,14 +3,14 @@
     "name": "Idukaa",
     "slug": "shop-management",
     "scheme": "shopmgmt",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "orientation": "default",
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
     "assetBundlePatterns": ["**/*"],
     "android": {
       "package": "rw.shop.management",
-      "versionCode": 6,
+      "versionCode": 7,
       "userInterfaceStyle": "automatic",
       "icon": "./assets/icon.png",
       "adaptiveIcon": {

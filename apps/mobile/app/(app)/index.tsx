@@ -352,8 +352,9 @@ export default function Home() {
   const displayStatus: FigureStatus =
     counts && counts.conflicts > 0 ? "conflict"
     : counts && counts.failed > 0 ? "sync_failed"
-    : source === "server" ? (pendingOps > 0 || awaitingApproval > 0 ? "pending_sync" : "synchronized")
-    : counts && (counts.pending > 0 || counts.awaitingApproval > 0) ? "pending_sync"
+    : pendingOps > 0 || awaitingApproval > 0 ? "pending_sync"
+    : source === "server" ? "synchronized"
+    : source === "cached" ? "cached"
     : "calculated_local";
   const statusTone: "ok" | "warn" | "danger" =
     displayStatus === "synchronized" ? "ok" : displayStatus === "sync_failed" || displayStatus === "conflict" ? "danger" : "warn";

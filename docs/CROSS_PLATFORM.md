@@ -7,7 +7,7 @@ One Expo/React Native codebase, one backend, one sync strategy. This report stat
 
 | Target | Local store | Status | Artifact |
 |---|---|---|---|
-| **Android (native)** | `expo-sqlite` | **Built and signed — installable APK exists; 1.0.4 verified on a phone, 1.0.5 build not yet installed** | `dist/idukaa-1.0.5-android-release.apk` (48,733,668 bytes, SHA-256 `b6e5c32b9e9e47569a2e09aa065030235282c92201311858bb48ef65205cdb11`, `versionCode 6`) |
+| **Android (native)** | `expo-sqlite` | **Built, signed, installed and verified on the Infinix X657 — 1.0.6** | `dist/idukaa-1.0.6-android-release.apk` (48,768,604 bytes, SHA-256 `8eb64b7f1b28d9f0d42010d3d88ffd5fb68b933875e88d9f6e652e8fd47060c6`, `versionCode 7`) |
 | **iOS (native)** | `expo-sqlite` | Configured only — not built (needs macOS + Apple credentials) | none — see `docs/IOS_BUILD.md` |
 | **Web / PWA** | `local.web.ts` → IndexedDB | Built and deployed earlier in this project | `expo export --platform web` output with service worker (`dist/sw.js`) |
 | **Windows desktop** | IndexedDB (via the PWA) | Supported as an installable PWA | no native Windows target exists for Expo SDK 58 — see `docs/ANDROID_BUILD.md` §3 |
@@ -78,19 +78,20 @@ export IDUKAA_CXX_STAGING='C:/x'          # Windows only, see §5
 ./gradlew assembleRelease --no-daemon
 ```
 
-Result: `BUILD SUCCESSFUL in 11m 12s`, 639 tasks (120 executed), 4 ABIs bundled
-(`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`).
+Result: `BUILD SUCCESSFUL`, 615 tasks (57 executed after the synced rebuild), 2 ABIs bundled
+(`arm64-v8a`, `armeabi-v7a`). The 1.0.6 build took 36m 55s because it was rebuilt from the
+short-path workspace after syncing the current source.
 
 Verified on the produced file (`aapt2` / `apksigner` / `unzip -t`):
 
 ```
-package: name='rw.shop.management' versionCode='6' versionName='1.0.5'
+package: name='rw.shop.management' versionCode='7' versionName='1.0.6'
 compileSdkVersion='37'  sdkVersion:'24'  targetSdkVersion:'36'
 Signer #1 certificate DN: CN=Android Debug, OU=Android, O=Unknown, ...
 zip: "No errors detected in compressed data"
 ```
 
-Install: `adb install -r dist/idukaa-1.0.5-android-release.apk`, or copy the file to the phone and
+Install: `adb install -r dist/idukaa-1.0.6-android-release.apk`, or copy the file to the phone and
 open it with "install unknown apps" allowed.
 
 `npm run verify:apk -- dist/<apk>` adds two checks beyond the metadata above: every native library
@@ -128,19 +129,17 @@ prebuild:
   keystore exists yet. It installs and runs, but it must not be published: Play requires a release
   key, and updates signed with a different key are rejected. Generate one and rebuild before any
   real distribution (`eas build` handles this automatically, or `keytool` + `signingConfigs`).
-- **Physical device: 1.0.5 was not installed.** The Infinix X657 was not visible to `adb devices`
-  after the 1.0.5 build completed, so the new native PDF/print path and the split financial basis
-  have not been exercised on hardware yet. The results below remain the 1.0.4 evidence.
-- **Physical device: catalogue pull and offline persistence verified on 1.0.4; recording a sale is
-  not.** 1.0.4 was installed over 1.0.3 on the Infinix X657 that produced the original crash report
-  (`pm install -r`, `versionCode 5`, data kept) and Stock then listed all 5 server products with a
-  real `Last synced` time, down from 1 product and "Last synced: Never". With mobile data and Wi-Fi
-  off, after `force-stop` and relaunch the same 5 products still rendered from SQLite. Recording a
-  sale offline and syncing it back remains the one acceptance test outstanding on that handset: it
-  already holds a signed-in production session for a real shop and no credentials were available to
-  sign that account back in. The carrier link on that handset also drops intermittently (validated
-  cellular network, 100 % ICMP loss at times), so passes that report `network` there are the link,
-  not the app.
+- **Physical device: offline cache and reconnect verified on 1.0.6; recording a new sale and the
+  browser install prompt are not.** 1.0.6 installed over 1.0.5 with the existing session/SQLite data
+  intact (`versionCode 7`, `firstInstallTime` unchanged). With Wi-Fi and mobile data off, after
+  `force-stop` and relaunch, the downloaded current month rendered Overview (135,000 RWF / 18 sales),
+  Inventory (6 products), Stock movement (32 movements), Sales and a full sale detail from cache. On
+  reconnect the report switched to "Live from the server" and Sync showed 0 waiting / 0 needs
+  review. The phone locked before Chrome's PWA install UI could be driven, so the deployed manifest
+  and service worker were verified over HTTPS instead. Recording a new offline sale remains
+  untested on this handset because it holds a real shop's production session and no credentials were
+  available to sign back in; that flow is covered by the web/API tests. The carrier link also drops
+  intermittently, so a `network` code there can be the link rather than the app.
 - **The release APK must point at the deployed API.** `apps/mobile/.env` holds
   `EXPO_PUBLIC_API_URL=http://localhost:3000` for local development; a release built with it signs in
   on a laptop but can never reach the server from a phone (empty catalogue, nothing syncing).

@@ -270,6 +270,7 @@ export const rw: Record<Key, string> = {
   "dash.staleBanner": "Twerekana imibare ya nyuma yabitswe kuko seriveri itabonetse.",
   "dash.figureStatus": "Aho imibare iva",
   "dash.status.synchronized": "Byahujwe na seriveri",
+  "dash.status.cached": "Kopi yabitswe ya seriveri",
   "dash.status.calculated_local": "Byabalijwe kuri iyi telefoni",
   "dash.status.pending_sync": "Bitegereje guhuza",
   "dash.status.sync_failed": "Guhuza byanze",

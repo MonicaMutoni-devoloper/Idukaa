@@ -264,6 +264,7 @@ export const en = {
   "dash.staleBanner": "Showing the last saved figures because the server could not be reached.",
   "dash.figureStatus": "Where these figures come from",
   "dash.status.synchronized": "Synchronized with the server",
+  "dash.status.cached": "Saved copy from the server",
   "dash.status.calculated_local": "Calculated locally",
   "dash.status.pending_sync": "Pending synchronization",
   "dash.status.sync_failed": "Synchronization failed",

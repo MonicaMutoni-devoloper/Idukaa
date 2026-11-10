@@ -9,6 +9,7 @@ import { storageBackend } from "../../src/database/local";
 import { useLang, useT, type Key } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
 import { syncNow, useSync } from "../../src/synchronization/engine";
+import { installedApp } from "../../src/services/updates";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
 interface Me { id: string; email: string; name: string; role: "owner" | "manager" | "system_admin"; shopId: string | null; shopName: string | null }
@@ -23,6 +24,7 @@ export default function Settings() {
   const lastSync = useSync((s) => s.lastSync); const online = useSync((s) => s.online); const running = useSync((s) => s.running);
   const [confirm, setConfirm] = useState(false); const [busy, setBusy] = useState(false);
   const storage = storageBackend();
+  const appVersion = installedApp().version;
 
   // Account + shop: read from the server so the email and shop name are the real ones.
   const [me, setMe] = useState<Me | null>(null);
@@ -278,7 +280,7 @@ export default function Settings() {
           <Text style={{ color: c.muted, fontSize: 12 }}>{t("settings.signOutHelp")}</Text>
         </View>
         <Button testID="settings-signout" kind="secondary" label={t("common.signOut")} onPress={() => setConfirm(true)} />
-        <Text style={{ color: c.muted, fontSize: 11 }}>v1.0.0</Text>
+        <Text style={{ color: c.muted, fontSize: 11 }}>{`v${appVersion}`}</Text>
       </Card>
 
       <ConfirmDialog open={confirm} title={t("settings.signOutTitle")} message={pending ? t("settings.signOutPending").replace("{n}", String(pending)) : t("settings.signOutHelp")}
