@@ -228,7 +228,7 @@ Tested on the phone that produced the crash report: **Infinix X657 (Infinix Smar
 | Sale detail with every API request failing | **passed** — receipt `RC-84B1C394`, cashier, date, 4 × Inyange @ 1,200 RWF, paid and 300 RWF balance all rendered from cache |
 | Manager without financial access | **passed** — Financial report refused with the permission message; no financial cache was claimed |
 | Reconnect after offline reads | **passed** — report silently changed to **Live from the server** at 16:14:17; Sync showed 0 waiting, 0 needs review, no duplicates |
-| PWA install UI on this phone's Chrome | **not run** — the handset locked while Chrome was opening and the PIN was not available. Deployed manifest and service worker were verified over HTTPS instead |
+| PWA install UI on this phone's Chrome | **passed** — installed from Chrome's menu (**Add to Home screen → Install**); the installed PWA opened standalone and cold-started with airplane mode on, showing **Offline — showing the last saved figures** with the saved server copy |
 | Native PDF/print on 1.0.5/1.0.6 | **not run** |
 
 **Outbox left untouched.** The Sync screen reported **0 waiting / 0 needs review** before and after the

@@ -8,8 +8,9 @@ import { space, useTheme } from "../theme/tokens";
 /**
  * Installation entry for the web/PWA build. It is deliberately placed in Settings rather than
  * shown as a repeated interstitial: a cashier must never be interrupted mid-sale by a prompt.
- * When Chrome offers its native install event the button triggers it; otherwise the same card
- * explains the real browser menu path, so there is never a button that silently does nothing.
+ * The install action is always visible. When Chrome offers its native install event the button
+ * triggers it; otherwise the same button opens the real browser menu steps, so there is never a
+ * button that silently does nothing or an install path the user cannot find.
  */
 export function PwaInstallCard() {
   const t = useT(); const c = useTheme();
@@ -39,12 +40,10 @@ export function PwaInstallCard() {
               <Text style={{ color: c.muted, fontSize: 12 }}>{t("pwa.cancelled")}</Text>
             ) : null}
             <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("pwa.firstDownload")}</Text>
-            <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
-              {available ? (
-                <Button testID="pwa-install" label={busy ? t("pwa.installing") : t("pwa.install")} loading={busy}
-                  onPress={() => void promptInstall()} />
-              ) : null}
-              <Button testID="pwa-install-help" kind={available ? "secondary" : "primary"} label={t("pwa.help")}
+            <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap", alignItems: "center" }}>
+              <Button testID="pwa-install" label={busy ? t("pwa.installing") : t("pwa.install")} loading={busy}
+                onPress={() => { if (available) void promptInstall(); else setHelp(true); }} />
+              <Button testID="pwa-install-help" kind="quiet" label={t("pwa.help")}
                 onPress={() => setHelp(true)} />
             </View>
             {!available ? <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("pwa.unavailable")}</Text> : null}

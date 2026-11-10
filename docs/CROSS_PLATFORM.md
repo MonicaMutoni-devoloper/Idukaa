@@ -9,7 +9,7 @@ One Expo/React Native codebase, one backend, one sync strategy. This report stat
 |---|---|---|---|
 | **Android (native)** | `expo-sqlite` | **Built, signed, installed and verified on the Infinix X657 — 1.0.6** | `dist/idukaa-1.0.6-android-release.apk` (48,768,604 bytes, SHA-256 `8eb64b7f1b28d9f0d42010d3d88ffd5fb68b933875e88d9f6e652e8fd47060c6`, `versionCode 7`) |
 | **iOS (native)** | `expo-sqlite` | Configured only — not built (needs macOS + Apple credentials) | none — see `docs/IOS_BUILD.md` |
-| **Web / PWA** | `local.web.ts` → IndexedDB | Built and deployed earlier in this project | `expo export --platform web` output with service worker (`dist/sw.js`) |
+| **Web / PWA** | `local.web.ts` → IndexedDB | **Installed in Chrome and cold-started offline on the Infinix X657** | `expo export --platform web` output with service worker (`dist/sw.js`) |
 | **Windows desktop** | IndexedDB (via the PWA) | Supported as an installable PWA | no native Windows target exists for Expo SDK 58 — see `docs/ANDROID_BUILD.md` §3 |
 
 ## 2. What is shared (nothing was rebuilt or duplicated)
@@ -129,17 +129,18 @@ prebuild:
   keystore exists yet. It installs and runs, but it must not be published: Play requires a release
   key, and updates signed with a different key are rejected. Generate one and rebuild before any
   real distribution (`eas build` handles this automatically, or `keytool` + `signingConfigs`).
-- **Physical device: offline cache and reconnect verified on 1.0.6; recording a new sale and the
-  browser install prompt are not.** 1.0.6 installed over 1.0.5 with the existing session/SQLite data
-  intact (`versionCode 7`, `firstInstallTime` unchanged). With Wi-Fi and mobile data off, after
-  `force-stop` and relaunch, the downloaded current month rendered Overview (135,000 RWF / 18 sales),
-  Inventory (6 products), Stock movement (32 movements), Sales and a full sale detail from cache. On
-  reconnect the report switched to "Live from the server" and Sync showed 0 waiting / 0 needs
-  review. The phone locked before Chrome's PWA install UI could be driven, so the deployed manifest
-  and service worker were verified over HTTPS instead. Recording a new offline sale remains
-  untested on this handset because it holds a real shop's production session and no credentials were
-  available to sign back in; that flow is covered by the web/API tests. The carrier link also drops
-  intermittently, so a `network` code there can be the link rather than the app.
+- **Physical device: offline cache, reconnect and installed PWA verified on 1.0.6; recording a new
+  sale is not.** 1.0.6 installed over 1.0.5 with the existing session/SQLite data intact
+  (`versionCode 7`, `firstInstallTime` unchanged). With Wi-Fi and mobile data off, after `force-stop`
+  and relaunch, the downloaded current month rendered Overview (135,000 RWF / 18 sales), Inventory
+  (6 products), Stock movement (32 movements), Sales and a full sale detail from cache. On reconnect
+  the report switched to "Live from the server" and Sync showed 0 waiting / 0 needs review. The
+  installed PWA also cold-started in standalone mode with airplane mode on and showed
+  "Offline — showing the last saved figures" with the saved 10 Nov 17:23 copy. Recording a new
+  offline sale remains untested on this handset because it holds a real shop's production session
+  and no credentials were available to sign back in; that flow is covered by the web/API tests. The
+  carrier link also drops intermittently, so a `network` code there can be the link rather than the
+  app.
 - **The release APK must point at the deployed API.** `apps/mobile/.env` holds
   `EXPO_PUBLIC_API_URL=http://localhost:3000` for local development; a release built with it signs in
   on a laptop but can never reach the server from a phone (empty catalogue, nothing syncing).
