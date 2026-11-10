@@ -119,4 +119,10 @@ export type OperationT = z.infer<typeof Operation>;
 export const PushRequest = z.object({ operations: z.array(Operation).min(1).max(100) });
 export type OpStatus = "applied" | "duplicate" | "conflict" | "rejected" | "pending_approval";
 export interface OpResult { opId: string; status: OpStatus; message?: string; serverRef?: string }
-export interface PullResponse { checkpoint: string; changes: { entity: string; id: string; data: unknown; deleted?: boolean }[]; hasMore: boolean }
+export interface PullResponse {
+  checkpoint: string;
+  changes: { entity: string; id: string; data: unknown; deleted?: boolean }[];
+  hasMore: boolean;
+  /** Monotonic per-shop marker for dashboard-visible data; absent from older API builds. */
+  revision?: string;
+}

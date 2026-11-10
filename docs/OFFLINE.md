@@ -1,5 +1,5 @@
 # Offline & synchronization
-Flow: validate locally → one SQLite transaction (outbox row + optimistic delta) → UI shows "saved on device / waiting to sync" → engine pushes when online (NetInfo, app foreground, every 30 s without a live socket, every 5 minutes as a safety poll with one, manual) → server verdict stored per op → pull changes → any open dashboard/report recalculates in place.
+Flow: validate locally → one SQLite transaction (outbox row + optimistic delta) → UI shows "saved on device / waiting to sync" → engine pushes when online (NetInfo, app foreground, every 30 s without a live socket, every 5 minutes as a safety poll with one, manual) → server verdict stored per op → pull changes → the dashboard reconciles only when the pull's business revision changes; a no-op pull does not reload it.
 
 | Situation | Behaviour |
 |---|---|
@@ -13,6 +13,9 @@ Flow: validate locally → one SQLite transaction (outbox row + optimistic delta
 | Rejected / conflicting operation | Kept on the device for review, but excluded from local revenue, cost, stock and report rows; it is shown in the Sync screen with its server message |
 | Account or shop switch | The catalogue and checkpoints are reset for the new shop. `records` and `outbox` are **not deleted**: each row carries `shop_id`, so another shop can never read or sync it and the original account recovers it on sign-in |
 | Realtime socket outlives its access token | The server closes it (`4001 token_expired`); the client rotates the refresh token and reconnects. If rotation fails, normal jittered backoff applies |
+| Successful pull with no business change | Sync counters and `lastSync` update, but the dashboard/report figures are not invalidated and no dashboard request is made |
+| Irrelevant realtime event (e.g. a supplier edit) | It wakes the sync engine; the pull's business revision is unchanged, so no dashboard request or loading state follows |
+| Burst of relevant realtime events | Coalesced into at most one additional sync pass; the dashboard reconciles once, after sync is idle |
 | Logout | Never deletes the outbox |
 
 ## Reports
@@ -44,6 +47,13 @@ Reports read this device first and the API second.
   adjustment cost, stock-loss cost and void state (all server-side).
 - Tests: `apps/mobile/tests/local-reports.test.mts` (`npm run test:reports -w @sms/mobile`).
 
+## Dashboard
+- `/sync/pull` also returns a per-shop business revision (the latest dashboard-visible audit row), so an expense or approval recorded by another device is detected even though the incremental `changes` array only carries products and suppliers. The client compares it; it never interprets it.
+- The dashboard cache is `dashboard:v3:<shop>:<user>:<role>:<from>:<to>`. The role is part of the key, so a demoted/promoted account cannot reuse another permission scope.
+- A saved copy is reused without a request only when its payload version is current and its saved revision equals the shop's last successful business revision. A new revision, saved local work or an account/shop/role change revalidates.
+- Local records recalculate in place on every local save/verdict. A background server reconciliation never clears the visible payload, never shows a full-page skeleton, and a failed request keeps the last figures with a subtle refresh warning.
+- Access-token rotation is authentication only and is not a dashboard dependency; it cannot trigger a loading cycle.
+
 ## PC / PWA
 - Service worker caches only the app shell. Business data lives in the local database, never in the HTTP cache. API calls are never cached.
 - **Web storage is IndexedDB** (`sms-local`), not SQLite. The web build has no SQLite backend, so `src/database/local.web.ts` implements the same interface over IndexedDB. One record holds the whole local state, so an outbox row and its optimistic stock delta are committed together.
@@ -55,4 +65,4 @@ Reports read this device first and the API second.
 - IndexedDB quotas are browser-managed and much larger than localStorage; the single-record design is intended for a shop-sized catalogue, not tens of thousands of products.
 
 ## Checkpoints
-`/sync/pull` returns an opaque cursor per entity (`updated_at,id`), page size 200, `hasMore` loops until caught up.
+`/sync/pull` returns an opaque cursor per entity (`updated_at,id`), page size 200, `hasMore` loops until caught up, and a monotonic `revision` used only for dashboard invalidation.

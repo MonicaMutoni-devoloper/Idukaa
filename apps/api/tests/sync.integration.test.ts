@@ -40,6 +40,25 @@ before(async () => {
 after(async () => { if (!skip) { await db.onModuleDestroy(); await pool.end(); } });
 const onHand = async () => Number((await pool.query("SELECT COALESCE(SUM(qty),0) q FROM stock_movements WHERE product_id=$1", [pid])).rows[0].q);
 
+test("the pull business revision ignores irrelevant events and changes with dashboard data", { skip }, async () => {
+  const id = uuid(), code = `REV-${id.slice(0, 8)}`;
+  const create = op("product.upsert", { productId: id, code, name: "Revision product", unit: "pcs", sellingPrice: 1000, lowStockThreshold: 0 });
+  assert.equal((await svc.push(mgr, "d", [create]))[0].status, "applied");
+  const before = (await svc.pull(mgr)).revision;
+  assert.equal(typeof before, "string", "the API reports a business revision");
+
+  // Authentication noise and supplier-only edits cannot invalidate dashboard figures.
+  await pool.query("INSERT INTO audit_log(shop_id,action,entity) VALUES ($1,'auth.login','user')", [shopA]);
+  assert.equal((await svc.push(mgr, "d", [op("supplier.upsert", { supplierId: uuid(), name: "Revision supplier" })]))[0].status, "applied");
+  assert.equal((await svc.pull(mgr)).revision, before, "irrelevant events do not move the dashboard revision");
+
+  // A product price edit is dashboard-visible, even though the incremental changes array would not
+  // have carried any sale/expense row.
+  const edit = op("product.upsert", { productId: id, code, name: "Revision product", unit: "pcs", sellingPrice: 1100, lowStockThreshold: 0 });
+  assert.equal((await svc.push(mgr, "d", [edit]))[0].status, "applied");
+  assert.notEqual((await svc.pull(mgr)).revision, before, "a business change moves the revision exactly once");
+});
+
 test("sale reduces stock via ledger and is idempotent on replay", { skip }, async () => {
   const saleOp = op("sale.create", { saleId: uuid(), soldAt: now(), discount: 0, amountPaid: 3000, lines: [{ productId: pid, qty: 2000, unitPrice: 1500 }] });
   const before = await onHand();

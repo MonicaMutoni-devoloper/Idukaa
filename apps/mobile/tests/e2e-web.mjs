@@ -39,6 +39,7 @@ const chrome = spawn(CHROME, [
 let ws;
 const pendingCalls = new Map();
 const consoleErrors = [];
+const dashboardRequests = [];
 let seq = 0;
 
 async function pageTarget() {
@@ -247,6 +248,10 @@ try {
     } else if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error") {
       const text = m.params.args.map((a) => a.value ?? a.description ?? "").join(" ");
       if (!/Failed to load resource|net::ERR|NetworkError/i.test(text)) consoleErrors.push(text);
+    } else if (m.method === "Network.requestWillBeSent") {
+      const { url, method } = m.params.request;
+      // The cross-origin Authorization header adds an OPTIONS preflight; count the real GET only.
+      if (method === "GET" && /\/reports\/dashboard\?/.test(url)) dashboardRequests.push({ url, at: Date.now() });
     }
   };
   await send("Runtime.enable"); await send("Page.enable"); await send("Network.enable");
@@ -341,6 +346,7 @@ try {
     await clickTest("nav-reports");
     await waitText("From this device's records", 20000);
     await clickTest("report-open-sales");
+    await waitTest("segment-product", 15000);
     await clickTest("segment-product");
     await waitText(PRODUCT, 15000);
     const offlineReport = await evaluate("document.body.innerText");
@@ -491,6 +497,86 @@ try {
     await waitText("Financial reports need profit access", 15000);
     const locked = await evaluate("document.body.innerText");
     assert.ok(!locked.includes("Net sales"), "no revenue or profit figure leaks into the locked view");
+  });
+
+  await step("dashboard: background sync and realtime do not reload unchanged figures", async () => {
+    await clickTest("nav-home");
+    await waitTest("kpi-netSales", 20000);
+    await sleep(1500); // let the return-to-dashboard reconciliation settle before counting
+    dashboardRequests.length = 0;
+    const before = await evaluate(`${q("kpi-netSales")}.innerText`);
+    assert.equal(await evaluate(`!!${q("dash-loading")}`), false, "returning shows cached content, not a skeleton");
+
+    // A supplier-only change wakes the sync engine but cannot affect dashboard figures. It must not
+    // spend a dashboard request or replace the visible payload.
+    const tk = await token();
+    const push = async (operations) => {
+      const r = await fetch(`${API}/sync/push`, { method: "POST", headers: { Authorization: `Bearer ${tk}`, "Content-Type": "application/json" }, body: JSON.stringify({ operations }) });
+      return r.json();
+    };
+    const readLastSync = () => evaluate(`new Promise((resolve,reject)=>{const r=indexedDB.open('sms-local');r.onerror=()=>reject('idb');r.onsuccess=()=>{const db=r.result;const g=db.transaction('state','readonly').objectStore('state').get('state');g.onsuccess=()=>resolve(g.result?.kv?.last_sync ?? null);};})`);
+    const syncBefore = await readLastSync();
+    const supplier = await push([{ opId: uuid(), deviceId: "e2e-dashboard", createdAt: new Date().toISOString(), type: "supplier.upsert",
+      payload: { supplierId: uuid(), name: `Dashboard noise ${Date.now().toString(36)}` } }]);
+    assert.equal(supplier.results[0].status, "applied");
+    const syncEnd = Date.now() + 15000;
+    while (Date.now() < syncEnd && (await readLastSync()) === syncBefore) await sleep(250);
+    assert.notEqual(await readLastSync(), syncBefore, "the irrelevant event still completed a sync pull");
+    assert.equal(dashboardRequests.length, 0, "an irrelevant realtime event makes no dashboard request");
+    assert.equal(await evaluate(`${q("kpi-netSales")}.innerText`), before, "its figures stay untouched");
+    assert.equal(await evaluate(`!!${q("dash-loading")}`), false, "no loading state for an irrelevant event");
+
+    // Two real business changes arrive back-to-back. They may share one sync pass and must coalesce
+    // into a single background dashboard refresh, never a flash of the loading skeleton.
+    const p = await serverProduct(PRODUCT);
+    const eventStart = Date.now();
+    const sale = () => ({ opId: uuid(), deviceId: "e2e-dashboard", createdAt: new Date().toISOString(), type: "sale.create",
+      payload: { saleId: uuid(), soldAt: new Date().toISOString(), discount: 0, amountPaid: Number(p.sellingPrice), paymentMethod: "cash",
+        lines: [{ productId: p.id, qty: 1000, unitPrice: Number(p.sellingPrice) }] } });
+    const [r1, r2] = await Promise.all([push([sale()]), push([sale()])]);
+    assert.equal(r1.results[0].status, "applied");
+    assert.equal(r2.results[0].status, "applied");
+    await waitFor(`${q("kpi-netSales")}.innerText !== ${JSON.stringify(before)}`, "reconciled net sales", 20000);
+    await sleep(1200);
+    console.log(`  dashboard requests after burst: ${dashboardRequests.map((r) => r.at - eventStart).join(", ")}ms`);
+    assert.equal(dashboardRequests.length, 1, `two realtime events coalesced into one refresh, got ${dashboardRequests.length}`);
+    assert.equal(await evaluate(`!!${q("dash-loading")}`), false, "the dashboard stays visible while it reconciles");
+    const afterSales = await evaluate(`${q("kpi-netSales")}.innerText`);
+    assert.notEqual(afterSales, before, "the affected KPI updated");
+
+    // Leaving and returning reuses the validated cache; no request and no full loading state.
+    dashboardRequests.length = 0;
+    await clickTest("nav-stock");
+    await waitTest("stock-search", 15000);
+    await clickTest("nav-home");
+    await waitTest("kpi-netSales", 15000);
+    await sleep(1000);
+    assert.equal(dashboardRequests.length, 0, "returning to a cached dashboard makes no request");
+    assert.equal(await evaluate(`${q("kpi-netSales")}.innerText`), afterSales, "the cached figures render immediately");
+
+    // A failed background refresh keeps the old figures on screen and names the failure subtly.
+    await send("Network.setBlockedURLs", { urls: [`${API}/reports/dashboard*`] });
+    const failSale = await push([sale()]);
+    assert.equal(failSale.results[0].status, "applied");
+    await waitText("Could not refresh", 15000);
+    assert.equal(await evaluate(`${q("kpi-netSales")}.innerText`), afterSales, "a failed refresh never erases loaded data");
+    assert.equal(await evaluate(`!!${q("dash-loading")}`), false, "a failed refresh does not blank the dashboard");
+    await send("Network.setBlockedURLs", { urls: [] });
+
+    // The revision advanced while that request was blocked, so a scope change retries and catches up.
+    await clickTest("segment-week");
+    await waitFor(`${q("kpi-netSales")}.innerText !== ${JSON.stringify(afterSales)}`, "catching up after the failed refresh", 20000);
+    await clickTest("segment-today");
+    await waitTest("kpi-netSales", 15000);
+    await waitFor(`${q("kpi-netSales")}.innerText !== ${JSON.stringify(afterSales)}`, "today catches up after reconnect", 20000);
+
+    // Offline restart: the validated copy is shown without a skeleton or a blank dashboard.
+    await send("Network.setBlockedURLs", { urls: [`${API}/*`] });
+    await send("Page.reload");
+    await waitTest("kpi-netSales", 25000);
+    assert.equal(await evaluate(`!!${q("dash-loading")}`), false, "offline restart renders cached figures");
+    assert.ok(await evaluate(`document.body.innerText.includes("Net sales")`), "financial labels remain visible offline");
+    await send("Network.setBlockedURLs", { urls: [] });
   });
 
   await step("settings: profile, security and password visibility", async () => {
@@ -866,6 +952,10 @@ try {
     const me = await api("/auth/me", await token());
     assert.equal(me.body.role, "owner", "the applicant became the owner");
     assert.equal(me.body.shopName, REG_SHOP, "the owner's session carries their own shop");
+    await waitTest("kpi-netSales", 20000);
+    const newOwnerDash = await evaluate("document.body.innerText");
+    assert.ok(!newOwnerDash.includes(PRODUCT), "the new shop never renders the demo shop's dashboard rows");
+    assert.ok(!newOwnerDash.includes("Ballpoint Pen"), "another shop's catalogue is absent from the dashboard");
 
     // The rejected applicant sees the rejection message and no session.
     await logout();

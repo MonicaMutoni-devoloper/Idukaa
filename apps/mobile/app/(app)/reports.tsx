@@ -65,6 +65,7 @@ export default function Reports() {
   const online = useSync((s) => s.online);
   const lastSync = useSync((s) => s.lastSync);
   const recordsVersion = useSync((s) => s.recordsVersion);
+  const businessVersion = useSync((s) => s.businessVersion);
   const shopId = user?.shopId ?? null;
   const params = useLocalSearchParams<{ kind?: string; from?: string; to?: string }>();
 
@@ -166,7 +167,7 @@ export default function Reports() {
       }
       if (live()) setLoading(false);
     })();
-  }, [category, from, to, online, shopId, financialsAllowed, recordsVersion]);
+  }, [category, from, to, online, shopId, financialsAllowed, recordsVersion, businessVersion]);
   useEffect(() => { load(); }, [load, token, reload]);
 
   const open = (next: ReportCategory) => {

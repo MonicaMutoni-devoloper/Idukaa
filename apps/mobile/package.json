@@ -10,7 +10,7 @@
     "web": "expo start --web",
     "build:web": "node scripts/check-api-url.mjs && expo export --platform web",
     "test:i18n": "node --test tests/i18n.test.mts",
-    "test:dashboard": "node --test tests/local-dashboard.test.mts",
+    "test:dashboard": "node --test tests/local-dashboard.test.mts tests/dashboard-cache.test.mts",
     "test:reports": "node --test tests/local-reports.test.mts tests/report-analytics.test.mts tests/report-format.test.mts",
     "test:realtime": "node --test tests/realtime.test.mts",
     "test:policy": "node --test tests/session-policy.test.mts",

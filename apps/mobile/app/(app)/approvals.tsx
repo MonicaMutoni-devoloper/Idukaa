@@ -15,6 +15,7 @@ export default function Approvals() {
   // A manager's adjustment/receipt can arrive while the owner is already looking at this screen.
   // The realtime nudge runs a pull, whose revision bump reloads the pending decisions in place.
   const recordsVersion = useSync((s) => s.recordsVersion);
+  const businessVersion = useSync((s) => s.businessVersion);
   const [tab, setTab] = useState<Tab>("adjustments");
   const [adj, setAdj] = useState<any[]>([]); const [inv, setInv] = useState<any[]>([]); const [conf, setConf] = useState<any[]>([]); const [log, setLog] = useState<any[]>([]);
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -28,7 +29,7 @@ export default function Approvals() {
     } catch { setFailed(true); }
     finally { setLoading(false); }
   }, []);
-  useEffect(() => { if (user.role === "owner") void load(); else setLoading(false); }, [load, user.role, recordsVersion]);
+  useEffect(() => { if (user.role === "owner") void load(); else setLoading(false); }, [load, user.role, recordsVersion, businessVersion]);
 
   const noteFor = (id: string) => {
     const n = (notes[id] ?? "").trim();

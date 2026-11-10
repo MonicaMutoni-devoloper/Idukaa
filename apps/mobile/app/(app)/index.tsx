@@ -9,6 +9,7 @@ import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
 import { ApiError, request, sessionRejected, useSession } from "../../src/services/api";
 import { degradedList, sectionKey, sectionLabel } from "../../src/services/report-sections";
+import { businessRevisionKey, dashboardCacheIsCurrent, dashboardCacheKey, dashboardScope } from "../../src/services/dashboard-cache";
 import { buildLocalDashboard } from "../../src/services/local-dashboard-data";
 import type { Dashboard as DashboardPayload, FigureSource, FigureStatus, LocalDashboardResult } from "../../src/services/local-dashboard";
 import { addDaysToDay, customRange, presetRange, todayDay, type Preset } from "../../src/services/util";
@@ -134,12 +135,13 @@ export default function Home() {
   const wide = useWide();
   const router = useRouter();
   const user = useSession((s) => s.user);
-  // Re-load when a fresh sign-in replaces an expired session (the effect below depends on it).
-  const token = useSession((s) => s.token);
   const online = useSync((s) => s.online);
   const lastSync = useSync((s) => s.lastSync);
-  // Bumped when a record is saved or its sync verdict changes — the only recalculation trigger.
+  // Local records/verdicts: recalculate the local figures, never reload the whole dashboard.
   const recordsVersion = useSync((s) => s.recordsVersion);
+  // A successful pull saw a new business revision: quietly reconcile the server figures.
+  const businessVersion = useSync((s) => s.businessVersion);
+  const syncing = useSync((s) => s.running);
   const pendingOps = useSync((s) => s.pending);
   const awaitingApproval = useSync((s) => s.awaitingApproval);
   const isOwner = user?.role === "owner";
@@ -159,68 +161,172 @@ export default function Home() {
   // Where the numbers on screen came from, and the local record counts behind them.
   const [source, setSource] = useState<FigureSource | null>(null);
   const [localInfo, setLocalInfo] = useState<LocalDashboardResult | null>(null);
-  // Every load takes a sequence number: a response for a range the user has already changed is
+  // Every request takes a sequence number: a response for a scope the user has already changed is
   // discarded instead of overwriting newer figures (the old duplicate-request/render-loop bug).
   const loadSeq = useRef(0);
+  const localSeq = useRef(0);
+  const sourceRef = useRef<FigureSource | null>(null);
+  const dataRef = useRef<Dashboard | null>(null);
+  const inFlight = useRef<{ key: string; version: number; promise: Promise<Dashboard> } | null>(null);
+  const seenRecords = useRef(recordsVersion);
+  const seenBusiness = useRef(businessVersion);
+  const businessDirty = useRef(false);
 
   const range = useMemo(() => (period === "custom" ? appliedCustom : presetRange(period)), [period, appliedCustom]);
+  const scope = dashboardScope(user);
+  const cacheKey = useMemo(
+    () => dashboardCacheKey(user, range?.from ?? "none", range?.to ?? "none"),
+    [user?.shopId, user?.id, user?.role, range?.from, range?.to],
+  );
+  const revisionKey = businessRevisionKey(user?.shopId);
 
-  const load = useCallback(async () => {
-    if (!range) return;
-    const seq = ++loadSeq.current;
-    setLoading(true); setFailed(false); setAuthIssue(false);
-    // Per shop AND per user: a cached dashboard can carry cost/profit and must never be reused
-    // after switching shop or after a manager signs in on the owner's browser.
-    const key = `dashboard:v2:${user?.shopId ?? "none"}:${user?.id ?? "none"}:${range.from}:${range.to}`;
+  const showData = useCallback((next: Dashboard | null, from: FigureSource | null, savedAt: string | null) => {
+    dataRef.current = next;
+    sourceRef.current = from;
+    setData(next); setSource(from); setStaleAt(savedAt);
+  }, []);
 
-    // 1. Local figures first. They come from this device's own records, so they exist in
-    //    milliseconds and do not depend on the network at all.
-    let local: LocalDashboardResult | null = null;
+  /** Recalculate only this device's figures. No request, no loading state, no remount. */
+  const refreshLocal = useCallback(async () => {
+    if (!range || !user?.id) return;
+    const seq = ++localSeq.current;
     try {
       // A manager only sees cost and profit when the owner granted it — remembered from the last
       // server answer so the local view does not invent a permission it cannot verify offline.
-      const granted = user?.role === "owner" ? true : (await kvGet(`dash.perms:${user?.id ?? "none"}`).catch(() => null)) === "1";
-      local = await buildLocalDashboard({ from: range.from, to: range.to, role: user?.role ?? "manager", financials: granted });
-      if (seq !== loadSeq.current) return;
+      const granted = user.role === "owner" ? true : (await kvGet(`dash.perms:${user.id}`).catch(() => null)) === "1";
+      const local = await buildLocalDashboard({ from: range.from, to: range.to, role: user.role, financials: granted });
+      if (seq !== localSeq.current) return;
       setLocalInfo(local);
       // Adopt local figures only when this device holds a record INSIDE the range. A fresh install,
       // or a period whose history lives only on the server, must never replace good figures with
       // zeros just because the local ledger happens to be empty for that period.
       if (localInRange(local, range.to)) {
-        setData(local.data); setSource("local"); setStaleAt(null);
+        const hasUnconfirmed = local.counts.pending > 0 || local.counts.awaitingApproval > 0 || local.counts.failed > 0;
+        // A server response and a revision-validated saved copy are both authoritative snapshots.
+        // Keep them on screen unless this device has work the server cannot have counted yet; a
+        // verdict change alone must not swap the whole dashboard back to device-only records.
+        const trustedSnapshot = sourceRef.current === "server" || sourceRef.current === "cached";
+        if (!trustedSnapshot || hasUnconfirmed) {
+          showData(local.data, "local", null);
+          setLoading(false);
+        }
       }
     } catch { /* local calculation failed: keep what is on screen, never blank it */ }
+  }, [range, user?.id, user?.role, showData]);
 
-    // 2. Reconcile with the server when it answers. Server figures are authoritative, but they are
-    //    only *claimed* to be synchronized while nothing is still queued (see `displayStatus`).
+  /** Reconcile the server figures in the background, keeping whatever is already visible. */
+  const fetchServer = useCallback(async () => {
+    if (!range) return;
+    const seq = ++loadSeq.current;
+    const versionAtStart = useSync.getState().businessVersion;
+    // Deduplicate by scope, not by version: two coalesced sync passes can publish the same final
+    // revision moments apart, and both must share one HTTP request.
+    let promise = inFlight.current?.key === cacheKey ? inFlight.current.promise : null;
+    if (!promise) {
+      promise = request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { auth: true });
+      inFlight.current = { key: cacheKey, version: versionAtStart, promise };
+    }
+    if (!dataRef.current) setLoading(true);
     try {
-      const res = await request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { auth: true });
-      if (seq !== loadSeq.current) return;
-      setData(res); setSource("server"); setFailed(false); setStaleAt(null);
-      void kvSet(key, JSON.stringify({ savedAt: new Date().toISOString(), data: res })).catch(() => {});
+      const revisionBefore = await kvGet(revisionKey).catch(() => null);
+      const res = await promise;
+      if (seq !== loadSeq.current || dashboardScope(useSession.getState().user) !== scope) return;
+      showData(res, "server", null); setFailed(false); setAuthIssue(false);
+      // The revision is recorded with the payload: a remount can reuse it only while the last pull
+      // still reports the same business state.
+      void kvSet(cacheKey, JSON.stringify({ version: 3, savedAt: new Date().toISOString(), data: res, revision: revisionBefore })).catch(() => {});
       void kvSet(`dash.perms:${user?.id ?? "none"}`, res.permissions?.financials ? "1" : "0").catch(() => {});
     } catch (e) {
       if (seq !== loadSeq.current) return;
       // A 401 means "sign in again" only when the refresh credential was actually rejected. A token
       // that is merely absent (offline start) or whose refresh is backing off is not an expired
       // session — saying so is what turned a network hiccup into a fake logout.
-      const rejected = e instanceof ApiError && e.status === 401 && sessionRejected();
-      setAuthIssue(rejected);
+      setAuthIssue(e instanceof ApiError && e.status === 401 && sessionRejected());
       setFailed(true);
-      if (!local || !localInRange(local, range.to)) {
+      // Never erase figures already shown. If this was the first attempt, the saved copy is the
+      // last valid one; otherwise the previous response simply stays on screen.
+      if (!dataRef.current) {
         try {
-          const raw = await kvGet(key);
-          if (raw) { const cached = JSON.parse(raw); if (cached?.data) { setData(cached.data); setSource("cached"); setStaleAt(cached.savedAt ?? null); } }
+          const raw = await kvGet(cacheKey);
+          const cached = raw ? JSON.parse(raw) : null;
+          if (cached?.data) showData(cached.data, "cached", cached.savedAt ?? null);
         } catch { /* leave the previous data in place */ }
       }
     } finally {
+      if (inFlight.current?.promise === promise) {
+        inFlight.current = null;
+        // A real change landed while this request was in flight. Reconcile once more; the shared
+        // request above only covers the identical-revision burst case.
+        if (useSync.getState().businessVersion !== versionAtStart) {
+          setTimeout(() => { void fetchServer(); }, 100);
+        }
+      }
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [range, user?.role, user?.id, user?.shopId]);
+  }, [range, cacheKey, revisionKey, scope, businessVersion, user?.id, showData]);
 
-  // Recalculate when the range changes, when a record is saved or its verdict changes, or when a
-  // new session replaces an expired one. Not on a timer, and never twice for the same change.
-  useEffect(() => { void load(); }, [load, recordsVersion, token]);
+  /**
+   * A scope change (range, account, shop or role) is the only time old figures are cleared. The
+   * cached copy is shown before any network work, so a return visit never flashes a skeleton.
+   */
+  const load = useCallback(async (force = false) => {
+    if (!range) return;
+    const seq = ++loadSeq.current;
+    setFailed(false); setAuthIssue(false);
+    let cached: any = null;
+    try {
+      const raw = await kvGet(cacheKey);
+      cached = raw ? JSON.parse(raw) : null;
+      if (cached?.data && seq === loadSeq.current) {
+        showData(cached.data, "cached", cached.savedAt ?? null);
+        setLoading(false);
+      }
+    } catch { /* no usable cache */ }
+
+    await refreshLocal();
+    if (seq !== loadSeq.current) return;
+    const revision = await kvGet(revisionKey).catch(() => null);
+    if (seq !== loadSeq.current) return;
+    // Same business revision as the saved copy: the server has not reported a relevant change, so
+    // returning to a tab must not spend a request merely to render the same figures.
+    if (!force && dashboardCacheIsCurrent(cached, revision)) { setLoading(false); return; }
+    await fetchServer();
+  }, [range, cacheKey, revisionKey, refreshLocal, fetchServer, showData]);
+
+  // Only a range/account/shop/role change starts a full dashboard scope load. Local record changes
+  // recalculate locally; a new server revision refreshes quietly. A rotating access token is not a
+  // data change and is deliberately absent from these dependencies.
+  const scopeKey = `${scope}:${range?.from ?? "none"}:${range?.to ?? "none"}`;
+  const lastScope = useRef("");
+  useEffect(() => {
+    if (lastScope.current === scopeKey) return;
+    lastScope.current = scopeKey;
+    showData(null, null, null);
+    setLocalInfo(null); setLoading(true); setFailed(false); setAuthIssue(false);
+    void load();
+  }, [scopeKey, load, showData]);
+
+  useEffect(() => {
+    if (seenRecords.current === recordsVersion) return;
+    seenRecords.current = recordsVersion;
+    void refreshLocal();
+  }, [recordsVersion, refreshLocal]);
+
+  useEffect(() => {
+    if (seenBusiness.current !== businessVersion) {
+      seenBusiness.current = businessVersion;
+      businessDirty.current = true;
+    }
+    // A realtime burst can queue one extra sync pass. Wait until the engine is idle so both passes
+    // land before reconciling once; otherwise the second pass would duplicate the same refresh.
+    if (!businessDirty.current || syncing) return;
+    const timer = setTimeout(() => {
+      if (!businessDirty.current) return;
+      businessDirty.current = false;
+      void fetchServer();
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [businessVersion, syncing, fetchServer]);
 
   const applyCustom = () => {
     const r = customRange(customFrom, customTo);
@@ -316,6 +422,7 @@ export default function Home() {
       ) : null}
 
       {!online ? <Banner tone="warn" text={t("home.cachedData")} /> : null}
+      {failed && data && online ? <Banner tone="warn" text={t("dash.refreshFailed")} /> : null}
       {authIssue ? <Banner tone="danger" text={t("dash.sessionExpired")} /> : null}
       {degraded.length ? <Banner tone="warn" text={t("dash.degraded").replace("{list}", degraded.map(sectionName).join(", "))} /> : null}
       {data ? (
@@ -343,11 +450,11 @@ export default function Home() {
       </Card>
 
       {loading && !data ? (
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
+        <View testID="dash-loading" style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
           {[1, 2, 3, 4].map((i) => <Skeleton key={i} height={98} width="23%" style={{ minWidth: 150, flexGrow: 1 }} />)}
         </View>
       ) : failed && !data ? (
-        <ErrorState text={t(authIssue ? "dash.sessionExpired" : "home.loadError")} onRetry={() => void load()} />
+        <ErrorState text={t(authIssue ? "dash.sessionExpired" : "home.loadError")} onRetry={() => void load(true)} />
       ) : !data || !ops ? (
         <Loading />
       ) : (
@@ -694,5 +801,5 @@ export default function Home() {
 
 function Loading() {
   const c = useTheme(); const t = useT();
-  return <View style={{ paddingVertical: space.xxl, alignItems: "center", gap: space.sm }}><ActivityIndicator color={c.primary} /><Text style={{ color: c.muted, fontSize: 13 }}>{t("common.loading")}</Text></View>;
+  return <View testID="dash-loading" style={{ paddingVertical: space.xxl, alignItems: "center", gap: space.sm }}><ActivityIndicator color={c.primary} /><Text style={{ color: c.muted, fontSize: 13 }}>{t("common.loading")}</Text></View>;
 }

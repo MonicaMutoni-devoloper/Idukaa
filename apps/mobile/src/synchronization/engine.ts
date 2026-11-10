@@ -10,25 +10,36 @@ import type { OpResult, PullResponse } from "@sms/shared";
 
 /** `lastError` is a stable code (`network`, `server_<status>`) describing why the last pass failed,
  *  so an empty catalogue can say what is wrong instead of looking like an empty shop. */
-export const useSync = create<{ online: boolean; /** The push channel is open: other devices' changes arrive without waiting for the poll. */ live: boolean; running: boolean; pending: number; issues: number; awaitingApproval: number; authRequired: boolean; lastSync: string | null; lastError: string | null; dataVersion: number; recordsVersion: number }>(() => ({ online: true, live: false, running: false, pending: 0, issues: 0, awaitingApproval: 0, authRequired: false, lastSync: null, lastError: null, dataVersion: 0, recordsVersion: 0 }));
+export const useSync = create<{
+  online: boolean;
+  /** The push channel is open: other devices' changes arrive without waiting for the poll. */ live: boolean;
+  running: boolean; pending: number; issues: number; awaitingApproval: number; authRequired: boolean;
+  lastSync: string | null; lastError: string | null;
+  /** Catalogue rows changed (sell/stock screens). */ dataVersion: number;
+  /** Local records or outbox verdicts changed (offline figures). */ recordsVersion: number;
+  /** A pull observed a new dashboard-visible business revision (server figures). */ businessVersion: number;
+}>(() => ({ online: true, live: false, running: false, pending: 0, issues: 0, awaitingApproval: 0, authRequired: false, lastSync: null, lastError: null, dataVersion: 0, recordsVersion: 0, businessVersion: 0 }));
 /**
  * Refreshes the quality-of-sync counters and, when a verdict or queue size changed, bumps
  * `recordsVersion` so reports recalculate without reopening the screen. `forceVersion` is used once
  * at the end of a pass: a pull can change server-side rows (another device's sale/expense) without
  * changing any local outbox count, and the visible figures still need to reconcile.
  */
-export const refreshCounts = async (forceVersion = false) => {
+export const refreshCounts = async (localChanged = false) => {
   const u = useSession.getState().user; if (!u) return;
   const c = await outboxCounts(u.id, u.shopId);
   useSync.setState((x) => {
     const countsChanged = c.pending !== x.pending || c.issues !== x.issues || c.awaitingApproval !== x.awaitingApproval;
-    if (!countsChanged && !forceVersion) return x;
+    if (!countsChanged && !localChanged) return x;
     return { pending: c.pending, issues: c.issues, awaitingApproval: c.awaitingApproval, recordsVersion: x.recordsVersion + 1 };
   });
 };
 
 let inFlight: Promise<void> | null = null;
 let rerunRequested = false;
+// Set by any pass that observed a new business revision. It is published once, after the queued
+// rerun has also finished, so a burst of realtime events produces one dashboard invalidation.
+let businessChangePending = false;
 
 /** One sync pass: push due operations in order (batches of 50), apply verdicts, then pull incrementally until caught up. */
 async function runPass(force: boolean): Promise<void> {
@@ -71,6 +82,7 @@ async function runPass(force: boolean): Promise<void> {
       }
     }
     let healed = false;
+    let serverRevision: string | undefined;
     for (;;) { // pull
       const cp = await kvGet(`cp:${s.user.id}`);
       const r = await request<PullResponse>(`/sync/pull${cp ? `?checkpoint=${encodeURIComponent(cp)}` : ""}`, { timeoutMs: SYNC_TIMEOUT_MS });
@@ -80,6 +92,8 @@ async function runPass(force: boolean): Promise<void> {
       const bound = await kvGet("local.shop");
       if (useSession.getState().user?.id !== s.user.id || (bound && bound !== s.user.shopId)) break;
       await applyPull(r.changes as any); await kvSet(`cp:${s.user.id}`, r.checkpoint);
+      if (r.changes.length > 0) pulled = true;
+      if (r.revision) serverRevision = r.revision;
       // "Nothing changed" while this device holds no products at all means the saved cursor is out
       // of step with the local rows (interrupted first pull, cache cleared by an older build, shop
       // re-bound mid-pull). Retrying can never repair that, so drop the cursor once and pull from
@@ -89,9 +103,24 @@ async function runPass(force: boolean): Promise<void> {
       }
       if (!r.hasMore) break;
     }
-    pulled = true;
+    // `pulled` now means "something local changed", not "the request succeeded". A successful
+    // no-op pull must not invalidate every screen; that was the dashboard reload loop.
+    let businessChanged = false;
+    if (serverRevision !== undefined) {
+      const revKey = `bizrev:${s.user.shopId ?? "none"}`;
+      const previous = await kvGet(revKey);
+      businessChanged = previous !== serverRevision;
+      if (businessChanged) await kvSet(revKey, serverRevision);
+    } else {
+      // Older API: without a revision, only real pulled rows are proof of a change.
+      businessChanged = pulled;
+    }
     const at = new Date().toISOString(); await kvSet("last_sync", at);
-    useSync.setState((x) => ({ lastSync: at, lastError: null, dataVersion: x.dataVersion + 1 }));
+    useSync.setState((x) => ({
+      lastSync: at, lastError: null,
+      dataVersion: pulled ? x.dataVersion + 1 : x.dataVersion,
+    }));
+    if (businessChanged) businessChangePending = true;
   } catch (e) {
     // Never silent: a failed pull looks exactly like a shop with no stock unless it is reported.
     useSync.setState({ lastError: syncFailureCode(e, e instanceof ApiError ? e.status : undefined) });
@@ -129,7 +158,15 @@ export function syncNow(force = false): Promise<void> {
       await runPass(runForce);
       runForce = rerunRequested && useSync.getState().online;
     } while (runForce);
-  })().finally(() => { inFlight = null; });
+  })().finally(() => {
+    // Publish only now: all coalesced passes have written the same latest state, so the dashboard
+    // reconciles once instead of once per event.
+    if (businessChangePending) {
+      businessChangePending = false;
+      useSync.setState((x) => ({ businessVersion: x.businessVersion + 1 }));
+    }
+    inFlight = null;
+  });
   return inFlight;
 }
 

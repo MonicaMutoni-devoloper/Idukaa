@@ -310,6 +310,31 @@ export class SyncService {
     }
   }
 
+  /**
+   * A cheap, monotonic marker for data the dashboard actually renders.
+   *
+   * The incremental pull only carries products and suppliers, so an expense, approval or sale
+   * recorded by another device does not necessarily add a row to `changes`. Without this marker the
+   * only way to notice it was to reload the dashboard on every successful sync pass, even when
+   * nothing had changed. Audit rows are appended for every business mutation; irrelevant account
+   * events (login, staff, admin, profile) and supplier-only edits are excluded so they cannot
+   * invalidate a dashboard. The value is compared, never interpreted, by the client.
+   */
+  private async dashboardRevision(shopId: string): Promise<string> {
+    const rows = await this.db.query<{ revision: string }>(
+      `SELECT COALESCE(MAX(id),0)::text AS revision
+         FROM audit_log
+        WHERE shop_id=$1
+          AND action NOT LIKE 'auth.%'
+          AND action NOT LIKE 'staff.%'
+          AND action NOT LIKE 'admin.%'
+          AND action NOT LIKE 'user.%'
+          AND action NOT LIKE 'application.%'
+          AND action NOT IN ('shop.profile.update','op.supplier.upsert')`,
+      [shopId]);
+    return rows[0]?.revision ?? "0";
+  }
+
   /** Incremental pull. Checkpoint is an opaque JSON cursor: {p:[ts,id], s:[ts,id]} using (updated_at,id) row comparison. */
   async pull(user: AuthUser, checkpoint?: string, limit = 200) {
     const cur = checkpoint ? JSON.parse(checkpoint) : {}; const epoch = "1970-01-01T00:00:00.000000Z", nil = "00000000-0000-0000-0000-000000000000";
@@ -322,6 +347,7 @@ export class SyncService {
     const next = { p: lp ? [lp.ts, lp.id] : [pt, pid], s: ls ? [ls.ts, ls.id] : [st, sid] };
     return {
       checkpoint: JSON.stringify(next), hasMore: products.length === limit || suppliers.length === limit,
+      revision: await this.dashboardRevision(user.shopId!),
       changes: [
         ...products.map(p => ({ entity: "product", id: p.id, data: { id: p.id, code: p.code, barcode: p.barcode, name: p.name, category: p.category, unit: p.unit, sellingPrice: p.selling_price, lowStockThreshold: p.low_stock_threshold, onHand: p.on_hand, active: p.active,
           purchaseUnit: p.purchase_unit, sellingUnit: p.selling_unit, unitsPerPurchase: p.units_per_purchase, unitsPerSelling: p.units_per_selling } })),
