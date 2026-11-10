@@ -456,7 +456,7 @@ export function computeLocalDashboard(input: LocalDashboardInput): LocalDashboar
 
   const activity: ActivityRow[] = [...input.records]
     .sort((a, b) => b.at.localeCompare(a.at))
-    .slice(0, 10)
+    .slice(0, 50)
     .map((r, i) => {
       let p: any = {};
       try { p = JSON.parse(r.data); } catch { /* keep the row visible without details */ }

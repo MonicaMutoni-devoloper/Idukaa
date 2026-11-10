@@ -253,6 +253,7 @@ export const en = {
   "dash.noSales": "No sales in this period", "dash.noSalesDesc": "Try a different period or record a sale.",
   "dash.stockHealth": "Stock health", "dash.stockHealthHint": "Products at or below their low-stock threshold",
   "dash.activityHint": "Latest recorded actions in this shop",
+  "dash.activityMore": "Show more activity ({n})", "dash.activityLess": "Show less activity",
   "dash.noActivityDesc": "Sales, deliveries, counts and approvals appear here.",
   "dash.financialDetail": "Financial detail", "dash.financialDetailHint": "Every component of profit for this period",
   "dash.discounts": "Discounts", "dash.returns": "Sale returns",

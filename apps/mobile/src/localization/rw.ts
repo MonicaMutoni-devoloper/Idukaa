@@ -259,6 +259,7 @@ export const rw: Record<Key, string> = {
   "dash.noSales": "Nta Igurisha muri iki gihe", "dash.noSalesDesc": "Gerageza ikindi gihe cyangwa wandike Igurisha.",
   "dash.stockHealth": "Imimerere y'ububiko", "dash.stockHealthHint": "Ibicuruzwa biri ku cyangwa munsi y'umubare uteganyijwe",
   "dash.activityHint": "Ibikorwa biheruka byanditswe mu iduka",
+  "dash.activityMore": "Erekana ibindi bikorwa ({n})", "dash.activityLess": "Erekana ibikorwa bike",
   "dash.noActivityDesc": "Igurisha, ibyakiriwe, ibarabwa n'ibyemezwa bigaragara hano.",
   "dash.financialDetail": "Ibisobanuro by'imari", "dash.financialDetailHint": "Ibice byose by'inyungu muri iki gihe",
   "dash.discounts": "Igabanyirizwa", "dash.returns": "Ibyasubijwe ku Igurisha",

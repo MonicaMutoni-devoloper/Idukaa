@@ -158,6 +158,7 @@ export default function Home() {
   const [authIssue, setAuthIssue] = useState(false);
   const [staleAt, setStaleAt] = useState<string | null>(null);
   const [trendMetric, setTrendMetric] = useState<"sales" | "profit">("sales");
+  const [activityExpanded, setActivityExpanded] = useState(false);
   // Where the numbers on screen came from, and the local record counts behind them.
   const [source, setSource] = useState<FigureSource | null>(null);
   const [localInfo, setLocalInfo] = useState<LocalDashboardResult | null>(null);
@@ -692,7 +693,7 @@ export default function Home() {
                   <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.activityHint")}</Text>
                 </View>
               </View>
-              {data.activity.length ? data.activity.slice(0, 7).map((a, i) => (
+              {(activityExpanded ? data.activity : data.activity.slice(0, 7)).map((a, i) => (
                 <Appear key={a.id} index={i}>
                 <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm, paddingVertical: 7, borderTopWidth: 1, borderTopColor: c.line }}>
                   <View style={{ width: 6, height: 6, borderRadius: 3, marginTop: 5, backgroundColor: a.action.startsWith("adjustment") || a.action.startsWith("conflict") ? c.accent : a.action.startsWith("op.") ? c.primary : c.lineStrong }} />
@@ -709,7 +710,15 @@ export default function Home() {
                   </View>
                 </View>
                 </Appear>
-              )) : <Empty icon="checkSquare" title={t("appr.noActivity")} description={t("dash.noActivityDesc")} />}
+              ))}
+              {!data.activity.length ? <Empty icon="checkSquare" title={t("appr.noActivity")} description={t("dash.noActivityDesc")} /> : null}
+              {data.activity.length > 7 ? (
+                <Button testID="dash-activity-toggle" size="sm" kind="secondary"
+                  label={activityExpanded
+                    ? t("dash.activityLess")
+                    : t("dash.activityMore").replace("{n}", String(data.activity.length - 7))}
+                  onPress={() => setActivityExpanded((open) => !open)} />
+              ) : null}
             </Card>
           </View>
 

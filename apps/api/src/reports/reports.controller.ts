@@ -240,7 +240,7 @@ export class ReportsController {
        LEFT JOIN suppliers su ON su.id = pu.supplier_id
        LEFT JOIN LATERAL (SELECT string_agg(p2.name, ', ') AS names FROM sale_lines sl JOIN products p2 ON p2.id=sl.product_id WHERE sl.sale_id=sa.id) sp ON true
        WHERE a.shop_id=$1 AND a.action NOT LIKE 'auth.%'
-       ORDER BY a.id DESC LIMIT 10`, [shopId]), []);
+       ORDER BY a.id DESC LIMIT 50`, [shopId]), []);
 
     const expenseBreakdown = canSeeFinancials ? await this.section(req, "expenses_by_category", () => this.db.query(
       `SELECT category, COALESCE(SUM(amount),0)::bigint AS amount, COALESCE(SUM(amount) FILTER (WHERE NOT paid),0)::bigint AS unpaid
