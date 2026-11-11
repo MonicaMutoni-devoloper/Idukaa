@@ -391,9 +391,10 @@ export function Toaster() {
  * Dialog on desktop, bottom sheet on phones. The backdrop and panel animate in and out; the content
  * stops receiving input while closing, and closing never blocks the caller's next action.
  */
-export function Modal({ open, onClose, title, description, children, footer, width = 480, scroll }: {
+export function Modal({ open, onClose, title, description, children, footer, width = 480, scroll, headerAction }: {
   open: boolean; onClose: () => void; title: string; description?: string; children?: ReactNode; footer?: ReactNode; width?: number;
   /** Long forms scroll inside the dialog so the actions stay reachable on a phone. */ scroll?: boolean;
+  /** Optional visible close/extra control placed beside the title. */ headerAction?: ReactNode;
 }) {
   const c = useTheme(); const wide = useWide(); const reduced = useReducedMotion(); const t = useT();
   const [mounted, setMounted] = useState(open);
@@ -415,6 +416,14 @@ export function Modal({ open, onClose, title, description, children, footer, wid
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, reduced, progress]);
 
+  // React Native Web does not forward Escape to onRequestClose; desktop users still expect it.
+  useEffect(() => {
+    if (Platform.OS !== "web" || !open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); onClose(); } };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
   if (!mounted) return null;
   return (
     <RNModal visible transparent animationType="none" onRequestClose={onClose} statusBarTranslucent {...({ "aria-label": title } as any)}>
@@ -428,9 +437,12 @@ export function Modal({ open, onClose, title, description, children, footer, wid
           padding: space.xl, paddingBottom: wide ? space.xl : space.xxl, gap: space.md, ...elevation.raised,
           opacity: progress, transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [wide ? 10 : 32, 0] }) }, { scale: progress.interpolate({ inputRange: [0, 1], outputRange: [wide ? 0.98 : 1, 1] }) }],
         }}>
-          <View style={{ gap: 4 }}>
-            <Text accessibilityRole="header" style={{ color: c.ink, ...type.h2 }}>{title}</Text>
-            {description ? <Text style={{ color: c.muted, ...type.small }}>{description}</Text> : null}
+          <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.md }}>
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text accessibilityRole="header" style={{ color: c.ink, ...type.h2 }}>{title}</Text>
+              {description ? <Text style={{ color: c.muted, ...type.small }}>{description}</Text> : null}
+            </View>
+            {headerAction}
           </View>
           {scroll
             ? <ScrollView style={{ maxHeight: wide ? 460 : 330 }} keyboardShouldPersistTaps="handled" contentContainerStyle={{ gap: space.md }}>{children}</ScrollView>

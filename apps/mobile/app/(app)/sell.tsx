@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { formatQty, formatRwf, lineAmount, toBaseQty, type PaymentMethod } from "@sms/shared";
-import { Badge, Banner, Button, Card, Empty, Field, Screen, Segmented, useWide } from "../../src/components/ui";
+import { Badge, Banner, Button, Card, Empty, Field, Modal, Screen, Segmented, useToasts, useWide } from "../../src/components/ui";
 import { Appear, Disclosure, Dismiss, Shake } from "../../src/components/motion";
+import { Icon } from "../../src/components/icons";
+import { cartSellingQty, maxSellingMilli, mergeCartQty, stepSellingQty, validateQuickAddQty } from "../../src/services/sell-quick-add";
 import { enqueue, listProducts, type LocalProduct } from "../../src/database/local";
 import { useT } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
 import { fullResync, refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
 import { parseRwf, qtyOrNull, uuid } from "../../src/services/util";
-import { radius, space, type, useTheme } from "../../src/theme/tokens";
+import { elevation, radius, space, type, useTheme } from "../../src/theme/tokens";
 
 interface Line { p: LocalProduct; qty: string; price: string }
 
@@ -16,6 +18,20 @@ interface Line { p: LocalProduct; qty: string; price: string }
  * the outbox delta and the ledger are always in BASE units (see shared units.ts). */
 const sellingUnitOf = (p: LocalProduct) => p.selling_unit ?? p.unit;
 const unitsSellingOf = (p: LocalProduct) => p.units_per_selling ?? 1;
+
+function QtyButton({ label, onPress, disabled, testID }: { label: string; onPress: () => void; disabled?: boolean; testID?: string }) {
+  const c = useTheme();
+  return (
+    <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress}
+      style={({ pressed, hovered }: any) => ({
+        width: 48, height: 48, borderRadius: radius.sm, alignItems: "center", justifyContent: "center",
+        borderWidth: 1, borderColor: c.lineStrong, backgroundColor: disabled ? c.disabledBg : pressed ? c.pressed : hovered ? c.hover : c.surface,
+        opacity: disabled ? 0.65 : 1,
+      })}>
+      <Text style={{ color: disabled ? c.disabledInk : c.ink, fontSize: 22, lineHeight: 26, fontWeight: "700" }}>{label}</Text>
+    </Pressable>
+  );
+}
 
 
 export default function Sell() {
@@ -37,6 +53,11 @@ export default function Sell() {
   const [retQty, setRetQty] = useState("1"); const [retAmount, setRetAmount] = useState("0");
   const [retReceipt, setRetReceipt] = useState(""); const [retNote, setRetNote] = useState("");
   const [retBusy, setRetBusy] = useState(false); const [retErr, setRetErr] = useState<string | null>(null); const [retSaved, setRetSaved] = useState(false);
+  // Quick-add is a draft on top of the real cart: closing it discards the draft, never the cart.
+  const [quick, setQuick] = useState<LocalProduct | null>(null);
+  const [quickQty, setQuickQty] = useState("1"); const [quickErr, setQuickErr] = useState<string | null>(null);
+  const [cartOpen, setCartOpen] = useState(false);
+  const toast = useToasts((s) => s.push);
 
   const load = useCallback(() => listProducts(q).then(setList).catch(() => setList([])), [q]);
   useEffect(() => { void load(); }, [load, v, saved]);
@@ -82,6 +103,39 @@ export default function Sell() {
   const change = tendered === null ? 0 : Math.max(0, tendered - total);
   const balance = tendered === null ? 0 : Math.max(0, total - tendered);
 
+  const quickStock = quick ? eff(quick) : 0;
+  const quickFactor = quick ? unitsSellingOf(quick) : 1;
+  const quickCheck = quick ? validateQuickAddQty(quickQty, quickStock, quickFactor) : null;
+  const quickSubtotal = quick && quickCheck?.ok
+    ? lineAmount(quickCheck.qty, parseRwf(String(quick.selling_price)) ?? quick.selling_price)
+    : 0;
+  const overStockText = (p: LocalProduct, max: number) =>
+    t("sell.overStock").replace("{qty}", formatQty(max)).replace("{unit}", sellingUnitOf(p));
+  const quickError = quickCheck?.ok === false
+    ? (quickCheck.reason === "stock" ? overStockText(quick!, quickCheck.max) : t("sell.qtyPositive"))
+    : quickErr;
+
+  function openQuick(p: LocalProduct) {
+    setSaved(null); setSaveError(null); setQuick(p); setQuickQty("1"); setQuickErr(null);
+  }
+  function closeQuick() {
+    setQuick(null); setQuickQty("1"); setQuickErr(null);
+  }
+  function addQuick() {
+    if (!quick || !quickCheck?.ok) return;
+    const existing = lines.find((x) => x.p.id === quick.id);
+    const merged = existing
+      ? mergeCartQty(existing.qty, quickCheck.qty, quickStock, quickFactor)
+      : formatQty(quickCheck.qty);
+    if (!merged) { setQuickErr(overStockText(quick, maxSellingMilli(quickStock, quickFactor))); return; }
+    setSaved(null); setSaveError(null);
+    setLines((ls) => (existing
+      ? ls.map((x) => (x.p.id === quick.id ? { ...x, qty: merged, price: String(quick.selling_price) } : x))
+      : [...ls, { p: quick, qty: merged, price: String(quick.selling_price) }]));
+    toast(`${quick.name} ${t("sell.addedToCart")}`);
+    closeQuick();
+  }
+
   // A draft sale is not in the outbox yet: warn before a page close loses it.
   useEffect(() => {
     if (Platform.OS !== "web" || !lines.length) return;
@@ -90,12 +144,7 @@ export default function Sell() {
     return () => window.removeEventListener("beforeunload", warn);
   }, [lines.length]);
 
-  function add(p: LocalProduct) {
-    setSaved(null); setSaveError(null);
-    // Re-tapping a row that is animating out restores it instead of silently doing nothing.
-    setLeaving((v) => v.filter((id) => id !== p.id));
-    setLines((l) => (l.some((x) => x.p.id === p.id) ? l : [...l, { p, qty: "1", price: String(p.selling_price) }]));
-  }  const update = (i: number, patch: Partial<Line>) => setLines((a) => a.map((y, j) => (j === i ? { ...y, ...patch } : y)));
+  const update = (i: number, patch: Partial<Line>) => setLines((a) => a.map((y, j) => (j === i ? { ...y, ...patch } : y)));
   const step = (i: number, delta: number) => {
     const qn = qtyOrNull(lines[i]!.qty) ?? 0; const next = Math.max(1, qn + delta * 1000);
     update(i, { qty: String(next / 1000) });
@@ -137,6 +186,7 @@ export default function Sell() {
   }
 
   return (
+    <View style={{ flex: 1 }}>
     <Screen title={t("sell.title")} subtitle={t("sell.subtitle")}>
       {saved ? (
         <>
@@ -173,7 +223,7 @@ export default function Sell() {
               {list.slice(0, 24).map((p, idx) => {
                 const stock = eff(p); const out = stock <= 0;
                 return (
-                  <Pressable key={p.id} testID={`sell-product-${idx}`} accessibilityRole="button" accessibilityLabel={p.name} onPress={() => add(p)}
+                  <Pressable key={p.id} testID={`sell-product-${idx}`} accessibilityRole="button" accessibilityLabel={p.name} onPress={() => openQuick(p)}
                     style={({ hovered, pressed }: any) => ({ width: wide ? 168 : "47%", flexGrow: wide ? 0 : 1, minHeight: 82, padding: space.md, borderWidth: 1, borderColor: c.line, borderRadius: radius.md, backgroundColor: c.surface, gap: 4, opacity: pressed ? 0.82 : hovered ? 0.95 : 1 })}>
                     <Text numberOfLines={2} style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{p.name}</Text>
                     <Text style={{ color: c.inkSoft, fontSize: 12, fontVariant: ["tabular-nums"] }}>{formatRwf(p.selling_price)}{unitsSellingOf(p) !== 1 || sellingUnitOf(p) !== p.unit ? ` / ${sellingUnitOf(p)}` : ""}</Text>
@@ -289,5 +339,105 @@ export default function Sell() {
         </View>
       </Disclosure>
     </Screen>
+
+      {!wide && lines.length && !quick && !cartOpen ? (
+        <View pointerEvents="box-none" style={{ position: "absolute", left: space.lg, right: space.lg, bottom: space.md }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: space.md, backgroundColor: c.ink, borderRadius: radius.lg, padding: space.md, ...elevation.raised }}>
+            <View style={{ flex: 1, gap: 1 }}>
+              <Text style={{ color: c.surface, fontSize: 12, fontWeight: "600" }}>{lines.length} {t("sell.cartItems")} · {formatQty(cartSellingQty(lines))}</Text>
+              <Text testID="sell-cart-bar-total" style={{ color: c.surface, fontSize: 18, lineHeight: 23, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{formatRwf(total)}</Text>
+            </View>
+            <Button testID="sell-view-cart" size="sm" kind="secondary" label={t("sell.viewCart")} onPress={() => setCartOpen(true)} />
+          </View>
+        </View>
+      ) : null}
+
+      <Modal open={!!quick} onClose={closeQuick} title={quick?.name ?? t("sell.addProduct")} description={t("sell.quickLead")} width={460}
+        headerAction={
+          <Pressable testID="sell-quick-close" accessibilityRole="button" accessibilityLabel={t("common.close")} onPress={closeQuick}
+            style={({ hovered, pressed }: any) => ({ width: 44, height: 44, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: hovered || pressed ? c.hover : "transparent" })}>
+            <Icon name="close" size={18} color={c.inkSoft} />
+          </Pressable>
+        }
+        footer={<>
+          <Button kind="secondary" label={t("common.cancel")} onPress={closeQuick} />
+          <Button testID="sell-quick-add" label={t("sell.addToCart")} onPress={addQuick} disabled={!quickCheck?.ok} />
+        </>}>
+        {quick ? (
+          <View style={{ gap: space.md }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
+              <View style={{ width: 64, height: 64, borderRadius: radius.md, borderWidth: 1, borderColor: c.line, backgroundColor: c.primarySoft, alignItems: "center", justifyContent: "center" }}>
+                <Icon name="box" size={28} color={c.primaryStrong} />
+              </View>
+              <View style={{ flex: 1, gap: 3 }}>
+                <Text style={{ color: c.muted, fontSize: 12 }}>{quick.code}</Text>
+                <Text style={{ color: c.ink, fontWeight: "700", fontSize: 15 }}>{formatRwf(quick.selling_price)} / {sellingUnitOf(quick)}</Text>
+                <Badge tone={quickStock <= 0 ? "danger" : quickStock <= quick.low_threshold ? "warn" : "neutral"}
+                  label={`${t("sell.availableStock")}: ${formatQty(quickStock)} ${quick.unit}`} />
+              </View>
+            </View>
+            {quickFactor !== 1 ? (
+              <Text style={{ color: c.inkSoft, fontSize: 12 }}>
+                {t("sell.packConversion").replace("{selling}", sellingUnitOf(quick)).replace("{n}", String(quickFactor)).replace("{base}", quick.unit)}
+              </Text>
+            ) : null}
+            <View style={{ flexDirection: "row", alignItems: "flex-end", gap: space.sm }}>
+              <QtyButton testID="sell-quick-minus" label="−" disabled={quickStock <= 0} onPress={() => { setQuickQty(stepSellingQty(quickQty, -1, quickStock, quickFactor)); setQuickErr(null); }} />
+              <View style={{ flex: 1 }}>
+                <Field testID="sell-quick-qty" label={`${t("common.qty")} (${sellingUnitOf(quick)})`} value={quickQty} keyboardType="decimal-pad"
+                  onChangeText={(x) => { setQuickQty(x); setQuickErr(null); }} error={quickError} />
+              </View>
+              <QtyButton testID="sell-quick-plus" label="+" disabled={quickStock <= 0} onPress={() => { setQuickQty(stepSellingQty(quickQty, 1, quickStock, quickFactor)); setQuickErr(null); }} />
+            </View>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.sm }}>
+              <Text style={{ color: c.muted, fontSize: 13 }}>{t("sell.subtotal")}</Text>
+              <Text testID="sell-quick-subtotal" style={{ color: c.ink, ...type.money }}>{formatRwf(quickSubtotal)}</Text>
+            </View>
+          </View>
+        ) : null}
+      </Modal>
+
+      <Modal open={cartOpen} onClose={() => setCartOpen(false)} title={t("sell.cart")} description={t("sell.cartReviewDesc")} width={560} scroll
+        headerAction={
+          <Pressable testID="sell-cart-close" accessibilityRole="button" accessibilityLabel={t("common.close")} onPress={() => setCartOpen(false)}
+            style={({ hovered, pressed }: any) => ({ width: 44, height: 44, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: hovered || pressed ? c.hover : "transparent" })}>
+            <Icon name="close" size={18} color={c.inkSoft} />
+          </Pressable>
+        }
+        footer={<Button kind="secondary" label={t("common.close")} onPress={() => setCartOpen(false)} />}>
+        {lines.length ? lines.map((l, i) => (
+          <View key={l.p.id} style={{ borderWidth: 1, borderColor: c.line, borderRadius: radius.md, padding: space.md, gap: space.sm }}>
+            <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{l.p.name}</Text>
+                <Text style={{ color: c.muted, fontSize: 11 }}>{t("sell.remaining")} {formatQty(eff(l.p))} {l.p.unit} · {formatRwf(l.p.selling_price)} / {sellingUnitOf(l.p)}</Text>
+              </View>
+              <Button size="sm" kind="quiet" label={t("common.remove")}
+                onPress={() => { setLines((a) => a.filter((x) => x.p.id !== l.p.id)); setLeaving((v) => v.filter((id) => id !== l.p.id)); }} />
+            </View>
+            <View style={{ flexDirection: "row", alignItems: "flex-end", gap: space.sm }}>
+              <QtyButton label="−" onPress={() => step(i, -1)} />
+              <View style={{ flex: 1 }}>
+                <Field testID={`sell-review-qty-${i}`} label={`${t("common.qty")} (${sellingUnitOf(l.p)})`} value={l.qty} keyboardType="decimal-pad" error={errs[`q${i}`]} onChangeText={(x) => update(i, { qty: x })} />
+              </View>
+              <QtyButton label="+" onPress={() => step(i, 1)} />
+            </View>
+            <View style={{ flexDirection: "row", gap: space.md, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <View style={{ flexGrow: 1, flexBasis: 150 }}>
+                <Field testID={`sell-review-price-${i}`} label={`${t("common.price")} / ${sellingUnitOf(l.p)}`} value={l.price} keyboardType="number-pad" error={errs[`p${i}`]} onChangeText={(x) => update(i, { price: x })} />
+              </View>
+              <View style={{ alignItems: "flex-end", gap: 2, minWidth: 100 }}>
+                <Text style={{ color: c.muted, fontSize: 11 }}>{t("sell.lineTotal")}</Text>
+                <Text style={{ color: c.ink, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(amount(l))}</Text>
+              </View>
+            </View>
+          </View>
+        )) : <Empty icon="cart" title={t("sell.emptyCart")} description={t("sell.emptyCartDesc")} />}
+        <View style={{ borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.sm, gap: 4 }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between" }}><Text style={{ color: c.muted, fontSize: 13 }}>{t("sell.subtotal")}</Text><Text style={{ color: c.inkSoft, fontVariant: ["tabular-nums"] }}>{formatRwf(gross)}</Text></View>
+          <View style={{ flexDirection: "row", justifyContent: "space-between" }}><Text style={{ color: c.ink, fontWeight: "700" }}>{t("common.total")}</Text><Text style={{ color: c.ink, ...type.money }}>{formatRwf(total)}</Text></View>
+        </View>
+      </Modal>
+    </View>
   );
 }

@@ -79,6 +79,11 @@ export const rw: Record<Key, string> = {
   "sell.notSaved": "Ntibyabitswe", "sell.saveFailed": "Igurisha ntiryashoboye kubikwa kuri iki gikoresho. Nta cyanditswe — ongera ugerageze.",
   "sell.balance": "Isigaye", "sell.fullyPaid": "Byishyuwe byose", "sell.insufficient": "Ububiko ntibuhagije",
   "sell.addProduct": "Ongeraho igicuruzwa", "sell.saved": "Igurisha ryabitswe", "sell.quickDesc": "Andika Igurisha wakire amafaranga.",
+  "sell.quickLead": "Shyiraho ingano, hanyuma wiyongere ku byaguzwe. Ububiko burarebwa mbere yo kongeraho.",
+  "sell.availableStock": "Ububiko buhari", "sell.sellingPrice": "Igiciro cyo kugurisha", "sell.packConversion": "Agapaki 1 {selling} = {n} {base}",
+  "sell.addToCart": "Ongeraho ku byaguzwe", "sell.addedToCart": "byongewe ku byaguzwe", "sell.qtyPositive": "Shyiramo ingano irenga zero.",
+  "sell.overStock": "Hari {qty} {unit} gusa.", "sell.cartItems": "Mu byaguzwe", "sell.viewCart": "Reba ibyaguzwe",
+  "sell.cartReviewDesc": "Hindura ingano cyangwa ukureho ibicuruzwa. Igurisha ribikwa gusa niwahitamo Bika Igurisha.",
 
    
     

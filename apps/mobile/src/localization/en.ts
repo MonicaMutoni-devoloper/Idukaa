@@ -74,6 +74,11 @@ export const en = {
   "sell.notSaved": "Not saved", "sell.saveFailed": "The sale could not be saved on this device. Nothing was recorded — try again.",
   "sell.balance": "Balance", "sell.fullyPaid": "Paid in full", "sell.insufficient": "Not enough stock",
   "sell.addProduct": "Add product", "sell.saved": "Sale saved", "sell.quickDesc": "Record a sale and take payment.",
+  "sell.quickLead": "Set the quantity, then add it to the cart. Stock is checked before adding.",
+  "sell.availableStock": "Available stock", "sell.sellingPrice": "Selling price", "sell.packConversion": "1 {selling} = {n} {base}",
+  "sell.addToCart": "Add to cart", "sell.addedToCart": "added to cart", "sell.qtyPositive": "Enter a quantity greater than zero.",
+  "sell.overStock": "Only {qty} {unit} available.", "sell.cartItems": "In cart", "sell.viewCart": "View cart",
+  "sell.cartReviewDesc": "Change quantities or remove products. The sale is saved only with Save sale.",
 
    
     
