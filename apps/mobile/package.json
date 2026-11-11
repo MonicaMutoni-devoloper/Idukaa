@@ -20,6 +20,7 @@
     "test:update": "node --test tests/app-update.test.mts",
     "test:catalogue": "node --test tests/catalogue.test.mts",
     "test:pwa": "node --test tests/pwa.test.mts",
+    "test:intro": "node --test tests/intro.test.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

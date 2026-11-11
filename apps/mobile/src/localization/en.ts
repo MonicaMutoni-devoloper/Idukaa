@@ -1,5 +1,11 @@
 export const en = {
   "app.name": "Idukaa", "brand.tagline": "Offline-first retail · Rwanda",
+  "intro.skip": "Skip", "intro.a11y": "Idukaa introduction", "intro.loading": "Opening your shop",
+  "intro.welcome": "Welcome back", "intro.ready": "Ready",
+  "intro.firstLead": "Stock in. Stock out. Always in control.", "intro.readyLead": "Everything is ready.",
+  "intro.step1Title": "Stock in", "intro.step1Text": "Receive goods and keep every unit accounted for.",
+  "intro.step2Title": "Inventory", "intro.step2Text": "Know what is on the shelf, in every unit.",
+  "intro.step3Title": "Sales & stock out", "intro.step3Text": "Sell, record and sync — even without internet.",
 
   "login.welcome": "Sign in", "login.subtitle": "Use the account your shop owner created for you.",
   "login.email": "Username or email", "login.password": "Password", "login.submit": "Sign in", "login.signingIn": "Signing in…",

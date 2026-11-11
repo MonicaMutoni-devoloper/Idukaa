@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
 import { Slot } from "expo-router";
 import { StatusBar } from "expo-status-bar";
@@ -11,6 +11,8 @@ import { refreshCounts, startSyncEngine, syncNow } from "../src/synchronization/
 import { Banner, Button, Toaster } from "../src/components/ui";
 import { applyWebChrome, loadThemeMode, useEffectiveScheme, space, useTheme } from "../src/theme/tokens";
 import { loadLang, useT } from "../src/localization";
+import { BrandIntro } from "../src/components/brand-intro";
+import { INTRO_SEEN_KEY, INTRO_SEEN_VALUE, type IntroMode } from "../src/services/intro";
 
 async function initDbPlatform() {
   await initDb();
@@ -19,6 +21,10 @@ async function initDbPlatform() {
 
 export default function Root() {
   const [ready, setReady] = useState(false);
+  // Root is mounted exactly once for the life of the app, so this overlay can never replay on a
+  // route change, a shop switch, a sync or a sign-in. Only a real launch resolves a new mode.
+  const [intro, setIntro] = useState<IntroMode>("loading");
+  const introResolved = useRef(false);
   // Listen from the first paint: Chrome can offer installation before Settings is ever opened.
   useEffect(() => { usePwaInstall.getState().start(); }, []);
   const [updateReady, setUpdateReady] = useState(false);
@@ -48,6 +54,13 @@ export default function Root() {
     let cancelled = false;
     (async () => {
       await initDbPlatform();
+      // The flag belongs to this installation, not to an account or shop. Read it as soon as the
+      // store exists, then let the scenes play while the session, theme and language keep loading.
+      const seen = await kvGet(INTRO_SEEN_KEY).then((v) => v === INTRO_SEEN_VALUE).catch(() => false);
+      if (!cancelled) {
+        introResolved.current = true;
+        setIntro(seen ? "returning" : "first");
+      }
       await Promise.all([useSession.getState().load(), loadLang(), loadThemeMode()]);
       await refreshCounts();
       if (cancelled) return;
@@ -55,7 +68,11 @@ export default function Root() {
       startSyncEngine();
     })().catch((error) => {
       console.error("Startup failed", error);
-      if (!cancelled) setReady(true);
+      if (!cancelled) {
+        // A storage failure must not leave the brand overlay blocking a spinner forever.
+        if (!introResolved.current) setIntro("done");
+        setReady(true);
+      }
     });
     return () => { cancelled = true; };
   }, []);
@@ -63,9 +80,15 @@ export default function Root() {
   useEffect(() => { if (token) void syncNow(); }, [token]);
   useEffect(() => { applyWebChrome(scheme); }, [scheme]);
 
+  const finishIntro = useCallback(() => {
+    setIntro("done");
+    // Completion and skipping both count: a user who chose Skip should not see it again.
+    void kvSet(INTRO_SEEN_KEY, INTRO_SEEN_VALUE).catch(() => { /* the current session is still marked */ });
+  }, []);
+
   return (
     <SafeAreaProvider>
-      <StatusBar style={scheme === "dark" ? "light" : "dark"} />
+      <StatusBar style={intro !== "done" ? "light" : scheme === "dark" ? "light" : "dark"} />
       {ready ? <Slot /> : (
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: c.bg }}>
           <ActivityIndicator size="large" color={c.primary} />
@@ -82,6 +105,7 @@ export default function Root() {
         </View>
       ) : null}
       <Toaster />
+      {intro !== "done" ? <BrandIntro mode={intro} onDone={finishIntro} /> : null}
     </SafeAreaProvider>
   );
 }

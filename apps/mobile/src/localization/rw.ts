@@ -2,6 +2,12 @@ import type { Key } from "./en";
 // NOTE: have a native Kinyarwanda speaker (ideally a shop owner) review before release.
 export const rw: Record<Key, string> = {
   "app.name": "Idukaa", "brand.tagline": "Ubucuruzi butakenera interineti · u Rwanda",
+  "intro.skip": "Simbuka", "intro.a11y": "Intangiriro ya Idukaa", "intro.loading": "Turafungura iduka ryawe",
+  "intro.welcome": "Murakaza neza", "intro.ready": "Byiteguye",
+  "intro.firstLead": "Injiza. Bika. Gurisha. Buri gihe ufite icyo ukora.", "intro.readyLead": "Byose byiteguye.",
+  "intro.step1Title": "Kwinjiza ibicuruzwa", "intro.step1Text": "Akira ibicuruzwa kandi menya ingano yabyo yose.",
+  "intro.step2Title": "Ububiko", "intro.step2Text": "Reba ibiri ku mupangu, mu ngano zose.",
+  "intro.step3Title": "Igurisha n'ibisohoka", "intro.step3Text": "Gurisha, wandike kandi uhuze — nta nterineti ikenewe.",
 
   "login.welcome": "Injira mu iduka", "login.subtitle": "Koresha konti nyir'iduka yaguhaye.",
   "login.email": "Izina ry'umukoresha cyangwa imeri", "login.password": "Ijambobanga", "login.submit": "Injira", "login.signingIn": "Turi kwinjira…",
