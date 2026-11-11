@@ -5,9 +5,10 @@ export const rw: Record<Key, string> = {
   "intro.skip": "Simbuka", "intro.a11y": "Intangiriro ya Idukaa", "intro.loading": "Turafungura iduka ryawe",
   "intro.welcome": "Murakaza neza", "intro.ready": "Byiteguye",
   "intro.firstLead": "Injiza. Bika. Gurisha. Buri gihe ufite icyo ukora.", "intro.readyLead": "Byose byiteguye.",
-  "intro.step1Title": "Kwinjiza ibicuruzwa", "intro.step1Text": "Akira ibicuruzwa kandi menya ingano yabyo yose.",
-  "intro.step2Title": "Ububiko", "intro.step2Text": "Reba ibiri ku mupangu, mu ngano zose.",
-  "intro.step3Title": "Igurisha n'ibisohoka", "intro.step3Text": "Gurisha, wandike kandi uhuze — nta nterineti ikenewe.",
+  "intro.tagline": "Cunga iduka ryawe. Menya uko ubucuruzi bwawe buhagaze.",
+  "intro.step1Title": "Kwinjiza ibicuruzwa", "intro.step1Text": "Akira ibicuruzwa mu iduka ryawe.",
+  "intro.step2Title": "Gucunga ububiko", "intro.step2Text": "Kurikirana ibicuruzwa n'ingano iriho.",
+  "intro.step3Title": "Igurisha n'ibisohoka", "intro.step3Text": "Andika ibyagurishijwe kandi ukurikire ibisohoka.",
 
   "login.welcome": "Injira mu iduka", "login.subtitle": "Koresha konti nyir'iduka yaguhaye.",
   "login.email": "Izina ry'umukoresha cyangwa imeri", "login.password": "Ijambobanga", "login.submit": "Injira", "login.signingIn": "Turi kwinjira…",

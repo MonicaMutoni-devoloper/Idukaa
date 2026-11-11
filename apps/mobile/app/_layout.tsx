@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, Linking, Platform, View } from "react-native";
 import { Slot } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import * as Crypto from "expo-crypto";
@@ -12,7 +12,9 @@ import { Banner, Button, Toaster } from "../src/components/ui";
 import { applyWebChrome, loadThemeMode, useEffectiveScheme, space, useTheme } from "../src/theme/tokens";
 import { loadLang, useT } from "../src/localization";
 import { BrandIntro } from "../src/components/brand-intro";
-import { INTRO_SEEN_KEY, INTRO_SEEN_VALUE, type IntroMode } from "../src/services/intro";
+import {
+  INTRO_PREVIEW_ENABLED, INTRO_SEEN_KEY, INTRO_SEEN_VALUE, isIntroPreviewUrl, type IntroMode,
+} from "../src/services/intro";
 
 async function initDbPlatform() {
   await initDb();
@@ -25,6 +27,8 @@ export default function Root() {
   // route change, a shop switch, a sync or a sign-in. Only a real launch resolves a new mode.
   const [intro, setIntro] = useState<IntroMode>("loading");
   const introResolved = useRef(false);
+  // A preview may replay the introduction, but it must never touch the real installation flag.
+  const introPreview = useRef(false);
   // Listen from the first paint: Chrome can offer installation before Settings is ever opened.
   useEffect(() => { usePwaInstall.getState().start(); }, []);
   const [updateReady, setUpdateReady] = useState(false);
@@ -54,9 +58,20 @@ export default function Root() {
     let cancelled = false;
     (async () => {
       await initDbPlatform();
+      // The preview is build-time gated and requested explicitly with `?intro=preview` or
+      // `shopmgmt:///?intro=preview`. It never clears or rewrites the real completion flag.
+      if (INTRO_PREVIEW_ENABLED) {
+        const webUrl = Platform.OS === "web" ? (globalThis as any).location?.href : null;
+        const launchUrl = isIntroPreviewUrl(webUrl)
+          ? webUrl
+          : await Linking.getInitialURL().catch(() => null);
+        introPreview.current = isIntroPreviewUrl(launchUrl);
+      }
       // The flag belongs to this installation, not to an account or shop. Read it as soon as the
       // store exists, then let the scenes play while the session, theme and language keep loading.
-      const seen = await kvGet(INTRO_SEEN_KEY).then((v) => v === INTRO_SEEN_VALUE).catch(() => false);
+      const seen = introPreview.current
+        ? false
+        : await kvGet(INTRO_SEEN_KEY).then((v) => v === INTRO_SEEN_VALUE).catch(() => false);
       if (!cancelled) {
         introResolved.current = true;
         setIntro(seen ? "returning" : "first");
@@ -82,6 +97,8 @@ export default function Root() {
 
   const finishIntro = useCallback(() => {
     setIntro("done");
+    // A preview must leave the genuine first-launch flag exactly as it was.
+    if (introPreview.current) return;
     // Completion and skipping both count: a user who chose Skip should not see it again.
     void kvSet(INTRO_SEEN_KEY, INTRO_SEEN_VALUE).catch(() => { /* the current session is still marked */ });
   }, []);
