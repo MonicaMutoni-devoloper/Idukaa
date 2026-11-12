@@ -441,6 +441,8 @@ export const en = {
   "stock.invalidQty": "Enter a quantity greater than zero.", "stock.invalidCost": "Enter the unit cost.",
   "stock.invalidSelling": "Enter the selling price.",
   "stock.editProduct": "Edit product", "stock.editHelp": "Changes the product details only. Stock and its history stay as they are.",
+  "stock.currentValues": "Current values before you change them", "stock.currentCostUnavailable": "Not available right now",
+  "stock.currentCostHelp": "Average cost per {unit}, shown for reference. Your new entry does not change past stock or reports.",
   "stock.productSaved": "Product details saved.", "stock.codeHelp": "Must be unique in this shop.",
 
   "settings.email": "Email", "settings.shop": "Shop", "settings.profile": "Your profile",

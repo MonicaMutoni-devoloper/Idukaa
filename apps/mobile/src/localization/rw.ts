@@ -451,6 +451,8 @@ export const rw: Record<Key, string> = {
   "stock.invalidQty": "Andika ingano irenze zeru.", "stock.invalidCost": "Andika igiciro cyo kugura ku gipimo kimwe.",
   "stock.invalidSelling": "Andika igiciro cyo kuIgurisha.",
   "stock.editProduct": "Hindura igicuruzwa", "stock.editHelp": "Hindura amakuru y'igicuruzwa gusa. Ububiko n'amateka yabwo ntibihinduka.",
+  "stock.currentValues": "Ibiriho mbere y'uko ubihindura", "stock.currentCostUnavailable": "Ntibiboneka ubu",
+  "stock.currentCostHelp": "Igiciro mpuzandengo ku {unit}, kigaragazwa ku rwego rwo kwifashisha. Ibyo wandika bishya ntibihindura ububiko cyangwa raporo za kera.",
   "stock.productSaved": "Amakuru y'igicuruzwa yabitswe.", "stock.codeHelp": "Kode igomba kuba imwe gusa mu iduka.",
 
   "settings.email": "Imeyili", "settings.shop": "Iduka", "settings.profile": "Umwirondoro wawe",

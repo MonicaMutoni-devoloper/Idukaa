@@ -22,7 +22,7 @@ import { Pressable, Text, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { costPerBaseUnit, formatQty, formatRwf, lineAmount, parseQty, priceBelowCost, profitPerBaseUnit, toBaseQty } from "@sms/shared";
 import { Badge, Banner, Button, Card, DataTable, Empty, Field, KeyValue, Modal, Screen, Segmented, useWide } from "../../src/components/ui";
-import { enqueue, listProducts, listSuppliers, upsertLocalProduct, type LocalProduct } from "../../src/database/local";
+import { enqueue, kvGet, listProducts, listSuppliers, upsertLocalProduct, type LocalProduct } from "../../src/database/local";
 import { useT } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
 import { fullResync, refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
@@ -65,9 +65,19 @@ export default function Stock() {
   const [editing, setEditing] = useState<LocalProduct | null>(null);
   const [e, setE] = useState({ code: "", barcode: "", name: "", unit: "", price: "", low: "" });
   const [eErr, setEErr] = useState<string | null>(null); const [eBusy, setEBusy] = useState(false);
+  // The server's average cost is the only trustworthy "current cost" (it is permission-scoped).
+  // Keep it beside the open dialog so a user sees the old values before typing new ones.
+  const [avgCost, setAvgCost] = useState<{ id: string; value: number | null; loading: boolean } | null>(null);
+  const [financialsAllowed, setFinancialsAllowed] = useState(user.role === "owner");
   const params = useLocalSearchParams<{ count?: string }>();
 
   useEffect(() => { void listProducts(q).then(setRows).catch(() => setRows([])); }, [q, v, msg]);
+  useEffect(() => {
+    let live = true;
+    if (user.role === "owner") { setFinancialsAllowed(true); return; }
+    void kvGet(`dash.perms:${user.id}`).then((v) => { if (live) setFinancialsAllowed(v === "1"); }).catch(() => { if (live) setFinancialsAllowed(false); });
+    return () => { live = false; };
+  }, [user.id, user.role]);
   useEffect(() => {
     let live = true;
     const shopId = user.shopId ?? null;
@@ -175,22 +185,34 @@ export default function Stock() {
     } catch { setErr(t("common.error")); } finally { setBusy(false); }
   }
 
+  const setCostBaseline = (id: string, value: number | null) =>
+    setAvgCost((prev) => (prev?.id === id ? { id, value, loading: false } : prev));
+
   function openStock(p: LocalProduct) {
     setEditing(null); setSErr(null); setStocking(p);
     setS({ ...emptyStock(), selling: String(p.selling_price) });
-    // The confirmed shelf figure comes from the server when it is reachable, so "current stock"
-    // cannot show a stale local copy; offline the cached quantity is all we have.
-    request<{ items: { id: string; onHand: number }[] }>("/reports/inventory")
+    setAvgCost({ id: p.id, value: null, loading: true });
+    // The confirmed shelf figure and average cost come from the server when it is reachable, so
+    // "current" cannot show a stale local copy; offline the cached quantity is all we have.
+    request<{ items: { id: string; onHand: number; avgCost?: number | null }[] }>("/reports/inventory")
       .then((r) => {
         const item = r.items.find((i) => i.id === p.id);
         if (item) setStocking((prev) => (prev && prev.id === p.id ? { ...prev, on_hand: Number(item.onHand) } : prev));
+        setCostBaseline(p.id, typeof item?.avgCost === "number" ? item.avgCost : null);
       })
-      .catch(() => { /* offline: keep the local figure */ });
+      .catch(() => setCostBaseline(p.id, null));
   }
 
   function openEdit(p: LocalProduct) {
     setStocking(null); setEErr(null); setEditing(p);
     setE({ code: p.code, barcode: p.barcode ?? "", name: p.name, unit: p.unit, price: String(p.selling_price), low: formatQty(p.low_threshold) });
+    setAvgCost({ id: p.id, value: null, loading: true });
+    request<{ items: { id: string; avgCost?: number | null }[] }>("/reports/inventory")
+      .then((r) => {
+        const item = r.items.find((i) => i.id === p.id);
+        setCostBaseline(p.id, typeof item?.avgCost === "number" ? item.avgCost : null);
+      })
+      .catch(() => setCostBaseline(p.id, null));
   }
 
   /** Receives more of an existing product: a purchase received immediately, never a second product. */
@@ -284,6 +306,14 @@ export default function Stock() {
   const stockTotal = stockBaseQty !== null && stockBaseCost !== null ? lineAmount(stockBaseQty, stockBaseCost) : null;
   const stockBelow = stockBaseCost !== null && stockSelling !== null && priceBelowCost(stockSelling, stocking ? unitsSellingOf(stocking) : 1, stockBaseCost);
   const stockPaid = s.paid.trim() ? parseRwf(s.paid) : stockTotal;
+  const stockAvgCost = stocking && avgCost?.id === stocking.id && !avgCost.loading ? avgCost.value : null;
+  const editAvgCost = editing && avgCost?.id === editing.id && !avgCost.loading ? avgCost.value : null;
+  const costPending = !!avgCost?.loading && ((!!stocking && avgCost.id === stocking.id) || (!!editing && avgCost.id === editing.id));
+  const currentCostText = (cost: number | null) => {
+    if (costPending) return t("common.loading");
+    if (!financialsAllowed) return t("offline.state.forbidden");
+    return cost === null ? t("stock.currentCostUnavailable") : formatRwf(cost);
+  };
 
   return (
     <Screen title={t("stock.title")} subtitle={t("stock.subtitle")} actions={
@@ -490,6 +520,14 @@ export default function Stock() {
           <>
             <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("stock.addStockHelp")}</Text>
             {sErr ? <Banner tone="danger" text={sErr} /> : null}
+            <Card tone="muted" style={{ gap: 2, padding: space.md }}>
+              <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("stock.currentValues")}</Text>
+              <KeyValue label={`${t("common.cost")} / ${purchaseUnitOf(stocking)}`}
+                value={currentCostText(stockAvgCost === null ? null : Math.round(stockAvgCost * unitsPurchaseOf(stocking)))} />
+              <KeyValue label={`${t("common.price")} / ${sellingUnitOf(stocking)}`}
+                value={<Text testID="stock-current-price">{formatRwf(stocking.selling_price)}</Text>} />
+              <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("stock.currentCostHelp").replace("{unit}", purchaseUnitOf(stocking))}</Text>
+            </Card>
             <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
               <Field containerStyle={{ flexBasis: 130 }} testID="stock-qty-received" label={`${t("stock.qtyReceived")} (${purchaseUnitOf(stocking)})`} value={s.qty}
                 keyboardType="decimal-pad" onChangeText={(x) => { setSErr(null); setS({ ...s, qty: x }); }} />
@@ -549,6 +587,14 @@ export default function Stock() {
           <>
             <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("stock.editHelp")}</Text>
             {eErr ? <Banner tone="danger" text={eErr} /> : null}
+            <Card tone="muted" style={{ gap: 2, padding: space.md }}>
+              <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("stock.currentValues")}</Text>
+              <KeyValue label={`${t("common.cost")} / ${editing.unit}`}
+                value={currentCostText(editAvgCost)} />
+              <KeyValue label={`${t("common.price")} / ${sellingUnitOf(editing)}`}
+                value={<Text testID="stock-edit-current-price">{formatRwf(editing.selling_price)}</Text>} />
+              <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("stock.currentCostHelp").replace("{unit}", editing.unit)}</Text>
+            </Card>
             <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
               <Field containerStyle={{ flexBasis: 170 }} testID="stock-edit-name" label={t("common.product")} value={e.name} onChangeText={(x) => { setEErr(null); setE({ ...e, name: x }); }} />
               <Field containerStyle={{ flexBasis: 130 }} testID="stock-edit-code" label={t("stock.code")} value={e.code} onChangeText={(x) => setE({ ...e, code: x })}
