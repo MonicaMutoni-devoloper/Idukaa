@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  AUTO_MIN_INTERVAL_MS, OFFLINE_CACHE_VERSION, OFFLINE_PERIODS, cacheKeysToPrune, categoryStatus,
-  periodRangeFor, policyIsStale, readPolicySnapshot, shouldAutoPrepare, summarizeOffline,
+  ARCHIVE_MONTHS_PER_RUN, AUTO_MIN_INTERVAL_MS, OFFLINE_CACHE_VERSION, OFFLINE_PERIODS, archiveMonthKeys,
+  cacheKeysToPrune, categoryStatus, isFullMonthRange, monthRangeFor, periodRangeFor, policyIsStale,
+  readPolicySnapshot, shouldAutoPrepare, summarizeOffline,
 } from "../src/services/offline-policy.ts";
 
 const NOW = Date.parse("2026-11-11T08:00:00.000Z");
@@ -65,6 +66,41 @@ test("retention removes expired entries and caps the cache without touching fres
   assert.equal(pruned.includes("report:new"), false, "newest entries survive");
 });
 
+test("full history archives are never expired or counted against the browsing cap", () => {
+  const fresh = new Date(NOW - 86_400_000).toISOString();
+  const expired = new Date(NOW - 400 * 86_400_000).toISOString();
+  const entries = [
+    { key: "archive:2024-01", savedAt: expired, keep: true },
+    { key: "archive:2024-02", savedAt: expired, keep: true },
+    { key: "report:old", savedAt: expired },
+    { key: "report:new", savedAt: fresh },
+    { key: "report:older", savedAt: fresh },
+  ];
+  const pruned = cacheKeysToPrune(entries, NOW, 180 * 86_400_000, 1);
+  assert.equal(pruned.includes("archive:2024-01"), false);
+  assert.equal(pruned.includes("archive:2024-02"), false);
+  assert.ok(pruned.includes("report:old"));
+  assert.equal(pruned.includes("report:new"), false, "newest browsing cache survives");
+});
+
+test("the rolling archive starts after last month and stops at the shop creation month", () => {
+  assert.equal(ARCHIVE_MONTHS_PER_RUN, 3);
+  const months = archiveMonthKeys("2024-01-15T00:00:00.000Z", NOW);
+  assert.equal(months[0], "2026-09");
+  assert.equal(months.at(-1), "2024-01");
+  assert.equal(months.length, 33);
+  assert.deepEqual(archiveMonthKeys("2026-10-05T00:00:00.000Z", NOW), []);
+  assert.deepEqual(archiveMonthKeys(null, NOW), []);
+});
+
+test("archive month ranges use Kigali boundaries and only exact months are protected", () => {
+  const october = monthRangeFor("2026-10")!;
+  assert.deepEqual(october, { from: "2026-09-30T22:00:00.000Z", to: "2026-10-31T22:00:00.000Z" });
+  assert.equal(isFullMonthRange(october), true);
+  assert.equal(isFullMonthRange({ from: october.from, to: "2026-10-30T22:00:00.000Z" }), false);
+  assert.equal(monthRangeFor("2026-13"), null);
+});
+
 test("a policy snapshot is versioned, shop-scoped and staleness is measurable", () => {
   const raw = JSON.stringify({
     version: 1, shopId: "shop-1", fetchedAt: "2026-11-11T07:00:00.000Z",
@@ -80,5 +116,5 @@ test("a policy snapshot is versioned, shop-scoped and staleness is measurable", 
 });
 
 test("the cache format is versioned", () => {
-  assert.equal(OFFLINE_CACHE_VERSION, 3);
+  assert.equal(OFFLINE_CACHE_VERSION, 4);
 });

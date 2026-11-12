@@ -5,8 +5,9 @@ import { businessRevisionKey } from "./dashboard-cache";
 import { loadFinancial, loadInventory, loadMovements, loadSales, type LoadMeta } from "./report-data";
 import { readCachedPolicy, refreshPolicy } from "./policy-cache";
 import {
-  OFFLINE_CACHE_VERSION, OFFLINE_PERIODS, cacheKeysToPrune, categoryStatus, periodRangeFor,
-  shouldAutoPrepare, summarizeOffline, type OfflineCategoryKey, type OfflineCategoryStatus,
+  ARCHIVE_MONTHS_PER_RUN, OFFLINE_CACHE_VERSION, OFFLINE_PERIODS, archiveMonthKeys, cacheKeysToPrune,
+  categoryStatus, isFullMonthRange, monthRangeFor, periodRangeFor, shouldAutoPrepare, summarizeOffline,
+  type OfflineArchiveStatus, type OfflineCategoryKey, type OfflineCategoryStatus,
   type OfflineDataStatus, type OfflinePeriodKey, type OfflinePeriodStatus,
 } from "./offline-policy";
 import type { Dashboard } from "./local-dashboard";
@@ -24,13 +25,15 @@ export type { OfflineCategoryKey, OfflineCategoryStatus, OfflineDataStatus, Offl
  *  - one run at a time; a second request joins the in-flight run;
  *  - automatic runs are throttled (15 minutes, or 5 minutes after a business change);
  *  - manual refresh bypasses only the throttle, never the lock;
- *  - old report caches are pruned to a bounded, recent set;
+ *  - older months are archived a few at a time back to the shop's creation month;
+ *  - browsing caches are pruned, while the automatic month archive is kept;
  *  - a failed category is reported honestly and does not erase a previous good copy.
  */
 
 const statusKey = (shopId: string) => `offline.data:${shopId}`;
 const lastKey = (shopId: string, userId: string) => `offline.last:${shopId}:${userId}`;
 const retryKey = (shopId: string, userId: string) => `offline.retry:${shopId}:${userId}`;
+const archiveKey = (shopId: string, userId: string, month: string) => `offline.archive:${shopId}:${userId}:${month}`;
 const DASHBOARD_VERSION = 3;
 
 interface Snapshot<T> { version: 1; savedAt: string; data: T }
@@ -91,11 +94,11 @@ export async function getOfflineDataStatus(): Promise<OfflineDataStatus | null> 
   }
 }
 
-async function saveDashboard(shopId: string, from: string, to: string): Promise<boolean> {
+async function saveDashboard(shopId: string, from: string, to: string, signal?: AbortSignal): Promise<boolean> {
   const user = useSession.getState().user;
   if (!user) return false;
   try {
-    const data = await request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { auth: true });
+    const data = await request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { auth: true, signal });
     const revision = await kvGet(businessRevisionKey(shopId)).catch(() => null);
     await kvSet(`dashboard:v3:${shopId}:${user.id}:${user.role}:${from}:${to}`, JSON.stringify({
       version: DASHBOARD_VERSION, savedAt: new Date().toISOString(), data, revision,
@@ -136,6 +139,49 @@ const cat = (categories: OfflineCategoryStatus[], key: OfflineCategoryKey, saved
   if (i >= 0) categories[i] = next; else categories.push(next);
 };
 
+interface PeriodCacheResult {
+  modules: OfflinePeriodStatus["modules"];
+  hasSalesData: boolean;
+}
+
+/** Download one exact period. The archive reuses this for every older month. */
+async function cacheReportPeriod(
+  shopId: string,
+  range: { from: string; to: string },
+  financials: boolean,
+  opts: { inventory?: boolean; signal?: AbortSignal } = {},
+): Promise<PeriodCacheResult> {
+  const ctx = { online: true, shopId, financials, from: range.from, to: range.to };
+  const dashboard = await saveDashboard(shopId, range.from, range.to, opts.signal);
+  const inventoryP = opts.inventory === false ? Promise.resolve(null) : loadInventory(ctx);
+  const [inventory, movements, sales, financial] = await Promise.all([
+    inventoryP,
+    loadMovements(ctx), loadSales(ctx),
+    financials ? loadFinancial(ctx) : Promise.resolve(null),
+  ]);
+  if (sales.data) await cacheSaleDetails(shopId, sales.data.sales);
+  return {
+    hasSalesData: !!sales.data,
+    modules: {
+      dashboard,
+      inventory: inventory ? saved(inventory.meta) : false,
+      movements: saved(movements.meta),
+      sales: saved(sales.meta),
+      financial: financial ? saved(financial.meta) : false,
+    },
+  };
+}
+
+interface ShopProfileLite { createdAt?: string | null }
+
+async function fetchShopProfile(shopId: string, signal?: AbortSignal): Promise<{ data: unknown; createdAt: string | null }> {
+  const data = await request<ShopProfileLite>("/shop/profile", { auth: true, signal });
+  await snapshot(snapshotKeys.shop(shopId), data);
+  const createdAt = typeof data.createdAt === "string" && !Number.isNaN(Date.parse(data.createdAt))
+    ? data.createdAt : null;
+  return { data, createdAt };
+}
+
 const downloadingCategories = (previous: OfflineDataStatus | null): OfflineCategoryStatus[] =>
   (["catalogue", "reports", "profitability", "saleDetails", "team", "approvals", "notifications", "settings", "policy"] as OfflineCategoryKey[])
     .map((key) => ({ key, state: "downloading" as const, savedAt: previous?.categories.find((c) => c.key === key)?.savedAt ?? null }));
@@ -172,7 +218,7 @@ async function runPreparation(force: boolean, changed: boolean): Promise<Offline
     version: OFFLINE_CACHE_VERSION, savedAt: started, shopId, userId: user.id,
     financials: user.role === "owner" || (await kvGet(`dash.perms:${user.id}`).catch(() => null)) === "1",
     complete: false, revision: await kvGet(businessRevisionKey(shopId)).catch(() => null),
-    categories, periods: [],
+    categories, periods: [], archive: previous?.archive,
   };
   useOfflineData.setState({ status: base, preparing: true, error: null });
 
@@ -181,35 +227,23 @@ async function runPreparation(force: boolean, changed: boolean): Promise<Offline
     const products = await productCount().catch(() => 0);
     cat(categories, "catalogue", await kvGet("last_sync").catch(() => null), { missing: products === 0 });
 
+    // Fetch the shop profile once: its creation month is the history boundary, and the same
+    // response is reused for the settings snapshot below.
+    let shopProfile: { data: unknown; createdAt: string | null } | null = null;
+    try { shopProfile = await fetchShopProfile(shopId, signal); } catch { /* settings reports this */ }
+
     const periods: OfflinePeriodStatus[] = [];
-    const ctxBase = { online: true, shopId, financials: base.financials };
     for (const key of OFFLINE_PERIODS) {
       if (signal.aborted) break;
       const range = periodRangeFor(key);
-      const ctx = { ...ctxBase, from: range.from, to: range.to };
-      const dashboard = await saveDashboard(shopId, range.from, range.to);
-      const [inventory, movements, sales, financial] = await Promise.all([
-        loadInventory(ctx), loadMovements(ctx), loadSales(ctx),
-        base.financials ? loadFinancial(ctx) : Promise.resolve(null),
-      ]);
-      if (sales.data) await cacheSaleDetails(shopId, sales.data.sales);
-      periods.push({
-        key,
-        ...range,
-        modules: {
-          dashboard,
-          inventory: saved(inventory.meta),
-          movements: saved(movements.meta),
-          sales: saved(sales.meta),
-          financial: financial ? saved(financial.meta) : false,
-        },
-      });
+      const result = await cacheReportPeriod(shopId, range, base.financials, { signal });
+      periods.push({ key, ...range, modules: result.modules });
       const reportSavedAt = new Date().toISOString();
-      const modulesOk = periods.at(-1)!.modules;
+      const modulesOk = result.modules;
       const completePeriod = modulesOk.dashboard && modulesOk.inventory && modulesOk.movements && modulesOk.sales && (!base.financials || modulesOk.financial);
       cat(categories, "reports", completePeriod ? reportSavedAt : previous?.categories.find((c) => c.key === "reports")?.savedAt ?? null,
         { missing: !completePeriod && !previous?.categories.some((c) => c.key === "reports") });
-      cat(categories, "saleDetails", sales.data ? reportSavedAt : previous?.categories.find((c) => c.key === "saleDetails")?.savedAt ?? null);
+      cat(categories, "saleDetails", result.hasSalesData ? reportSavedAt : previous?.categories.find((c) => c.key === "saleDetails")?.savedAt ?? null);
     }
 
     // Profitability is owner/financial-permission data only, scoped to this user and shop.
@@ -269,10 +303,7 @@ async function runPreparation(force: boolean, changed: boolean): Promise<Offline
     try {
       const me = await request<unknown>("/auth/me", { auth: true, signal });
       await snapshot(snapshotKeys.me(user.id), me);
-      if (user.shopId) {
-        const shop = await request<unknown>("/shop/profile", { auth: true, signal });
-        await snapshot(snapshotKeys.shop(shopId), shop);
-      }
+      if (user.shopId && !shopProfile) shopProfile = await fetchShopProfile(shopId, signal);
       cat(categories, "settings", new Date().toISOString());
     } catch (e: any) {
       cat(categories, "settings", previous?.categories.find((c) => c.key === "settings")?.savedAt ?? null, { error: e?.message ?? "error" });
@@ -286,15 +317,57 @@ async function runPreparation(force: boolean, changed: boolean): Promise<Offline
       cat(categories, "policy", cached?.fetchedAt ?? null, { error: cached ? null : e?.message ?? "error" });
     }
 
-    // Bounded retention: prune old report/dashboard/profitability entries only. Never touch the
-    // outbox, records, sync cursors or the policy snapshot.
+    // Rolling history: fill in a few missing months per successful sync, newest first, stopping at
+    // the shop's creation month. Full months are protected from the browsing-cache retention rule.
+    let archive: OfflineArchiveStatus | undefined = shopProfile?.createdAt ? undefined : previous?.archive;
+    if (shopProfile?.createdAt) {
+      const months = archiveMonthKeys(shopProfile.createdAt);
+      const savedMonths = new Set<string>();
+      for (const month of months) {
+        if (await kvGet(archiveKey(shopId, user.id, month)).catch(() => null)) savedMonths.add(month);
+      }
+      const missing = months.filter((month) => !savedMonths.has(month));
+      for (const month of missing.slice(0, ARCHIVE_MONTHS_PER_RUN)) {
+        if (signal.aborted) break;
+        const range = monthRangeFor(month);
+        if (!range) continue;
+        const result = await cacheReportPeriod(shopId, range, base.financials, { signal });
+        const complete = result.modules.dashboard && result.modules.movements && result.modules.sales
+          && (!base.financials || result.modules.financial);
+        if (!complete) continue;
+        if (base.financials) {
+          try {
+            const data = await request<unknown>(
+              `/reports/profitability?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`,
+              { auth: true, signal },
+            );
+            await snapshot(`profitability:${shopId}:${user.id}:${range.from}:${range.to}`, data);
+          } catch {
+            continue; // retry this month on the next run rather than marking it complete
+          }
+        }
+        await kvSet(archiveKey(shopId, user.id, month), "1");
+        savedMonths.add(month);
+      }
+      const oldestSavedMonth = [...months].reverse().find((month) => savedMonths.has(month)) ?? null;
+      archive = {
+        earliestMonth: months.at(-1) ?? null,
+        oldestSavedMonth,
+        savedMonths: savedMonths.size,
+        totalMonths: months.length,
+        complete: months.every((month) => savedMonths.has(month)),
+      };
+    }
+
+    // Bounded retention: prune old browsing caches only. Never touch the automatic month archive,
+    // the outbox, records, sync cursors or the policy snapshot.
     await pruneReportCaches(shopId).catch(() => undefined);
 
     const summary = summarizeOffline(categories);
     const status: OfflineDataStatus = {
-      ...base, savedAt: new Date().toISOString(), complete: summary.ready,
+      ...base, savedAt: new Date().toISOString(), complete: summary.ready && (archive?.complete ?? true),
       revision: await kvGet(businessRevisionKey(shopId)).catch(() => null),
-      categories, periods,
+      categories, periods, archive,
     };
     await kvSet(statusKey(shopId), JSON.stringify(status));
     await kvSet(lastKey(shopId, user.id), status.savedAt);
@@ -335,16 +408,34 @@ export function queueOfflinePreparation(changed = false): void {
   void prepareOfflineData(false, changed).catch(() => undefined);
 }
 
+const ISO_INSTANT = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g;
+
+/** A cache entry's period, from its payload when present or from the ISO instants in its key. */
+function cacheRange(key: string, parsed: any): { from: string; to: string } | null {
+  if (typeof parsed?.from === "string" && typeof parsed?.to === "string") return { from: parsed.from, to: parsed.to };
+  const matches = key.match(ISO_INSTANT);
+  const from = matches?.at(-2);
+  const to = matches?.at(-1);
+  return from && to ? { from, to } : null;
+}
+
 async function pruneReportCaches(shopId: string): Promise<void> {
   const prefixes = ["report:v2:", "dashboard:v3:", "profitability:"];
-  const entries: { key: string; savedAt: string | null }[] = [];
+  const entries: { key: string; savedAt: string | null; keep: boolean }[] = [];
   for (const prefix of prefixes) {
     const rows = await kvList(prefix);
     for (const row of rows) {
       if (!row.k.includes(shopId)) continue; // never prune another shop's copy
       let savedAt: string | null = null;
-      try { savedAt = JSON.parse(row.v)?.savedAt ?? null; } catch { /* unreadable -> prunable */ }
-      entries.push({ key: row.k, savedAt });
+      let keep = false;
+      try {
+        const parsed = JSON.parse(row.v);
+        savedAt = parsed?.savedAt ?? null;
+        const range = cacheRange(row.k, parsed);
+        // A completed calendar month is part of the rolling history archive, not a browsing cache.
+        keep = !!range && isFullMonthRange(range);
+      } catch { /* unreadable -> prunable */ }
+      entries.push({ key: row.k, savedAt, keep });
     }
   }
   for (const key of cacheKeysToPrune(entries)) await kvDelete(key);

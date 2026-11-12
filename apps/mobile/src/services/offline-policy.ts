@@ -1,4 +1,4 @@
-import { presetRange, type PeriodRange } from "@sms/shared";
+import { kigaliDay, presetRange, type PeriodRange } from "@sms/shared";
 
 /**
  * Pure rules for automatic offline preparation and the offline-readiness indicator.
@@ -30,6 +30,16 @@ export interface OfflinePeriodStatus {
 
 export type OfflinePeriodKey = "thisMonth" | "lastMonth" | "thisYear" | "lastYear";
 
+export interface OfflineArchiveStatus {
+  /** Oldest month that can contain this shop's data (YYYY-MM), from the shop profile. */
+  earliestMonth: string | null;
+  /** Oldest month already saved for this user, or null when no older month is saved yet. */
+  oldestSavedMonth: string | null;
+  savedMonths: number;
+  totalMonths: number;
+  complete: boolean;
+}
+
 export interface OfflineDataStatus {
   /** Cache format version. An older shape is ignored instead of rendered as current. */
   version: number;
@@ -42,15 +52,19 @@ export interface OfflineDataStatus {
   revision: string | null;
   categories: OfflineCategoryStatus[];
   periods: OfflinePeriodStatus[];
+  /** Rolling month-by-month archive back to the shop's creation month. */
+  archive?: OfflineArchiveStatus;
 }
 
-export const OFFLINE_CACHE_VERSION = 3;
+export const OFFLINE_CACHE_VERSION = 4;
 /** The oldest category is still considered fresh for this long; automatic runs are also throttled. */
 export const OFFLINE_STALE_MS = 12 * 60 * 60_000;
 export const AUTO_MIN_INTERVAL_MS = 15 * 60_000;
 export const POLICY_STALE_MS = 24 * 60 * 60_000;
 export const MAX_REPORT_CACHES = 60;
 export const REPORT_RETENTION_MS = 180 * 24 * 60 * 60_000;
+/** Older months are fetched a few at a time so a large shop never blocks one sync for minutes. */
+export const ARCHIVE_MONTHS_PER_RUN = 3;
 
 export const OFFLINE_PERIODS: OfflinePeriodKey[] = ["thisMonth", "lastMonth", "thisYear", "lastYear"];
 
@@ -59,6 +73,48 @@ export const periodRangeFor = (key: OfflinePeriodKey, now = new Date()): PeriodR
   : key === "lastMonth" ? presetRange("prevMonth", now.getTime())
   : key === "thisYear" ? presetRange("year", now.getTime())
   : presetRange("prevYear", now.getTime());
+
+/** Exact Kigali month range for a YYYY-MM key. Null for malformed keys. */
+export function monthRangeFor(month: string): PeriodRange | null {
+  const m = /^(\d{4})-(\d{2})$/.exec(month.trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const monthIndex = Number(m[2]) - 1;
+  if (monthIndex < 0 || monthIndex > 11) return null;
+  // A mid-month instant avoids month-end rollover when presetRange resolves the month.
+  return presetRange("month", Date.UTC(year, monthIndex, 15));
+}
+
+/**
+ * Months that still need an archive, newest first, from two months ago back to the shop's
+ * creation month. The current and previous month already have full report caches.
+ */
+export function archiveMonthKeys(createdAt: string | null | undefined, now = Date.now()): string[] {
+  if (!createdAt) return [];
+  const created = Date.parse(createdAt);
+  if (Number.isNaN(created)) return [];
+  const earliest = kigaliDay(created).slice(0, 7);
+  const current = kigaliDay(now);
+  let year = Number(current.slice(0, 4));
+  let month = Number(current.slice(5, 7)) - 1; // 0-based
+  month -= 2;
+  while (month < 0) { month += 12; year -= 1; }
+  const keys: string[] = [];
+  while (true) {
+    const key = `${year}-${String(month + 1).padStart(2, "0")}`;
+    if (key < earliest) break;
+    keys.push(key);
+    month -= 1;
+    if (month < 0) { month = 11; year -= 1; }
+  }
+  return keys;
+}
+
+/** True when the range is exactly one Kigali calendar month, used to protect archives from pruning. */
+export function isFullMonthRange(range: PeriodRange): boolean {
+  const month = monthRangeFor(kigaliDay(range.from).slice(0, 7));
+  return !!month && month.from === range.from && month.to === range.to;
+}
 
 export function periodIsStale(savedAt: string | null | undefined, now = Date.now(), maxAge = OFFLINE_STALE_MS): boolean {
   if (!savedAt) return true;
@@ -109,15 +165,19 @@ export function shouldAutoPrepare(lastPreparedAt: string | null | undefined, now
   return now - t > (changed ? 5 * 60_000 : AUTO_MIN_INTERVAL_MS);
 }
 
-/** Retention rule: keep recent caches and never grow the report cache without bound. */
+/**
+ * Retention rule for on-demand caches. Entries marked `keep` are the automatic full-month
+ * archives: they are never expired or counted against the small browsing cache cap.
+ */
 export function cacheKeysToPrune(
-  entries: { key: string; savedAt: string | null }[],
+  entries: { key: string; savedAt: string | null; keep?: boolean }[],
   now = Date.now(),
   retention = REPORT_RETENTION_MS,
   maxEntries = MAX_REPORT_CACHES,
 ): string[] {
-  const expired = entries.filter((e) => periodIsStale(e.savedAt, now, retention)).map((e) => e.key);
-  const fresh = entries.filter((e) => !expired.includes(e.key))
+  const prunable = entries.filter((e) => !e.keep);
+  const expired = prunable.filter((e) => periodIsStale(e.savedAt, now, retention)).map((e) => e.key);
+  const fresh = prunable.filter((e) => !expired.includes(e.key))
     .sort((a, b) => Date.parse(b.savedAt ?? "0") - Date.parse(a.savedAt ?? "0"));
   const overflow = fresh.slice(maxEntries).map((e) => e.key);
   return [...new Set([...expired, ...overflow])];
