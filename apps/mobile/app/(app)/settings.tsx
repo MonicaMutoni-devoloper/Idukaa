@@ -10,6 +10,8 @@ import { useLang, useT, type Key } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
 import { syncNow, useSync } from "../../src/synchronization/engine";
 import { installedApp } from "../../src/services/updates";
+import { readCachedPolicy, savePolicySnapshot } from "../../src/services/policy-cache";
+import { readOfflineSnapshot, snapshotKeys } from "../../src/services/offline-data";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
 interface Me { id: string; email: string; name: string; role: "owner" | "manager" | "system_admin"; shopId: string | null; shopName: string | null }
@@ -29,13 +31,22 @@ export default function Settings() {
   // Account + shop: read from the server so the email and shop name are the real ones.
   const [me, setMe] = useState<Me | null>(null);
   const [shop, setShop] = useState<ShopProfile | null>(null);
+  const [accountCachedAt, setAccountCachedAt] = useState<string | null>(null);
   useEffect(() => {
     if (!token) return;
     let live = true;
-    request<Me>("/auth/me").then((r) => { if (live) setMe(r); }).catch(() => { /* keep the cached session */ });
-    if (user?.shopId) request<ShopProfile>("/shop/profile").then((r) => { if (live) setShop(r); }).catch(() => {});
+    request<Me>("/auth/me").then((r) => { if (live) { setMe(r); setAccountCachedAt(null); } }).catch(async () => {
+      if (!live || !user?.id) return;
+      const saved = await readOfflineSnapshot<Me>(snapshotKeys.me(user.id)).catch(() => null);
+      if (live && saved) { setMe(saved.data); setAccountCachedAt(saved.savedAt); }
+    });
+    if (user?.shopId) request<ShopProfile>("/shop/profile").then((r) => { if (live) setShop(r); }).catch(async () => {
+      if (!live || !user.shopId) return;
+      const saved = await readOfflineSnapshot<ShopProfile>(snapshotKeys.shop(user.shopId)).catch(() => null);
+      if (live && saved) { setShop(saved.data); setAccountCachedAt((cur) => cur ?? saved.savedAt); }
+    });
     return () => { live = false; };
-  }, [token, user?.shopId]);
+  }, [token, user?.id, user?.shopId]);
 
   // Profile name
   const [name, setName] = useState(user?.name ?? "");
@@ -104,10 +115,24 @@ export default function Settings() {
     if (user?.role !== "owner") return;
     let live = true;
     request<ShopPolicy>("/shop/settings")
-      .then((p) => { if (!live) return; setPolicy(p); setDiscountInput(String(p.maxDiscountPercent)); })
-      .catch(() => { if (live) setPolicyMsg({ tone: "danger", text: t("common.error") }); });
+      .then(async (p) => {
+        if (!live) return;
+        setPolicy(p); setDiscountInput(String(p.maxDiscountPercent));
+        await savePolicySnapshot(user.shopId ?? null, p).catch(() => undefined);
+      })
+      .catch(async () => {
+        const cached = await readCachedPolicy(user.shopId ?? null).catch(() => null);
+        if (!live) return;
+        if (cached) {
+          setPolicy({ managerFinancialAccess: cached.managerFinancialAccess, belowCostPolicy: cached.belowCostPolicy, maxDiscountPercent: cached.maxDiscountPercent });
+          setDiscountInput(String(cached.maxDiscountPercent));
+          setPolicyMsg({ tone: "danger", text: t("offline.cached").replace("{time}", new Date(cached.fetchedAt).toLocaleString()) });
+        } else {
+          setPolicyMsg({ tone: "danger", text: t("common.error") });
+        }
+      });
     return () => { live = false; };
-  }, [user?.role]);
+  }, [user?.role, user?.shopId]);
 
   const savePolicy = async () => {
     if (!policy) return;
@@ -117,6 +142,7 @@ export default function Settings() {
     try {
       const p = await request<ShopPolicy>("/shop/settings", { method: "PATCH", body: { ...policy, maxDiscountPercent: max } });
       setPolicy(p); setDiscountInput(String(p.maxDiscountPercent));
+      await savePolicySnapshot(user?.shopId ?? null, p).catch(() => undefined);
       setPolicyMsg({ tone: "ok", text: t("settings.policySaved") });
     } catch { setPolicyMsg({ tone: "danger", text: t("common.error") }); }
     finally { setPolicyBusy(false); }
@@ -133,6 +159,7 @@ export default function Settings() {
 
   return (
     <Screen title={t("nav.settings")} subtitle={t("settings.subtitle")}>
+      {accountCachedAt ? <Banner tone="warn" text={t("offline.cached").replace("{time}", new Date(accountCachedAt).toLocaleString())} /> : null}
       <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg, alignItems: "stretch" }}>
         <Card style={{ flex: 1, gap: space.sm }}>
           <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("settings.account")}</Text>

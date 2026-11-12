@@ -54,8 +54,12 @@ const readCache = async <T>(ctx: LoadContext, view: string): Promise<{ data: T; 
     const entry = readReportCache(await kvGet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to, ctx.financials)), {
       shopId: ctx.shopId, view, from: ctx.from, to: ctx.to, financials: ctx.financials,
     });
-    if (!entry?.totals || typeof entry.totals !== "object") return null;
-    return { data: entry.totals as T, savedAt: entry.savedAt };
+    // New entries carry the complete payload (rows included), so an offline report can render its
+    // ledger and sale details. Entries written by an older build only kept totals; they remain
+    // readable as summary-only copies instead of being treated as corrupt.
+    const data = (entry as any)?.data ?? entry?.totals;
+    if (!data || typeof data !== "object") return null;
+    return { data: data as T, savedAt: entry!.savedAt };
   } catch {
     return null;
   }
@@ -66,7 +70,7 @@ const writeCache = async (ctx: LoadContext, view: string, data: unknown): Promis
     await kvSet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to, ctx.financials), JSON.stringify({
       savedAt: new Date().toISOString(), shopId: ctx.shopId, view, from: ctx.from, to: ctx.to,
       access: ctx.financials ? "financial" : "operational",
-      rows: [], totals: data,
+      rows: [], totals: data, data,
     }));
     return true;
   } catch {

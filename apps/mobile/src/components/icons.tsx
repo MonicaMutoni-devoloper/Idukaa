@@ -8,7 +8,7 @@ export type IconName =
   | "home" | "cart" | "box" | "layers" | "receipt" | "sync" | "settings" | "checkSquare"
   | "chart" | "shield" | "more" | "sun" | "moon" | "monitor" | "panel" | "close" | "check"
   | "alert" | "search" | "plus" | "minus" | "arrowRight" | "chevronDown" | "chevronLeft" | "chevronRight"
-  | "eye" | "eyeOff" | "users";
+  | "eye" | "eyeOff" | "users" | "calendar";
 
 export function Icon({ name, size = 18, color, bg = "transparent", strokeWidth = 1.6 }: {
   name: IconName; size?: number; color: string; bg?: string; strokeWidth?: number;
@@ -195,6 +195,18 @@ export function Icon({ name, size = 18, color, bg = "transparent", strokeWidth =
             <View style={frame({ left: u(1.6), top: u(5), width: u(14.8), height: u(8), borderRadius: u(4), backgroundColor: bg })} />
             <View style={{ position: "absolute", left: u(7.1), top: u(6.9), width: u(3.8), height: u(3.8), borderRadius: u(1.9), backgroundColor: color }} />
             <View style={line({ left: u(2.2), top: u(8.1), width: u(14), height: u(strokeWidth + 0.4), borderRadius: u(1), transform: [{ rotate: "34deg" }] })} />
+          </>
+        );
+      case "calendar":
+        return (
+          <>
+            <View style={frame({ left: u(2), top: u(3.4), width: u(14), height: u(12), borderRadius: u(2) })} />
+            <View style={line({ left: u(2), top: u(6.8), width: u(14), height: u(strokeWidth) })} />
+            <View style={line({ left: u(5.2), top: u(1.4), width: u(1.6), height: u(3), borderRadius: u(0.8) })} />
+            <View style={line({ left: u(11.2), top: u(1.4), width: u(1.6), height: u(3), borderRadius: u(0.8) })} />
+            <View style={dot(5.4, u(9.2), 1.5)} />
+            <View style={dot(8.4, u(9.2), 1.5)} />
+            <View style={dot(11.4, u(9.2), 1.5)} />
           </>
         );
       case "users":

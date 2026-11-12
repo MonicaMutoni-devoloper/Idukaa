@@ -22,6 +22,8 @@
     "test:pwa": "node --test tests/pwa.test.mts",
     "test:intro": "node --test tests/intro.test.mts",
     "test:sell": "node --test tests/sell-quick-add.test.mts",
+    "test:period": "node --test tests/overview-period.test.mts",
+    "test:offline": "node --test tests/offline-policy.test.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

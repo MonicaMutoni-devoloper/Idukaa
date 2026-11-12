@@ -27,6 +27,8 @@ import { useT } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
 import { fullResync, refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
 import { dayToDate, parseRwf, qtyOrNull, todayDay, uuid } from "../../src/services/util";
+import { readCachedPolicy, savePolicySnapshot } from "../../src/services/policy-cache";
+import { periodIsStale } from "../../src/services/offline-policy";
 import { space, radius, type, useTheme } from "../../src/theme/tokens";
 
 type Filter = "all" | "low" | "pending";
@@ -57,6 +59,8 @@ export default function Stock() {
   const [s, setS] = useState(emptyStock());
   const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
   const [policy, setPolicy] = useState<{ belowCostPolicy: "acknowledge" | "block" } | null>(null);
+  const [policyTime, setPolicyTime] = useState<string | null>(null);
+  const [policyMissing, setPolicyMissing] = useState(false);
   const [sErr, setSErr] = useState<string | null>(null); const [sBusy, setSBusy] = useState(false);
   const [editing, setEditing] = useState<LocalProduct | null>(null);
   const [e, setE] = useState({ code: "", barcode: "", name: "", unit: "", price: "", low: "" });
@@ -66,10 +70,31 @@ export default function Stock() {
   useEffect(() => { void listProducts(q).then(setRows).catch(() => setRows([])); }, [q, v, msg]);
   useEffect(() => {
     let live = true;
-    request<{ belowCostPolicy: "acknowledge" | "block" }>("/shop/settings")
-      .then((p) => { if (live) setPolicy(p); }).catch(() => { if (live) setPolicy(null); });
+    const shopId = user.shopId ?? null;
+    readCachedPolicy(shopId).then((p) => {
+      if (!live || !p) return;
+      setPolicy({ belowCostPolicy: p.belowCostPolicy }); setPolicyTime(p.fetchedAt); setPolicyMissing(false);
+    }).catch(() => undefined);
+    request<{ belowCostPolicy: "acknowledge" | "block"; maxDiscountPercent: number; managerFinancialAccess: boolean }>("/shop/settings")
+      .then(async (p) => {
+        if (!live) return;
+        setPolicy({ belowCostPolicy: p.belowCostPolicy }); setPolicyMissing(false);
+        const saved = await savePolicySnapshot(shopId, p).catch(() => null);
+        if (live && saved) setPolicyTime(saved.fetchedAt);
+      })
+      .catch(async () => {
+        const cached = await readCachedPolicy(shopId).catch(() => null);
+        if (!live) return;
+        if (cached) {
+          setPolicy({ belowCostPolicy: cached.belowCostPolicy }); setPolicyTime(cached.fetchedAt); setPolicyMissing(false);
+        } else if (user.role !== "owner") {
+          // A manager cannot verify the below-cost rule offline. Blocking is the safe default: it
+          // never lets a restriction be silently bypassed just because the phone lost signal.
+          setPolicy({ belowCostPolicy: "block" }); setPolicyMissing(true);
+        }
+      });
     return () => { live = false; };
-  }, []);
+  }, [user.shopId, user.role]);
   useEffect(() => {
     if (!stocking) return;
     let live = true;
@@ -270,6 +295,10 @@ export default function Stock() {
     }>
       {msg ? <Banner tone="ok" text={msg} /> : null}
       {err ? <Banner tone="danger" text={err} /> : null}
+      {policyMissing && user.role !== "owner" ? <Banner tone="warn" text={t("offline.policyMissing")} /> : null}
+      {!policyMissing && policyTime && periodIsStale(policyTime) ? (
+        <Banner tone="warn" text={t("offline.policyStale").replace("{time}", new Date(policyTime).toLocaleString())} />
+      ) : null}
 
       {adding ? (
         <Card style={{ gap: space.md }}>

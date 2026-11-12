@@ -6,6 +6,7 @@ import { Appear } from "../../src/components/motion";
 import { useT, type Key } from "../../src/localization";
 import { ApiError, NetworkError, request, useSession } from "../../src/services/api";
 import { useSync } from "../../src/synchronization/engine";
+import { readOfflineSnapshot, snapshotKeys } from "../../src/services/offline-data";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
 /**
@@ -42,6 +43,7 @@ export default function Team() {
   const online = useSync((s) => s.online);
 
   const [data, setData] = useState<StaffPayload | null>(null);
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
@@ -57,8 +59,13 @@ export default function Team() {
 
   const load = useCallback(() => {
     setFailed(false);
-    request<StaffPayload>("/shop/staff").then(setData).catch(() => setFailed(true));
-  }, []);
+    if (user?.shopId) {
+      void readOfflineSnapshot<StaffPayload>(snapshotKeys.team(user.shopId)).then((saved) => {
+        if (saved) { setData((cur) => cur ?? saved.data); setCachedAt(saved.savedAt); }
+      }).catch(() => undefined);
+    }
+    request<StaffPayload>("/shop/staff").then((r) => { setData(r); setCachedAt(null); }).catch(() => setFailed(true));
+  }, [user?.shopId]);
   useEffect(() => { load(); }, [load]);
 
   if (!user) return <Redirect href="/login" />;
@@ -121,6 +128,7 @@ export default function Team() {
   return (
     <Screen title={t("nav.team")} subtitle={t("team.subtitle")} testID="team-screen">
       {online ? null : <Banner tone="warn" text={t("team.offline")} />}
+      {cachedAt ? <Banner tone="warn" text={t("offline.cached").replace("{time}", new Date(cachedAt).toLocaleString())} /> : null}
       {notice ? <Banner tone={notice.tone} text={notice.text} /> : null}
 
       <Card style={{ gap: space.md }}>

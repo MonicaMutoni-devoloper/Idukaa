@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { formatQty, formatRwf } from "@sms/shared";
-import { Badge, Banner, Button, Card, Empty, ErrorState, Field, Screen, Segmented, Skeleton, useWide } from "../../src/components/ui";
+import { Badge, Banner, Button, Card, Empty, ErrorState, Screen, Segmented, Skeleton, useWide } from "../../src/components/ui";
+import { PeriodSelector } from "../../src/components/date-range-picker";
+import { OfflineReadinessStrip } from "../../src/components/offline-download";
 import { BarList, CompareBars, ProductRanking, StockHealthBar, TrendBars } from "../../src/components/charts";
 import { Appear, Disclosure, useCountUp } from "../../src/components/motion";
 import { useT, type Key } from "../../src/localization";
@@ -12,11 +14,12 @@ import { degradedList, sectionKey, sectionLabel } from "../../src/services/repor
 import { businessRevisionKey, dashboardCacheIsCurrent, dashboardCacheKey, dashboardScope } from "../../src/services/dashboard-cache";
 import { buildLocalDashboard } from "../../src/services/local-dashboard-data";
 import type { Dashboard as DashboardPayload, FigureSource, FigureStatus, LocalDashboardResult } from "../../src/services/local-dashboard";
-import { addDaysToDay, customRange, presetRange, todayDay, type Preset } from "../../src/services/util";
+import {
+  OVERVIEW_PRESET_LABEL, defaultSelection, formatSelectionRange, selectionRange,
+  type OverviewSelection,
+} from "../../src/services/overview-period";
 import { useSync } from "../../src/synchronization/engine";
 import { motion, space, type, useTheme } from "../../src/theme/tokens";
-
-type Period = Preset | "custom";
 
 interface Snapshot {
   range: { from: string; to: string };
@@ -146,99 +149,108 @@ export default function Home() {
   const awaitingApproval = useSync((s) => s.awaitingApproval);
   const isOwner = user?.role === "owner";
 
-  const [period, setPeriod] = useState<Period>(isOwner ? "month" : "today");
-  const [customFrom, setCustomFrom] = useState(addDaysToDay(todayDay(), -6));
-  const [customTo, setCustomTo] = useState(todayDay());
-  const [appliedCustom, setAppliedCustom] = useState(() => customRange(addDaysToDay(todayDay(), -6), todayDay()));
-  const [customError, setCustomError] = useState<string | null>(null);
-  const [data, setData] = useState<Dashboard | null>(null);
+  // ONE selection is the source of truth for every Overview request, cached copy and calculation.
+  const [selection, setSelection] = useState<OverviewSelection>(() => defaultSelection(user?.role));
+  const [view, setView] = useState<{ key: string; data: Dashboard; source: FigureSource; staleAt: string | null } | null>(null);
+  const [localInfoState, setLocalInfoState] = useState<{ key: string; info: LocalDashboardResult } | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   // Distinguishes "the server rejected the session" from "the server could not be reached".
   const [authIssue, setAuthIssue] = useState(false);
-  const [staleAt, setStaleAt] = useState<string | null>(null);
   const [trendMetric, setTrendMetric] = useState<"sales" | "profit">("sales");
   const [activityExpanded, setActivityExpanded] = useState(false);
-  // Where the numbers on screen came from, and the local record counts behind them.
-  const [source, setSource] = useState<FigureSource | null>(null);
-  const [localInfo, setLocalInfo] = useState<LocalDashboardResult | null>(null);
   // Every request takes a sequence number: a response for a scope the user has already changed is
   // discarded instead of overwriting newer figures (the old duplicate-request/render-loop bug).
   const loadSeq = useRef(0);
   const localSeq = useRef(0);
   const sourceRef = useRef<FigureSource | null>(null);
-  const dataRef = useRef<Dashboard | null>(null);
+  const viewRef = useRef<{ key: string; data: Dashboard } | null>(null);
+  const scopeRef = useRef("");
   const inFlight = useRef<{ key: string; version: number; promise: Promise<Dashboard> } | null>(null);
   const seenRecords = useRef(recordsVersion);
   const seenBusiness = useRef(businessVersion);
   const businessDirty = useRef(false);
 
-  const range = useMemo(() => (period === "custom" ? appliedCustom : presetRange(period)), [period, appliedCustom]);
+  const range = useMemo(() => selectionRange(selection), [selection]);
   const scope = dashboardScope(user);
+  const scopeKey = `${scope}:${range.from}:${range.to}`;
+  scopeRef.current = scopeKey;
   const cacheKey = useMemo(
-    () => dashboardCacheKey(user, range?.from ?? "none", range?.to ?? "none"),
-    [user?.shopId, user?.id, user?.role, range?.from, range?.to],
+    () => dashboardCacheKey(user, range.from, range.to),
+    [user?.shopId, user?.id, user?.role, range.from, range.to],
   );
   const revisionKey = businessRevisionKey(user?.shopId);
+  // A payload is rendered only when it belongs to the CURRENT range. Clearing state in an effect
+  // happens after a paint, which is exactly how the old build flashed today's figures under a newly
+  // selected label. This derivation makes that impossible by construction.
+  const activeView = view?.key === scopeKey ? view : null;
+  const data = activeView?.data ?? null;
+  const source = activeView?.source ?? null;
+  const staleAt = activeView?.staleAt ?? null;
+  const localInfo = localInfoState?.key === scopeKey ? localInfoState.info : null;
 
-  const showData = useCallback((next: Dashboard | null, from: FigureSource | null, savedAt: string | null) => {
-    dataRef.current = next;
+  const showData = useCallback((next: Dashboard | null, from: FigureSource | null, savedAt: string | null, key = scopeKey) => {
+    if (key !== scopeRef.current) return;
+    viewRef.current = next && from ? { key, data: next } : null;
     sourceRef.current = from;
-    setData(next); setSource(from); setStaleAt(savedAt);
-  }, []);
+    setView(next && from ? { key, data: next, source: from, staleAt: savedAt } : null);
+  }, [scopeKey]);
 
   /** Recalculate only this device's figures. No request, no loading state, no remount. */
   const refreshLocal = useCallback(async () => {
-    if (!range || !user?.id) return;
+    if (!user?.id) return;
+    const keyAtStart = scopeKey;
+    const rangeAtStart = range;
     const seq = ++localSeq.current;
     try {
       // A manager only sees cost and profit when the owner granted it — remembered from the last
       // server answer so the local view does not invent a permission it cannot verify offline.
       const granted = user.role === "owner" ? true : (await kvGet(`dash.perms:${user.id}`).catch(() => null)) === "1";
-      const local = await buildLocalDashboard({ from: range.from, to: range.to, role: user.role, financials: granted });
-      if (seq !== localSeq.current) return;
-      setLocalInfo(local);
+      const local = await buildLocalDashboard({ from: rangeAtStart.from, to: rangeAtStart.to, role: user.role, financials: granted });
+      if (seq !== localSeq.current || scopeRef.current !== keyAtStart) return;
+      setLocalInfoState({ key: keyAtStart, info: local });
       // Adopt local figures only when this device holds a record INSIDE the range. A fresh install,
       // or a period whose history lives only on the server, must never replace good figures with
       // zeros just because the local ledger happens to be empty for that period.
-      if (localInRange(local, range.to)) {
+      if (localInRange(local, rangeAtStart.to)) {
         const hasUnconfirmed = local.counts.pending > 0 || local.counts.awaitingApproval > 0 || local.counts.failed > 0;
         // A server response and a revision-validated saved copy are both authoritative snapshots.
         // Keep them on screen unless this device has work the server cannot have counted yet; a
         // verdict change alone must not swap the whole dashboard back to device-only records.
         const trustedSnapshot = sourceRef.current === "server" || sourceRef.current === "cached";
         if (!trustedSnapshot || hasUnconfirmed) {
-          showData(local.data, "local", null);
+          showData(local.data, "local", null, keyAtStart);
           setLoading(false);
         }
       }
     } catch { /* local calculation failed: keep what is on screen, never blank it */ }
-  }, [range, user?.id, user?.role, showData]);
+  }, [range, scopeKey, user?.id, user?.role, showData]);
 
   /** Reconcile the server figures in the background, keeping whatever is already visible. */
   const fetchServer = useCallback(async () => {
-    if (!range) return;
+    const keyAtStart = scopeKey;
+    const rangeAtStart = range;
     const seq = ++loadSeq.current;
     const versionAtStart = useSync.getState().businessVersion;
     // Deduplicate by scope, not by version: two coalesced sync passes can publish the same final
     // revision moments apart, and both must share one HTTP request.
     let promise = inFlight.current?.key === cacheKey ? inFlight.current.promise : null;
     if (!promise) {
-      promise = request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { auth: true });
+      promise = request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(rangeAtStart.from)}&to=${encodeURIComponent(rangeAtStart.to)}`, { auth: true });
       inFlight.current = { key: cacheKey, version: versionAtStart, promise };
     }
-    if (!dataRef.current) setLoading(true);
+    if (viewRef.current?.key !== keyAtStart) setLoading(true);
     try {
       const revisionBefore = await kvGet(revisionKey).catch(() => null);
       const res = await promise;
-      if (seq !== loadSeq.current || dashboardScope(useSession.getState().user) !== scope) return;
-      showData(res, "server", null); setFailed(false); setAuthIssue(false);
+      if (seq !== loadSeq.current || scopeRef.current !== keyAtStart || dashboardScope(useSession.getState().user) !== scope) return;
+      showData(res, "server", null, keyAtStart); setFailed(false); setAuthIssue(false);
       // The revision is recorded with the payload: a remount can reuse it only while the last pull
       // still reports the same business state.
       void kvSet(cacheKey, JSON.stringify({ version: 3, savedAt: new Date().toISOString(), data: res, revision: revisionBefore })).catch(() => {});
       void kvSet(`dash.perms:${user?.id ?? "none"}`, res.permissions?.financials ? "1" : "0").catch(() => {});
     } catch (e) {
-      if (seq !== loadSeq.current) return;
+      if (seq !== loadSeq.current || scopeRef.current !== keyAtStart) return;
       // A 401 means "sign in again" only when the refresh credential was actually rejected. A token
       // that is merely absent (offline start) or whose refresh is backing off is not an expired
       // session — saying so is what turned a network hiccup into a fake logout.
@@ -246,11 +258,11 @@ export default function Home() {
       setFailed(true);
       // Never erase figures already shown. If this was the first attempt, the saved copy is the
       // last valid one; otherwise the previous response simply stays on screen.
-      if (!dataRef.current) {
+      if (viewRef.current?.key !== keyAtStart) {
         try {
           const raw = await kvGet(cacheKey);
           const cached = raw ? JSON.parse(raw) : null;
-          if (cached?.data) showData(cached.data, "cached", cached.savedAt ?? null);
+          if (cached?.data && scopeRef.current === keyAtStart) showData(cached.data, "cached", cached.savedAt ?? null, keyAtStart);
         } catch { /* leave the previous data in place */ }
       }
     } finally {
@@ -258,54 +270,54 @@ export default function Home() {
         inFlight.current = null;
         // A real change landed while this request was in flight. Reconcile once more; the shared
         // request above only covers the identical-revision burst case.
-        if (useSync.getState().businessVersion !== versionAtStart) {
+        if (useSync.getState().businessVersion !== versionAtStart && scopeRef.current === keyAtStart) {
           setTimeout(() => { void fetchServer(); }, 100);
         }
       }
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [range, cacheKey, revisionKey, scope, businessVersion, user?.id, showData]);
+  }, [range, scopeKey, cacheKey, revisionKey, scope, showData, user?.id]);
 
   /**
    * A scope change (range, account, shop or role) is the only time old figures are cleared. The
    * cached copy is shown before any network work, so a return visit never flashes a skeleton.
    */
   const load = useCallback(async (force = false) => {
-    if (!range) return;
+    const keyAtStart = scopeKey;
     const seq = ++loadSeq.current;
     setFailed(false); setAuthIssue(false);
     let cached: any = null;
     try {
       const raw = await kvGet(cacheKey);
       cached = raw ? JSON.parse(raw) : null;
-      if (cached?.data && seq === loadSeq.current) {
-        showData(cached.data, "cached", cached.savedAt ?? null);
+      if (cached?.data && seq === loadSeq.current && scopeRef.current === keyAtStart) {
+        showData(cached.data, "cached", cached.savedAt ?? null, keyAtStart);
         setLoading(false);
       }
     } catch { /* no usable cache */ }
 
     await refreshLocal();
-    if (seq !== loadSeq.current) return;
+    if (seq !== loadSeq.current || scopeRef.current !== keyAtStart) return;
     const revision = await kvGet(revisionKey).catch(() => null);
-    if (seq !== loadSeq.current) return;
+    if (seq !== loadSeq.current || scopeRef.current !== keyAtStart) return;
     // Same business revision as the saved copy: the server has not reported a relevant change, so
     // returning to a tab must not spend a request merely to render the same figures.
     if (!force && dashboardCacheIsCurrent(cached, revision)) { setLoading(false); return; }
     await fetchServer();
-  }, [range, cacheKey, revisionKey, refreshLocal, fetchServer, showData]);
+  }, [scopeKey, cacheKey, revisionKey, refreshLocal, fetchServer, showData]);
 
   // Only a range/account/shop/role change starts a full dashboard scope load. Local record changes
   // recalculate locally; a new server revision refreshes quietly. A rotating access token is not a
   // data change and is deliberately absent from these dependencies.
-  const scopeKey = `${scope}:${range?.from ?? "none"}:${range?.to ?? "none"}`;
   const lastScope = useRef("");
   useEffect(() => {
     if (lastScope.current === scopeKey) return;
     lastScope.current = scopeKey;
-    showData(null, null, null);
-    setLocalInfo(null); setLoading(true); setFailed(false); setAuthIssue(false);
+    sourceRef.current = null;
+    viewRef.current = null;
+    setLoading(true); setFailed(false); setAuthIssue(false);
     void load();
-  }, [scopeKey, load, showData]);
+  }, [scopeKey, load]);
 
   useEffect(() => {
     if (seenRecords.current === recordsVersion) return;
@@ -329,16 +341,9 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [businessVersion, syncing, fetchServer]);
 
-  const applyCustom = () => {
-    const r = customRange(customFrom, customTo);
-    if (!r) { setCustomError(t("dash.invalidRange")); return; }
-    setCustomError(null); setAppliedCustom(r);
-  };
-
-  const periodLabel = useMemo(() => {
-    if (period === "custom") return `${customFrom} – ${customTo}`;
-    return t(period === "today" ? "common.today" : period === "yesterday" ? "common.yesterday" : period === "week" ? "common.week" : period === "month" ? "common.month" : "common.year");
-  }, [period, customFrom, customTo, t]);
+  const periodLabel = selection.kind === "preset"
+    ? t(OVERVIEW_PRESET_LABEL[selection.preset] as Key)
+    : t(selection.kind === "day" ? "date.customDay" : "date.customRange");
 
   const ops = data?.operations;
   const fin = data?.financials;
@@ -377,7 +382,7 @@ export default function Home() {
   const issueCount = ops ? lowOnly + outCount + ops.pendingApprovals + ops.openInvestigations + ops.openConflicts : 0;
   const inStock = Math.max(0, (ops?.productCount ?? 0) - (ops?.lowStockCount ?? 0));
   const chartData = (data?.trend ?? []).map((p) => ({ ...p, netSales: trendMetric === "profit" ? (p.grossProfit ?? 0) : p.netSales }));
-  const chartMode: "day" | "month" = data && (Date.parse(data.range.to) - Date.parse(data.range.from)) / 86_400_000 > 400 ? "month" : "day";
+  const chartMode: "day" | "month" = (Date.parse(range.to) - Date.parse(range.from)) / 86_400_000 > 400 ? "month" : "day";
 
   const actionLabel = (action: string) => {
     const key = ACTION_KEYS[action];
@@ -393,39 +398,18 @@ export default function Home() {
         </View>
       }>
       <View style={{ flexDirection: wide ? "row" : "column", alignItems: wide ? "center" : "stretch", gap: space.md }}>
-        <View style={{ flex: 1, gap: 3 }}>
+        <View style={{ flex: 1, gap: 5, minWidth: 240 }}>
           <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("common.period")}</Text>
-          <Text style={{ color: c.inkSoft, fontSize: 13 }}>
-            {periodLabel} · {new Date(data?.range?.from ?? range?.from ?? Date.now()).toLocaleDateString(undefined, { day: "2-digit", month: "short" })}
-            {data?.range ? ` – ${new Date(new Date(data.range.to).getTime() - 1).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" })}` : ""}
-          </Text>
+          <PeriodSelector selection={selection} onChange={setSelection} />
+          <Text style={{ color: c.muted, fontSize: 11 }}>{formatSelectionRange(selection)}</Text>
         </View>
-        <Segmented<Period> label={t("common.period")} value={period} onChange={(p) => { setPeriod(p); setCustomError(null); }} options={[
-          { value: "today", label: t("common.today") },
-          { value: "yesterday", label: t("common.yesterday") },
-          { value: "week", label: t("common.week") },
-          { value: "month", label: t("common.month") },
-          { value: "year", label: t("common.year") },
-          { value: "custom", label: t("dash.custom") },
-        ]} />
+        {loading && data ? <ActivityIndicator size="small" color={c.muted} /> : null}
       </View>
-
-      {period === "custom" ? (
-        <Card style={{ gap: space.md }}>
-          <View style={{ flexDirection: "row", gap: space.md, flexWrap: "wrap" }}>
-            <Field testID="dash-from" label={t("common.from")} value={customFrom} onChangeText={setCustomFrom} placeholder="YYYY-MM-DD" />
-            <Field testID="dash-to" label={t("common.to")} value={customTo} onChangeText={setCustomTo} placeholder="YYYY-MM-DD" />
-            <View style={{ justifyContent: "flex-end", paddingBottom: 1 }}>
-              <Button testID="dash-apply" label={t("common.apply")} onPress={applyCustom} />
-            </View>
-          </View>
-          {customError ? <Text style={{ color: c.danger, fontSize: 12 }}>{customError}</Text> : null}
-        </Card>
-      ) : null}
 
       {!online ? <Banner tone="warn" text={t("home.cachedData")} /> : null}
       {failed && data && online ? <Banner tone="warn" text={t("dash.refreshFailed")} /> : null}
       {authIssue ? <Banner tone="danger" text={t("dash.sessionExpired")} /> : null}
+      <OfflineReadinessStrip />
       {degraded.length ? <Banner tone="warn" text={t("dash.degraded").replace("{list}", degraded.map(sectionName).join(", "))} /> : null}
       {data ? (
         <Card tone={displayStatus === "conflict" || displayStatus === "sync_failed" ? "warn" : "muted"} style={{ gap: 6 }}>
@@ -464,26 +448,6 @@ export default function Home() {
           {fin ? (
             <>
               {fin.costBasisIncomplete ? <Banner tone="warn" text={t("fin.provisional")} /> : null}
-              {fin.snapshots ? (
-                <Card style={{ gap: space.sm }}>
-                  <View style={{ gap: 2 }}>
-                    <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.headlines")}</Text>
-                    <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.headlinesHint")}</Text>
-                  </View>
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-                    <Kpi testID="kpi-todayNetSales" label={t("dash.todayNetSales")} value={fin.snapshots.today.netSales} hint={t("common.today")} />
-                    <Kpi label={t("dash.todayProfit")} value={fin.snapshots.today.grossProfit}
-                      hint={fin.snapshots.today.grossMarginBps != null ? `${t("dash.grossMargin")}: ${(fin.snapshots.today.grossMarginBps / 100).toFixed(1)}%` : t("fin.marginUnavailable")}
-                      tone={fin.snapshots.today.grossProfit < 0 ? c.danger : undefined} />
-                    <Kpi testID="kpi-todayResult" label={t("dash.todayResult")} value={fin.snapshots.today.operatingResultAfterStockLosses}
-                      tone={fin.snapshots.today.operatingResultAfterStockLosses < 0 ? c.danger : c.success} />
-                    <Kpi testID="kpi-monthResult" label={t("dash.monthResult")} value={fin.snapshots.month.operatingResultAfterStockLosses}
-                      tone={fin.snapshots.month.operatingResultAfterStockLosses < 0 ? c.danger : c.success} />
-                    <Kpi testID="kpi-yearResult" label={t("dash.yearResult")} value={fin.snapshots.year.operatingResultAfterStockLosses}
-                      tone={fin.snapshots.year.operatingResultAfterStockLosses < 0 ? c.danger : c.success} />
-                  </View>
-                </Card>
-              ) : null}
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
                 <Kpi testID="kpi-netSales" emphasis label={t("fin.netSales")} value={fin.netSales} delta={data.financialComparison?.netSales} />
                 <Kpi label={t("fin.cogs")} value={fin.cogs} hint={t("fin.cogs")} />

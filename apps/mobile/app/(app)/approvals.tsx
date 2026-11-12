@@ -5,6 +5,7 @@ import { Badge, Banner, Button, Card, DataTable, Empty, ErrorState, Field, Loadi
 import { useT, type Key } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
 import { useSync } from "../../src/synchronization/engine";
+import { readOfflineSnapshot, snapshotKeys } from "../../src/services/offline-data";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
 type Tab = "adjustments" | "investigations" | "conflicts" | "activity";
@@ -20,15 +21,24 @@ export default function Approvals() {
   const [adj, setAdj] = useState<any[]>([]); const [inv, setInv] = useState<any[]>([]); const [conf, setConf] = useState<any[]>([]); const [log, setLog] = useState<any[]>([]);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [err, setErr] = useState<string | null>(null); const [failed, setFailed] = useState(false); const [loading, setLoading] = useState(true); const [busy, setBusy] = useState<string | null>(null);
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
+  interface CachedApprovals { adjustments: any[]; investigations: any[]; conflicts: any[]; log: any[] }
 
   const load = useCallback(async () => {
     setLoading(true); setFailed(false);
+    if (user.shopId) {
+      const saved = await readOfflineSnapshot<CachedApprovals>(snapshotKeys.approvals(user.shopId)).catch(() => null);
+      if (saved) {
+        setAdj(saved.data.adjustments); setInv(saved.data.investigations); setConf(saved.data.conflicts); setLog(saved.data.log);
+        setCachedAt(saved.savedAt); setLoading(false);
+      }
+    }
     try {
       const [a, i, cf, lg] = await Promise.all([request<any[]>("/audit/adjustments/pending"), request<any[]>("/audit/investigations"), request<any[]>("/audit/conflicts"), request<any[]>("/audit/log")]);
-      setAdj(a); setInv(i); setConf(cf); setLog(lg);
+      setAdj(a); setInv(i); setConf(cf); setLog(lg); setCachedAt(null);
     } catch { setFailed(true); }
     finally { setLoading(false); }
-  }, []);
+  }, [user.shopId]);
   useEffect(() => { if (user.role === "owner") void load(); else setLoading(false); }, [load, user.role, recordsVersion, businessVersion]);
 
   const noteFor = (id: string) => {
@@ -70,6 +80,7 @@ export default function Approvals() {
         { value: "activity", label: t("appr.activity") },
       ]} />
       {err ? <Banner tone="danger" text={err} /> : null}
+      {cachedAt ? <Banner tone="warn" text={t("offline.cached").replace("{time}", new Date(cachedAt).toLocaleString())} /> : null}
       {loading ? <Loading /> : failed ? <ErrorState onRetry={() => void load()} /> : (
         <>
           {tab === "adjustments" ? (adj.length ? adj.map((a) => (

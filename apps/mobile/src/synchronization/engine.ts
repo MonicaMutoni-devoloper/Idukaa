@@ -6,6 +6,7 @@ import { applyPull, applyResults, dueOps, kvGet, kvSet, markRetry, outboxCounts,
 import { failureMessage } from "./failure";
 import { needsFullRepull, syncFailureCode } from "./catalogue";
 import { startRealtime } from "./realtime";
+import { queueOfflinePreparation } from "../services/offline-data";
 import type { OpResult, PullResponse } from "@sms/shared";
 
 /** `lastError` is a stable code (`network`, `server_<status>`) describing why the last pass failed,
@@ -121,6 +122,9 @@ async function runPass(force: boolean): Promise<void> {
       dataVersion: pulled ? x.dataVersion + 1 : x.dataVersion,
     }));
     if (businessChanged) businessChangePending = true;
+    // Automatic offline preparation follows a successful pass, throttled inside the service so the
+    // 30-second poll never becomes a full-report download loop.
+    queueOfflinePreparation(pulled || businessChanged);
   } catch (e) {
     // Never silent: a failed pull looks exactly like a shop with no stock unless it is reported.
     useSync.setState({ lastError: syncFailureCode(e, e instanceof ApiError ? e.status : undefined) });

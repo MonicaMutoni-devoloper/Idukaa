@@ -105,7 +105,7 @@ export class NetworkError extends Error {
   constructor(message = "network_unavailable") { super(message); this.name = "NetworkError"; }
 }
 
-export interface RequestOptions { method?: string; body?: unknown; auth?: boolean; timeoutMs?: number }
+export interface RequestOptions { method?: string; body?: unknown; auth?: boolean; timeoutMs?: number; signal?: AbortSignal }
 
 async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = o.timeoutMs ?? REQUEST_TIMEOUT_MS): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -119,6 +119,8 @@ async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = o.timeo
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const forwardAbort = () => controller.abort();
+  o.signal?.addEventListener("abort", forwardAbort);
   let res: Response;
   try {
     res = await fetch(`${API_URL}${path}`, {
@@ -129,9 +131,10 @@ async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = o.timeo
       credentials: WEB ? "include" : "omit",
     });
   } catch {
-    throw new NetworkError("network_unavailable");
+    throw new NetworkError(o.signal?.aborted ? "download_cancelled" : "network_unavailable");
   } finally {
     clearTimeout(timer);
+    o.signal?.removeEventListener("abort", forwardAbort);
   }
 
   const text = await res.text();

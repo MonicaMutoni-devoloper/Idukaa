@@ -65,6 +65,9 @@ export async function initDb() {
 }
 export const kvGet = async (k: string) => (await (await db()).getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k=?", [k]))?.v ?? null;
 export const kvSet = async (k: string, v: string) => { await (await db()).runAsync("INSERT INTO kv(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", [k, v]); };
+export const kvDelete = async (k: string) => { await (await db()).runAsync("DELETE FROM kv WHERE k=?", [k]); };
+/** Keys (and raw values) under a prefix, used by the bounded offline-cache cleanup. */
+export const kvList = async (prefix: string) => (await db()).getAllAsync<{ k: string; v: string }>("SELECT k, v FROM kv WHERE k LIKE ?", [`${prefix}%`]);
 /** How many products this device holds for the bound shop (empty catalogue detection). */
 export const productCount = async () => ((await (await db()).getFirstAsync<{ n: number }>("SELECT COUNT(*) n FROM products"))?.n ?? 0);
 /**

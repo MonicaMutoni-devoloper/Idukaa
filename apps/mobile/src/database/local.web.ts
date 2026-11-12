@@ -153,6 +153,10 @@ export async function initDb() {
 
 export const kvGet = async (k: string) => (await readState()).kv[k] ?? null;
 export const kvSet = async (k: string, v: string) => mutate((s) => { s.kv[k] = v; });
+export const kvDelete = async (k: string) => mutate((s) => { delete s.kv[k]; });
+/** Keys (and raw values) under a prefix, used by the bounded offline-cache cleanup. */
+export const kvList = async (prefix: string) => Object.entries((await readState()).kv)
+  .filter(([k]) => k.startsWith(prefix)).map(([k, v]) => ({ k, v }));
 /** How many products this browser holds for the bound shop (empty catalogue detection). */
 export const productCount = async () => (await readState()).products.length;
 /**

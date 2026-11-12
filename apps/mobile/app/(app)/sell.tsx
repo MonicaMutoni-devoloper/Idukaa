@@ -10,6 +10,8 @@ import { useT } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
 import { fullResync, refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
 import { parseRwf, qtyOrNull, uuid } from "../../src/services/util";
+import { readCachedPolicy, savePolicySnapshot } from "../../src/services/policy-cache";
+import { periodIsStale } from "../../src/services/offline-policy";
 import { elevation, radius, space, type, useTheme } from "../../src/theme/tokens";
 
 interface Line { p: LocalProduct; qty: string; price: string }
@@ -42,6 +44,8 @@ export default function Sell() {
   const [discount, setDiscount] = useState("0"); const [paid, setPaid] = useState<string | null>(null);
   const [method, setMethod] = useState<PaymentMethod>("cash");
   const [maxDiscount, setMaxDiscount] = useState<number | null>(null);
+  const [policyTime, setPolicyTime] = useState<string | null>(null);
+  const [policyMissing, setPolicyMissing] = useState(false);
   const [saved, setSaved] = useState<{ total: number; count: number; ref: string; paid: number; change: number; at: string; method: PaymentMethod } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [errs, setErrs] = useState<Record<string, string>>({}); const [busy, setBusy] = useState(false);
@@ -61,14 +65,35 @@ export default function Sell() {
 
   const load = useCallback(() => listProducts(q).then(setList).catch(() => setList([])), [q]);
   useEffect(() => { void load(); }, [load, v, saved]);
-  // The cap is enforced by the API too; fetching it here lets the cashier see the limit before saving.
+  // The cap is enforced by the API too. Use the versioned local snapshot first, then reconcile with
+  // the server. A manager whose policy was never cached is not allowed to discount blindly: the
+  // safe offline default is 0% until the policy can be verified again.
   useEffect(() => {
     let live = true;
-    request<{ maxDiscountPercent: number }>("/shop/settings")
-      .then((s) => { if (live) setMaxDiscount(s.maxDiscountPercent); })
-      .catch(() => { if (live) setMaxDiscount(null); });
+    const shopId = user.shopId ?? null;
+    readCachedPolicy(shopId).then((p) => {
+      if (!live || !p) return;
+      setMaxDiscount(p.maxDiscountPercent); setPolicyTime(p.fetchedAt); setPolicyMissing(false);
+    }).catch(() => undefined);
+    request<{ maxDiscountPercent: number; belowCostPolicy: "acknowledge" | "block"; managerFinancialAccess: boolean }>("/shop/settings")
+      .then(async (s) => {
+        if (!live) return;
+        setMaxDiscount(s.maxDiscountPercent); setPolicyMissing(false);
+        const saved = await savePolicySnapshot(shopId, s).catch(() => null);
+        if (live && saved) setPolicyTime(saved.fetchedAt);
+      })
+      .catch(async () => {
+        const cached = await readCachedPolicy(shopId).catch(() => null);
+        if (!live) return;
+        if (cached) {
+          setMaxDiscount(cached.maxDiscountPercent); setPolicyTime(cached.fetchedAt); setPolicyMissing(false);
+        } else {
+          setPolicyMissing(user.role !== "owner");
+          if (user.role !== "owner") setMaxDiscount((cur) => cur ?? 0);
+        }
+      });
     return () => { live = false; };
-  }, []);
+  }, [user.shopId, user.role]);
   useEffect(() => { void listProducts("").then(setAll).catch(() => setAll([])); }, [v, saved]);
 
   const retMatches = all.filter((p) => {
@@ -207,6 +232,10 @@ export default function Sell() {
         </>
       ) : null}
       {saveError ? <Banner tone="danger" title={t("sell.notSaved")} text={saveError} /> : null}
+      {policyMissing && user.role !== "owner" ? <Banner tone="warn" text={t("offline.policyMissing")} /> : null}
+      {!policyMissing && policyTime && periodIsStale(policyTime) ? (
+        <Banner tone="warn" text={t("offline.policyStale").replace("{time}", new Date(policyTime).toLocaleString())} />
+      ) : null}
       {/* An empty shelf must never look like an empty shop: say whether the catalogue has simply
           not arrived on this device yet, and offer the one repair that works (a full re-pull). */}
       {!list.length ? (

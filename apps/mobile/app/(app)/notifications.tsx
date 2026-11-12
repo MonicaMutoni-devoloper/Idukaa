@@ -4,8 +4,9 @@ import { formatRwf } from "@sms/shared";
 import { Badge, Banner, Button, Card, Empty, Loading, Screen } from "../../src/components/ui";
 import { Appear } from "../../src/components/motion";
 import { useT, type Key } from "../../src/localization";
-import { request } from "../../src/services/api";
+import { request, useSession } from "../../src/services/api";
 import { useSync } from "../../src/synchronization/engine";
+import { readOfflineSnapshot, snapshotKeys } from "../../src/services/offline-data";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
 interface Preferences { lowStock: boolean; outOfStock: boolean; salesActivity: boolean; inventoryUpdates: boolean; security: true }
@@ -23,8 +24,10 @@ const money = (v: unknown) => formatRwf(Number(v ?? 0));
 
 export default function Notifications() {
   const t = useT(); const c = useTheme();
+  const user = useSession((s) => s.user);
   const online = useSync((s) => s.online);
   const [data, setData] = useState<Inbox | null>(null);
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "danger"; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -32,10 +35,15 @@ export default function Notifications() {
 
   const load = useCallback(() => {
     setFailed(false);
+    if (user?.shopId && user.id) {
+      void readOfflineSnapshot<Inbox>(snapshotKeys.notifications(user.shopId, user.id)).then((saved) => {
+        if (saved) { setData((cur) => cur ?? saved.data); setCachedAt(saved.savedAt); }
+      }).catch(() => undefined);
+    }
     request<Inbox>("/notifications")
-      .then(setData)
+      .then((r) => { setData(r); setCachedAt(null); })
       .catch(() => setFailed(true));
-  }, []);
+  }, [user?.shopId, user?.id]);
   useEffect(() => { load(); }, [load]);
 
   async function toggle(key: keyof Omit<Preferences, "security">, value: boolean) {
@@ -90,6 +98,7 @@ export default function Notifications() {
   return (
     <Screen title={t("notifications.title")} subtitle={t("notifications.subtitle")}>
       {!online ? <Banner tone="warn" text={t("notifications.offline")} /> : null}
+      {cachedAt ? <Banner tone="warn" text={t("offline.cached").replace("{time}", new Date(cachedAt).toLocaleString())} /> : null}
       {notice ? <Banner tone={notice.tone} text={notice.text} /> : null}
 
       <Card style={{ gap: space.md }}>
