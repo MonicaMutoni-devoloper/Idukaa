@@ -98,14 +98,17 @@ export function OfflineDownloadCard({ compact = false }: { compact?: boolean }) 
         <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.scope")}</Text>
         {status?.archive ? (
           <Text testID="offline-archive" style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>
-            {status.archive.complete
-              ? status.archive.earliestMonth
-                ? t("offline.archive.complete").replace("{month}", status.archive.earliestMonth)
-                : t("offline.archive.recent")
-              : t("offline.archive.progress")
-                  .replace("{saved}", String(status.archive.savedMonths))
-                  .replace("{total}", String(status.archive.totalMonths))
-                  .replace("{oldest}", status.archive.oldestSavedMonth ?? t("common.never"))}
+            {status.archive.waitingForWifi ? t("offline.center.waitingWifi")
+              : status.archive.limited
+                ? t("offline.center.limited").replace("{month}", status.archive.earliestMonth ?? t("common.never"))
+              : status.archive.complete
+                ? status.archive.earliestMonth
+                  ? t("offline.archive.complete").replace("{month}", status.archive.earliestMonth)
+                  : t("offline.archive.recent")
+                : t("offline.archive.progress")
+                    .replace("{saved}", String(status.archive.savedMonths))
+                    .replace("{total}", String(status.archive.totalMonths))
+                    .replace("{oldest}", status.archive.oldestSavedMonth ?? t("common.never"))}
           </Text>
         ) : null}
         {error ? <Text style={{ color: c.danger, fontSize: 12 }}>{error}</Text> : null}

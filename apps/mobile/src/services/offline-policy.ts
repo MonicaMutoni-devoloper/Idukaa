@@ -38,6 +38,12 @@ export interface OfflineArchiveStatus {
   savedMonths: number;
   totalMonths: number;
   complete: boolean;
+  /** True when the retention policy or a cleanup deliberately excluded older months. */
+  limited?: boolean;
+  /** Automatic preparation is waiting for Wi-Fi because of the user's setting. */
+  waitingForWifi?: boolean;
+  /** Bytes removed by the cleanup that ran after this preparation, when any. */
+  lastCleanupBytes?: number;
 }
 
 export interface OfflineDataStatus {

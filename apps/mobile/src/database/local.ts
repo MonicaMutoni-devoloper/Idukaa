@@ -1,4 +1,5 @@
 import * as SQLite from "expo-sqlite";
+import { Paths } from "expo-file-system";
 
 /**
  * Local persistent store. Every operation is saved here in ONE SQLite transaction (with its optimistic stock delta)
@@ -16,6 +17,24 @@ export const storageBackend = (): StorageBackend => "sqlite";
 export type OutboxStatus = "pending" | "retry" | "synced" | "conflict" | "rejected" | "pending_approval";
 export interface OutboxRow { seq: number; op_id: string; user_id: string; shop_id: string | null; type: string; payload: string; deltas: string; status: OutboxStatus; attempts: number; next_attempt_at: number; message: string | null; created_at: string; synced_at?: string | null }
 export interface LocalRecord { op_id: string; shop_id?: string | null; type: string; at: string; data: string; actor: string | null; created_at: string; status: string }
+
+export interface StorageUsageEntry { key: string; bytes: number; savedAt: string | null; lastAccessAt: string | null; period?: string | null }
+export interface StorageUsageSnapshot {
+  backend: StorageBackend;
+  /** Size of this app's database file, or null when the platform cannot measure it. */
+  totalBytes: number | null;
+  /** Free space on the device, or null when the platform does not expose it reliably. */
+  availableBytes: number | null;
+  /** Capacity of the device volume, or null when unknown. */
+  deviceTotalBytes: number | null;
+  /** KV entries without their values: enough to measure and classify caches without loading them. */
+  kvEntries: StorageUsageEntry[];
+  recordsBytes: number;
+  outboxBytes: number;
+  pendingOutboxBytes: number;
+  productsBytes: number;
+  suppliersBytes: number;
+}
 
 export interface LocalProduct {
   id: string; code: string; barcode: string | null; name: string; unit: string; category: string | null;
@@ -64,6 +83,63 @@ export async function initDb() {
   }
 }
 export const kvGet = async (k: string) => (await (await db()).getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k=?", [k]))?.v ?? null;
+
+/**
+ * Measured storage for the Offline Center. Values are never returned, only their byte lengths,
+ * so opening the screen cannot load the whole report archive into memory on a low-end phone.
+ */
+export async function storageUsage(): Promise<StorageUsageSnapshot> {
+  const d = await db();
+  const pages = await d.getFirstAsync<{ page_count: number }>("PRAGMA page_count");
+  const pageSize = await d.getFirstAsync<{ page_size: number }>("PRAGMA page_size");
+  const totalBytes = pages?.page_count && pageSize?.page_size ? pages.page_count * pageSize.page_size : null;
+
+  let availableBytes: number | null = null;
+  let deviceTotalBytes: number | null = null;
+  try {
+    const free = Number(Paths.availableDiskSpace);
+    const total = Number(Paths.totalDiskSpace);
+    if (Number.isFinite(free) && free > 0) availableBytes = free;
+    if (Number.isFinite(total) && total > 0) deviceTotalBytes = total;
+  } catch { /* not exposed on this platform */ }
+
+  let kvEntries: StorageUsageEntry[] = [];
+  try {
+    const rows = await d.getAllAsync<{ k: string; bytes: number; savedAt: string | null; lastAccessAt: string | null; period: string | null }>(
+      `SELECT k, LENGTH(v) AS bytes,
+         CASE WHEN json_valid(v) THEN json_extract(v, '$.savedAt') END AS savedAt,
+         CASE WHEN json_valid(v) THEN json_extract(v, '$.lastAccessAt') END AS lastAccessAt,
+         CASE WHEN json_valid(v) THEN json_extract(v, '$.period') END AS period
+       FROM kv`);
+    kvEntries = rows.map((r) => ({ key: r.k, bytes: Number(r.bytes) || 0, savedAt: r.savedAt ?? null, lastAccessAt: r.lastAccessAt ?? null, period: r.period ?? null }));
+  } catch {
+    // Older SQLite builds without JSON1 still get measured sizes, just no cache timestamps.
+    const rows = await d.getAllAsync<{ k: string; bytes: number }>("SELECT k, LENGTH(v) AS bytes FROM kv");
+    kvEntries = rows.map((r) => ({ key: r.k, bytes: Number(r.bytes) || 0, savedAt: null, lastAccessAt: null }));
+  }
+
+  const sizes = await d.getFirstAsync<{
+    recordsBytes: number; outboxBytes: number; pendingOutboxBytes: number; productsBytes: number; suppliersBytes: number;
+  }>(`SELECT
+    COALESCE((SELECT SUM(LENGTH(op_id)+LENGTH(COALESCE(shop_id,''))+LENGTH(type)+LENGTH(at)+LENGTH(data)+LENGTH(COALESCE(actor,''))+LENGTH(created_at)) FROM records), 0) AS recordsBytes,
+    COALESCE((SELECT SUM(LENGTH(op_id)+LENGTH(user_id)+LENGTH(COALESCE(shop_id,''))+LENGTH(type)+LENGTH(payload)+LENGTH(deltas)+LENGTH(COALESCE(message,''))+LENGTH(created_at)) FROM outbox), 0) AS outboxBytes,
+    COALESCE((SELECT SUM(LENGTH(op_id)+LENGTH(user_id)+LENGTH(COALESCE(shop_id,''))+LENGTH(type)+LENGTH(payload)+LENGTH(deltas)+LENGTH(COALESCE(message,''))+LENGTH(created_at)) FROM outbox WHERE status <> 'synced'), 0) AS pendingOutboxBytes,
+    COALESCE((SELECT SUM(LENGTH(id)+LENGTH(COALESCE(code,''))+LENGTH(COALESCE(barcode,''))+LENGTH(name)+LENGTH(COALESCE(category,''))+LENGTH(unit)+LENGTH(COALESCE(purchase_unit,''))+LENGTH(COALESCE(selling_unit,''))) FROM products), 0) AS productsBytes,
+    COALESCE((SELECT SUM(LENGTH(id)+LENGTH(name)+LENGTH(COALESCE(phone,''))) FROM suppliers), 0) AS suppliersBytes`);
+
+  return {
+    backend: "sqlite",
+    totalBytes,
+    availableBytes,
+    deviceTotalBytes,
+    kvEntries,
+    recordsBytes: Number(sizes?.recordsBytes) || 0,
+    outboxBytes: Number(sizes?.outboxBytes) || 0,
+    pendingOutboxBytes: Number(sizes?.pendingOutboxBytes) || 0,
+    productsBytes: Number(sizes?.productsBytes) || 0,
+    suppliersBytes: Number(sizes?.suppliersBytes) || 0,
+  };
+}
 export const kvSet = async (k: string, v: string) => { await (await db()).runAsync("INSERT INTO kv(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", [k, v]); };
 export const kvDelete = async (k: string) => { await (await db()).runAsync("DELETE FROM kv WHERE k=?", [k]); };
 /** Keys (and raw values) under a prefix, used by the bounded offline-cache cleanup. */
@@ -114,6 +190,13 @@ export async function enqueue(userId: string, opId: string, type: string, payloa
       [opId, shopId, type, recordAt ?? now, JSON.stringify(payload), now]);
     await local?.();
   });
+}
+
+/** Earliest business record for a shop, used as a history boundary when the API omits its creation date. */
+export async function earliestRecordAt(shopId: string | null): Promise<string | null> {
+  const row = await (await db()).getFirstAsync<{ at: string | null }>(
+    "SELECT MIN(at) AS at FROM records WHERE COALESCE(shop_id,'')=?", [shopId ?? ""]);
+  return row?.at && !Number.isNaN(Date.parse(row.at)) ? row.at : null;
 }
 
 /** Every record saved on this device for the bound shop, with its sync verdict. */

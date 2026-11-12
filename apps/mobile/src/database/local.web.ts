@@ -10,9 +10,9 @@
 // Concurrency: writes are serialized with the Web Locks API when available and re-read the latest
 // state under the lock, so two tabs cannot clobber each other's queued operations. Other tabs are
 // notified through BroadcastChannel and drop their read cache.
-import type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend } from "./local";
+import type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot } from "./local";
 
-export type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend };
+export type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot };
 
 interface LocalSupplier { id: string; name: string; phone?: string | null }
 interface WebProduct extends LocalProduct { barcode: string | null; active: number; purchase_unit: string | null; selling_unit: string | null; units_per_purchase: number; units_per_selling: number }
@@ -152,6 +152,50 @@ export async function initDb() {
 }
 
 export const kvGet = async (k: string) => (await readState()).kv[k] ?? null;
+
+/**
+ * Measured browser storage. `totalBytes` is this app's serialized IndexedDB state; the available
+ * figure is the browser's origin estimate, because a web page cannot inspect the whole device.
+ */
+export async function storageUsage(): Promise<StorageUsageSnapshot> {
+  const s = await readState();
+  const enc = new TextEncoder();
+  const bytes = (v: unknown) => enc.encode(typeof v === "string" ? v : JSON.stringify(v)).length;
+  const timestamps = (raw: string): { savedAt: string | null; lastAccessAt: string | null; period: string | null } => {
+    try {
+      const p = JSON.parse(raw);
+      return {
+        savedAt: typeof p?.savedAt === "string" ? p.savedAt : null,
+        lastAccessAt: typeof p?.lastAccessAt === "string" ? p.lastAccessAt : null,
+        period: typeof p?.period === "string" ? p.period : null,
+      };
+    } catch { return { savedAt: null, lastAccessAt: null, period: null }; }
+  };
+  const kvEntries: StorageUsageEntry[] = Object.entries(s.kv).map(([key, value]) => ({
+    key, bytes: bytes(key) + bytes(value), ...timestamps(value),
+  }));
+  let availableBytes: number | null = null;
+  let deviceTotalBytes: number | null = null;
+  try {
+    const estimate = await navigator.storage?.estimate?.();
+    if (estimate?.quota) {
+      deviceTotalBytes = estimate.quota;
+      availableBytes = Math.max(0, estimate.quota - (estimate.usage ?? 0));
+    }
+  } catch { /* the browser does not expose an estimate */ }
+  return {
+    backend: hasIDB ? "indexeddb" : "localstorage",
+    totalBytes: bytes(s),
+    availableBytes,
+    deviceTotalBytes,
+    kvEntries,
+    recordsBytes: s.records.reduce((n, r) => n + bytes(r), 0),
+    outboxBytes: s.outbox.reduce((n, r) => n + bytes(r), 0),
+    pendingOutboxBytes: s.outbox.filter((r) => r.status !== "synced").reduce((n, r) => n + bytes(r), 0),
+    productsBytes: s.products.reduce((n, p) => n + bytes(p), 0),
+    suppliersBytes: s.suppliers.reduce((n, x) => n + bytes(x), 0),
+  };
+}
 export const kvSet = async (k: string, v: string) => mutate((s) => { s.kv[k] = v; });
 export const kvDelete = async (k: string) => mutate((s) => { delete s.kv[k]; });
 /** Keys (and raw values) under a prefix, used by the bounded offline-cache cleanup. */
@@ -204,6 +248,14 @@ export async function enqueue(userId: string, opId: string, type: string, payloa
     }
   });
   await local?.();
+}
+
+/** Earliest business record for a shop, used as a history boundary when the API omits its creation date. */
+export async function earliestRecordAt(shopId: string | null): Promise<string | null> {
+  const s = await readState();
+  const rows = s.records.filter((r) => (r.shop_id ?? null) === shopId && !Number.isNaN(Date.parse(r.at)));
+  if (!rows.length) return null;
+  return rows.reduce((first, r) => (r.at < first ? r.at : first), rows[0]!.at);
 }
 
 /** Every record saved in this browser, with its sync verdict (the dashboard's only data source offline). */

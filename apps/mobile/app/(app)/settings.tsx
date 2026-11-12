@@ -279,6 +279,15 @@ export default function Settings() {
       </View>
 
       <PwaInstallCard />
+      <Card style={{ gap: space.md }}>
+        <View style={{ gap: 2 }}>
+          <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("nav.offline")}</Text>
+          <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("offline.center.subtitle")}</Text>
+        </View>
+        <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
+          <Button testID="settings-offline-center" label={t("nav.offline")} onPress={() => router.push("/offline")} />
+        </View>
+      </Card>
       <OfflineDownloadCard />
 
       <Card style={{ gap: space.md }}>

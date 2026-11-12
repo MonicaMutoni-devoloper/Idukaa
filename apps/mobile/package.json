@@ -23,7 +23,7 @@
     "test:intro": "node --test tests/intro.test.mts",
     "test:sell": "node --test tests/sell-quick-add.test.mts",
     "test:period": "node --test tests/overview-period.test.mts",
-    "test:offline": "node --test tests/offline-policy.test.mts",
+    "test:offline": "node --test tests/offline-policy.test.mts tests/offline-retention.test.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -32,6 +32,7 @@
     "expo": "~58.0.0",
     "expo-constants": "~58.0.4",
     "expo-crypto": "~58.0.7",
+    "expo-file-system": "~58.0.11",
     "expo-linking": "~58.0.14",
     "expo-print": "~58.0.8",
     "expo-router": "~58.0.26",

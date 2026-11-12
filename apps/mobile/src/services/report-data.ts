@@ -1,6 +1,7 @@
 import { listProducts, listRecords, kvGet, kvSet } from "../database";
 import { ApiError, request } from "./api";
 import { isUnsynced, mergePendingRows, readReportCache, reportCacheKey } from "./local-reports";
+import { cacheWriteMeta, touchCacheAccess } from "./cache-meta";
 import type {
   ReportAdjustmentRow, ReportExpenseRow, ReportItemRow, ReportPurchaseRow, ReportSaleRow,
 } from "./local-reports";
@@ -43,6 +44,8 @@ export interface Loaded<T> { data: T | null; meta: LoadMeta }
 
 export interface LoadContext {
   online: boolean; shopId: string | null; from: string; to: string; financials: boolean;
+  /** False for a staged archive fetch: download and validate without replacing the saved copy. */
+  persist?: boolean;
 }
 
 const EMPTY_META: LoadMeta = { source: null, savedAt: null, savedLocally: false, pendingOps: 0, authIssue: false, forbidden: false, failed: true };
@@ -50,10 +53,13 @@ const EMPTY_META: LoadMeta = { source: null, savedAt: null, savedLocally: false,
 const meta = (over: Partial<LoadMeta>): LoadMeta => ({ ...EMPTY_META, failed: false, ...over });
 
 const readCache = async <T>(ctx: LoadContext, view: string): Promise<{ data: T; savedAt: string } | null> => {
+  const key = reportCacheKey(ctx.shopId, view, ctx.from, ctx.to, ctx.financials);
   try {
-    const entry = readReportCache(await kvGet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to, ctx.financials)), {
+    const raw = await kvGet(key);
+    const entry = readReportCache(raw, {
       shopId: ctx.shopId, view, from: ctx.from, to: ctx.to, financials: ctx.financials,
     });
+    if (entry) void touchCacheAccess(key, raw);
     // New entries carry the complete payload (rows included), so an offline report can render its
     // ledger and sale details. Entries written by an older build only kept totals; they remain
     // readable as summary-only copies instead of being treated as corrupt.
@@ -66,11 +72,15 @@ const readCache = async <T>(ctx: LoadContext, view: string): Promise<{ data: T; 
 };
 
 const writeCache = async (ctx: LoadContext, view: string, data: unknown): Promise<boolean> => {
+  if (ctx.persist === false) return false; // staged archive fetch: do not touch the current copy yet
   try {
+    const now = new Date().toISOString();
     await kvSet(reportCacheKey(ctx.shopId, view, ctx.from, ctx.to, ctx.financials), JSON.stringify({
-      savedAt: new Date().toISOString(), shopId: ctx.shopId, view, from: ctx.from, to: ctx.to,
+      savedAt: now, shopId: ctx.shopId, view, from: ctx.from, to: ctx.to,
       access: ctx.financials ? "financial" : "operational",
-      rows: [], totals: data, data,
+      // Keep one payload only. Older builds wrote the same object under both `totals` and `data`,
+      // which doubled report storage; the reader still accepts those existing entries.
+      rows: [], data, ...cacheWriteMeta(now),
     }));
     return true;
   } catch {
@@ -78,6 +88,11 @@ const writeCache = async (ctx: LoadContext, view: string, data: unknown): Promis
     return false;
   }
 };
+
+/** Write a validated report payload. Used after a staged archive download has fully succeeded. */
+export async function saveReportCache(ctx: LoadContext, view: string, data: unknown): Promise<boolean> {
+  return writeCache({ ...ctx, persist: true }, view, data);
+}
 
 /** The saved copy for the exact scope, without making a request. Used for cache-first rendering. */
 export async function peekCachedReport<T>(ctx: LoadContext, view: string): Promise<Loaded<T> | null> {

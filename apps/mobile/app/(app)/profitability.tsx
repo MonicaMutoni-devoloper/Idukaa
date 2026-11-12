@@ -8,6 +8,7 @@ import { Badge, Banner, Button, Card, DataTable, Empty, ErrorState, Field, Loadi
 import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
 import { request, useSession } from "../../src/services/api";
+import { cacheWriteMeta, touchCacheAccess } from "../../src/services/cache-meta";
 import { addDaysToDay, customRange, parseRwf, presetRange, todayDay, type Preset, type Range } from "../../src/services/util";
 import { useSync } from "../../src/synchronization/engine";
 import { space, type, useTheme } from "../../src/theme/tokens";
@@ -116,14 +117,15 @@ export default function Profitability() {
       const raw = await kvGet(key);
       if (raw) {
         const cached = JSON.parse(raw);
-        if (cached?.data) { setData(cached.data); setStaleAt(cached.savedAt ?? null); setLoading(false); hadCache = true; }
+        if (cached?.data) { void touchCacheAccess(key, raw); setData(cached.data); setStaleAt(cached.savedAt ?? null); setLoading(false); hadCache = true; }
       }
     } catch { /* the live request below can still succeed */ }
     if (!hadCache) setLoading(true);
     try {
       const res = await request<ProfitPayload>(`/reports/profitability?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { auth: true });
       setData(res); setStaleAt(null);
-      await kvSet(key, JSON.stringify({ savedAt: new Date().toISOString(), data: res })).catch(() => {});
+      const now = new Date().toISOString();
+      await kvSet(key, JSON.stringify({ savedAt: now, data: res, ...cacheWriteMeta(now) })).catch(() => {});
     } catch (e: any) {
       if (e?.status === 403 || e?.body?.message === "financials_not_permitted") { setDenied(true); setLoading(false); return; }
       setFailed(true);

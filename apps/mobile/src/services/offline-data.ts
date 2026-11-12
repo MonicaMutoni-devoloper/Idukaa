@@ -1,9 +1,18 @@
 import { create } from "zustand";
-import { kvDelete, kvGet, kvList, kvSet, productCount } from "../database";
+import NetInfo from "@react-native-community/netinfo";
+import { Platform } from "react-native";
+import { kigaliDay } from "@sms/shared";
+import { earliestRecordAt, kvDelete, kvGet, kvList, kvSet, productCount } from "../database";
 import { request, useSession } from "./api";
 import { businessRevisionKey } from "./dashboard-cache";
-import { loadFinancial, loadInventory, loadMovements, loadSales, type LoadMeta } from "./report-data";
+import {
+  loadFinancial, loadInventory, loadMovements, loadSales, saveReportCache,
+  type FinancialData, type InventoryData, type LoadMeta, type MovementsData, type SalesData,
+} from "./report-data";
 import { readCachedPolicy, refreshPolicy } from "./policy-cache";
+import { cacheWriteMeta, touchCacheAccess } from "./cache-meta";
+import { DEFAULT_RETENTION, retentionKeepFrom, type RetentionSettings } from "./offline-retention";
+import { readArchiveFloor, readRetention, runCacheCleanup } from "./offline-storage";
 import {
   ARCHIVE_MONTHS_PER_RUN, OFFLINE_CACHE_VERSION, OFFLINE_PERIODS, archiveMonthKeys, cacheKeysToPrune,
   categoryStatus, isFullMonthRange, monthRangeFor, periodRangeFor, shouldAutoPrepare, summarizeOffline,
@@ -36,10 +45,36 @@ const retryKey = (shopId: string, userId: string) => `offline.retry:${shopId}:${
 const archiveKey = (shopId: string, userId: string, month: string) => `offline.archive:${shopId}:${userId}:${month}`;
 const DASHBOARD_VERSION = 3;
 
+async function archiveDownloadAllowed(wifiOnly: boolean): Promise<boolean> {
+  if (!wifiOnly) return true;
+  if (Platform.OS === "web") return true;
+  try {
+    const network = await NetInfo.fetch();
+    return network.type === "wifi" || network.type === "ethernet";
+  } catch {
+    return false;
+  }
+}
+
+async function archiveSelection(
+  createdAt: string,
+  retention: RetentionSettings,
+  shopId: string,
+  userId: string,
+): Promise<{ months: string[]; floor: string | null; limited: boolean }> {
+  const policyFloor = retentionKeepFrom(retention);
+  const cleanupFloor = await readArchiveFloor(shopId, userId).catch(() => null);
+  const floor = policyFloor && cleanupFloor ? (policyFloor > cleanupFloor ? policyFloor : cleanupFloor) : policyFloor ?? cleanupFloor;
+  const all = archiveMonthKeys(createdAt);
+  const months = floor ? all.filter((month) => month >= floor) : all;
+  return { months, floor, limited: all.length > months.length };
+}
+
 interface Snapshot<T> { version: 1; savedAt: string; data: T }
 
 const snapshot = async <T>(key: string, data: T): Promise<T> => {
-  await kvSet(key, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), data }));
+  const now = new Date().toISOString();
+  await kvSet(key, JSON.stringify({ version: 1, savedAt: now, data, ...cacheWriteMeta(now) }));
   return data;
 };
 
@@ -49,6 +84,7 @@ export async function readOfflineSnapshot<T>(key: string): Promise<{ data: T; sa
     if (!raw) return null;
     const e = JSON.parse(raw) as Snapshot<T>;
     if (!e || e.version !== 1 || typeof e.savedAt !== "string" || Number.isNaN(Date.parse(e.savedAt))) return null;
+    void touchCacheAccess(key, raw);
     return { data: e.data, savedAt: e.savedAt };
   } catch {
     return null;
@@ -94,16 +130,25 @@ export async function getOfflineDataStatus(): Promise<OfflineDataStatus | null> 
   }
 }
 
-async function saveDashboard(shopId: string, from: string, to: string, signal?: AbortSignal): Promise<boolean> {
+async function fetchDashboard(from: string, to: string, signal?: AbortSignal): Promise<Dashboard> {
+  return request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { auth: true, signal });
+}
+
+async function writeDashboard(shopId: string, from: string, to: string, data: Dashboard): Promise<void> {
   const user = useSession.getState().user;
-  if (!user) return false;
+  if (!user) throw new Error("no_session");
+  const revision = await kvGet(businessRevisionKey(shopId)).catch(() => null);
+  const now = new Date().toISOString();
+  await kvSet(`dashboard:v3:${shopId}:${user.id}:${user.role}:${from}:${to}`, JSON.stringify({
+    version: DASHBOARD_VERSION, savedAt: now, data, revision, ...cacheWriteMeta(now),
+  }));
+  await kvSet(`dash.perms:${user.id}`, data.permissions?.financials ? "1" : "0");
+}
+
+async function saveDashboard(shopId: string, from: string, to: string, signal?: AbortSignal): Promise<boolean> {
   try {
-    const data = await request<Dashboard>(`/reports/dashboard?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { auth: true, signal });
-    const revision = await kvGet(businessRevisionKey(shopId)).catch(() => null);
-    await kvSet(`dashboard:v3:${shopId}:${user.id}:${user.role}:${from}:${to}`, JSON.stringify({
-      version: DASHBOARD_VERSION, savedAt: new Date().toISOString(), data, revision,
-    }));
-    await kvSet(`dash.perms:${user.id}`, data.permissions?.financials ? "1" : "0");
+    const data = await fetchDashboard(from, to, signal);
+    await writeDashboard(shopId, from, to, data);
     return true;
   } catch {
     return false;
@@ -127,7 +172,9 @@ async function cacheSaleDetails(shopId: string, sales: { id: string; at: string;
       },
       lines: row.lines.map((l: any) => ({ ...l, discount: 0, net: Number(l.lineAmount) })),
     };
-    await kvSet(`sale:${shopId}:${row.id}`, JSON.stringify({ savedAt: now, detail }));
+    await kvSet(`sale:${shopId}:${row.id}`, JSON.stringify({
+      savedAt: now, detail, period: kigaliDay(row.at).slice(0, 7), ...cacheWriteMeta(now),
+    }));
     savedCount += 1;
   }
   return savedCount;
@@ -142,6 +189,14 @@ const cat = (categories: OfflineCategoryStatus[], key: OfflineCategoryKey, saved
 interface PeriodCacheResult {
   modules: OfflinePeriodStatus["modules"];
   hasSalesData: boolean;
+  /** In staged mode the caller writes these only after every module succeeded. */
+  data?: {
+    dashboard: Dashboard;
+    inventory: InventoryData | null;
+    movements: MovementsData | null;
+    sales: SalesData | null;
+    financial: FinancialData | null;
+  };
 }
 
 /** Download one exact period. The archive reuses this for every older month. */
@@ -149,37 +204,53 @@ async function cacheReportPeriod(
   shopId: string,
   range: { from: string; to: string },
   financials: boolean,
-  opts: { inventory?: boolean; signal?: AbortSignal } = {},
+  opts: { inventory?: boolean; signal?: AbortSignal; persist?: boolean } = {},
 ): Promise<PeriodCacheResult> {
-  const ctx = { online: true, shopId, financials, from: range.from, to: range.to };
-  const dashboard = await saveDashboard(shopId, range.from, range.to, opts.signal);
+  const persist = opts.persist !== false;
+  const ctx = { online: true, shopId, financials, from: range.from, to: range.to, persist };
+  const dashboardData = persist
+    ? null
+    : await fetchDashboard(range.from, range.to, opts.signal).catch(() => null);
+  const dashboard = dashboardData ? true : persist ? await saveDashboard(shopId, range.from, range.to, opts.signal) : false;
   const inventoryP = opts.inventory === false ? Promise.resolve(null) : loadInventory(ctx);
   const [inventory, movements, sales, financial] = await Promise.all([
     inventoryP,
     loadMovements(ctx), loadSales(ctx),
     financials ? loadFinancial(ctx) : Promise.resolve(null),
   ]);
-  if (sales.data) await cacheSaleDetails(shopId, sales.data.sales);
+  const fetched = (m: LoadMeta) => persist ? saved(m) : m.source === "server" && !m.failed;
+  if (persist && sales.data) await cacheSaleDetails(shopId, sales.data.sales);
   return {
     hasSalesData: !!sales.data,
     modules: {
       dashboard,
-      inventory: inventory ? saved(inventory.meta) : false,
-      movements: saved(movements.meta),
-      sales: saved(sales.meta),
-      financial: financial ? saved(financial.meta) : false,
+      inventory: inventory ? fetched(inventory.meta) : false,
+      movements: fetched(movements.meta),
+      sales: fetched(sales.meta),
+      financial: financial ? fetched(financial.meta) : false,
     },
+    data: dashboardData ? {
+      dashboard: dashboardData,
+      inventory: inventory?.data ?? null,
+      movements: movements.data,
+      sales: sales.data,
+      financial: financial?.data ?? null,
+    } : undefined,
   };
 }
 
-interface ShopProfileLite { createdAt?: string | null }
+interface ShopProfileLite { createdAt?: string | null; created_at?: string | null }
+
+/** Accept both the current camelCase profile and an older API that returned the SQL column name. */
+function profileCreatedAt(data: ShopProfileLite | null | undefined): string | null {
+  const value = data?.createdAt ?? data?.created_at;
+  return typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : null;
+}
 
 async function fetchShopProfile(shopId: string, signal?: AbortSignal): Promise<{ data: unknown; createdAt: string | null }> {
   const data = await request<ShopProfileLite>("/shop/profile", { auth: true, signal });
   await snapshot(snapshotKeys.shop(shopId), data);
-  const createdAt = typeof data.createdAt === "string" && !Number.isNaN(Date.parse(data.createdAt))
-    ? data.createdAt : null;
-  return { data, createdAt };
+  return { data, createdAt: profileCreatedAt(data) };
 }
 
 const downloadingCategories = (previous: OfflineDataStatus | null): OfflineCategoryStatus[] =>
@@ -318,44 +389,80 @@ async function runPreparation(force: boolean, changed: boolean): Promise<Offline
     }
 
     // Rolling history: fill in a few missing months per successful sync, newest first, stopping at
-    // the shop's creation month. Full months are protected from the browsing-cache retention rule.
+    // the shop's creation month. The retention policy and any cleanup floor cap how far back the
+    // automatic loop goes, so a storage cleanup is not immediately undone by the next sync.
+    const retention = await readRetention(shopId).catch(() => ({ ...DEFAULT_RETENTION }));
     let archive: OfflineArchiveStatus | undefined = shopProfile?.createdAt ? undefined : previous?.archive;
     if (shopProfile?.createdAt) {
-      const months = archiveMonthKeys(shopProfile.createdAt);
+      let selection = await archiveSelection(shopProfile.createdAt, retention, shopId, user.id);
+      const allowed = await archiveDownloadAllowed(retention.wifiOnly);
+      if (allowed) {
+        let savedMonths = new Set<string>();
+        for (const month of selection.months) {
+          if (await kvGet(archiveKey(shopId, user.id, month)).catch(() => null)) savedMonths.add(month);
+        }
+        const missing = selection.months.filter((month) => !savedMonths.has(month));
+        for (const month of missing.slice(0, ARCHIVE_MONTHS_PER_RUN)) {
+          if (signal.aborted) break;
+          const range = monthRangeFor(month);
+          if (!range) continue;
+          const result = await cacheReportPeriod(shopId, range, base.financials, { signal, persist: false });
+          const complete = result.modules.dashboard && result.modules.movements && result.modules.sales
+            && (!base.financials || result.modules.financial);
+          if (!complete || !result.data) continue;
+          let profit: unknown = null;
+          if (base.financials) {
+            try {
+              profit = await request<unknown>(
+                `/reports/profitability?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`,
+                { auth: true, signal },
+              );
+            } catch {
+              continue; // retry this month on the next run rather than marking it complete
+            }
+          }
+          // The month is staged in memory first. Only after every required payload has arrived
+          // are the saved copies replaced, and only after those writes is the month marked done.
+          try {
+            await writeDashboard(shopId, range.from, range.to, result.data.dashboard);
+            const ctx = { online: true, shopId, financials: base.financials, from: range.from, to: range.to, persist: true };
+            if (result.data.inventory && !(await saveReportCache(ctx, "analytics:inventory", result.data.inventory))) continue;
+            if (result.data.movements && !(await saveReportCache(ctx, "analytics:movements", result.data.movements))) continue;
+            if (result.data.sales && !(await saveReportCache(ctx, "analytics:sales", result.data.sales))) continue;
+            if (base.financials && result.data.financial && !(await saveReportCache(ctx, "analytics:financial", result.data.financial))) continue;
+            if (result.data.sales) await cacheSaleDetails(shopId, result.data.sales.sales);
+            if (base.financials && profit !== null) {
+              await snapshot(`profitability:${shopId}:${user.id}:${range.from}:${range.to}`, profit);
+            }
+          } catch {
+            continue;
+          }
+          await kvSet(archiveKey(shopId, user.id, month), "1");
+          savedMonths.add(month);
+        }
+      }
+
+      // Enforce the selected retention policy after downloading. Only downloaded cache is eligible;
+      // the cleanup service never receives records or outbox rows. A cleanup can raise the archive
+      // floor, so recalculate the visible selection afterwards instead of showing deleted months.
+      const cleanup = await runCacheCleanup(shopId, user.id, retention).catch(() => null);
+      if (cleanup?.months.length) {
+        selection = await archiveSelection(shopProfile.createdAt, retention, shopId, user.id);
+      }
       const savedMonths = new Set<string>();
-      for (const month of months) {
+      for (const month of selection.months) {
         if (await kvGet(archiveKey(shopId, user.id, month)).catch(() => null)) savedMonths.add(month);
       }
-      const missing = months.filter((month) => !savedMonths.has(month));
-      for (const month of missing.slice(0, ARCHIVE_MONTHS_PER_RUN)) {
-        if (signal.aborted) break;
-        const range = monthRangeFor(month);
-        if (!range) continue;
-        const result = await cacheReportPeriod(shopId, range, base.financials, { signal });
-        const complete = result.modules.dashboard && result.modules.movements && result.modules.sales
-          && (!base.financials || result.modules.financial);
-        if (!complete) continue;
-        if (base.financials) {
-          try {
-            const data = await request<unknown>(
-              `/reports/profitability?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`,
-              { auth: true, signal },
-            );
-            await snapshot(`profitability:${shopId}:${user.id}:${range.from}:${range.to}`, data);
-          } catch {
-            continue; // retry this month on the next run rather than marking it complete
-          }
-        }
-        await kvSet(archiveKey(shopId, user.id, month), "1");
-        savedMonths.add(month);
-      }
-      const oldestSavedMonth = [...months].reverse().find((month) => savedMonths.has(month)) ?? null;
+      const oldestSavedMonth = [...selection.months].reverse().find((month) => savedMonths.has(month)) ?? null;
       archive = {
-        earliestMonth: months.at(-1) ?? null,
+        earliestMonth: selection.months.at(-1) ?? null,
         oldestSavedMonth,
         savedMonths: savedMonths.size,
-        totalMonths: months.length,
-        complete: months.every((month) => savedMonths.has(month)),
+        totalMonths: selection.months.length,
+        complete: selection.months.every((month) => savedMonths.has(month)),
+        limited: selection.limited || !!cleanup?.months.length,
+        waitingForWifi: !allowed,
+        lastCleanupBytes: cleanup?.bytesFreed ?? 0,
       };
     }
 
@@ -406,6 +513,72 @@ export function prepareOfflineData(force = false, changed = false): Promise<Offl
 export function queueOfflinePreparation(changed = false): void {
   if (useOfflineData.getState().preparing) return;
   void prepareOfflineData(false, changed).catch(() => undefined);
+}
+
+/**
+ * History boundary for the archive. Prefer the shop profile, then fall back to the earliest business
+ * record already on this device. Some deployed APIs predate the profile's creation date; without a
+ * boundary the archive could never start, even though the device already knows where its history begins.
+ */
+export async function getShopCreatedAt(shopId: string): Promise<string | null> {
+  const cached = await readOfflineSnapshot<ShopProfileLite>(snapshotKeys.shop(shopId)).catch(() => null);
+  const cachedCreatedAt = profileCreatedAt(cached?.data);
+  if (cachedCreatedAt) return cachedCreatedAt;
+  const localStart = await earliestRecordAt(shopId).catch(() => null);
+  if (localStart) return localStart;
+  try {
+    const profile = await fetchShopProfile(shopId);
+    return profile.createdAt;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-download one archive month after an explicit user action. The archive marker is written only
+ * after every required module has answered, so a failed refresh is retried rather than presented
+ * as complete.
+ */
+export async function refreshArchiveMonth(month: string): Promise<{ ok: boolean; error?: string }> {
+  const user = useSession.getState().user;
+  if (!user?.shopId) return { ok: false, error: "no_shop" };
+  if (inFlight) return { ok: false, error: "busy" };
+  const range = monthRangeFor(month);
+  if (!range) return { ok: false, error: "invalid_month" };
+  const retention = await readRetention(user.shopId).catch(() => ({ ...DEFAULT_RETENTION }));
+  if (!(await archiveDownloadAllowed(retention.wifiOnly))) return { ok: false, error: "wifi_required" };
+  const financials = user.role === "owner" || (await kvGet(`dash.perms:${user.id}`).catch(() => null)) === "1";
+  const result = await cacheReportPeriod(user.shopId, range, financials, { persist: false });
+  const complete = result.modules.dashboard && result.modules.movements && result.modules.sales
+    && (!financials || result.modules.financial) && !!result.data;
+  if (!complete || !result.data) return { ok: false, error: "incomplete" };
+  let profit: unknown = null;
+  if (financials) {
+    try {
+      profit = await request<unknown>(
+        `/reports/profitability?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`,
+        { auth: true },
+      );
+    } catch {
+      return { ok: false, error: "profitability" };
+    }
+  }
+  try {
+    await writeDashboard(user.shopId, range.from, range.to, result.data.dashboard);
+    const ctx = { online: true, shopId: user.shopId, financials, from: range.from, to: range.to, persist: true };
+    if (result.data.inventory && !(await saveReportCache(ctx, "analytics:inventory", result.data.inventory))) return { ok: false, error: "inventory" };
+    if (result.data.movements && !(await saveReportCache(ctx, "analytics:movements", result.data.movements))) return { ok: false, error: "movements" };
+    if (result.data.sales && !(await saveReportCache(ctx, "analytics:sales", result.data.sales))) return { ok: false, error: "sales" };
+    if (financials && result.data.financial && !(await saveReportCache(ctx, "analytics:financial", result.data.financial))) return { ok: false, error: "financial" };
+    if (result.data.sales) await cacheSaleDetails(user.shopId, result.data.sales.sales);
+    if (financials && profit !== null) {
+      await snapshot(`profitability:${user.shopId}:${user.id}:${range.from}:${range.to}`, profit);
+    }
+  } catch {
+    return { ok: false, error: "storage" };
+  }
+  await kvSet(archiveKey(user.shopId, user.id, month), "1");
+  return { ok: true };
 }
 
 const ISO_INSTANT = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g;

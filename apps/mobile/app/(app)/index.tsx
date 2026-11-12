@@ -12,6 +12,7 @@ import { kvGet, kvSet } from "../../src/database";
 import { ApiError, request, sessionRejected, useSession } from "../../src/services/api";
 import { degradedList, sectionKey, sectionLabel } from "../../src/services/report-sections";
 import { businessRevisionKey, dashboardCacheIsCurrent, dashboardCacheKey, dashboardScope } from "../../src/services/dashboard-cache";
+import { cacheWriteMeta, touchCacheAccess } from "../../src/services/cache-meta";
 import { buildLocalDashboard } from "../../src/services/local-dashboard-data";
 import type { Dashboard as DashboardPayload, FigureSource, FigureStatus, LocalDashboardResult } from "../../src/services/local-dashboard";
 import {
@@ -247,7 +248,8 @@ export default function Home() {
       showData(res, "server", null, keyAtStart); setFailed(false); setAuthIssue(false);
       // The revision is recorded with the payload: a remount can reuse it only while the last pull
       // still reports the same business state.
-      void kvSet(cacheKey, JSON.stringify({ version: 3, savedAt: new Date().toISOString(), data: res, revision: revisionBefore })).catch(() => {});
+      const now = new Date().toISOString();
+      void kvSet(cacheKey, JSON.stringify({ version: 3, savedAt: now, data: res, revision: revisionBefore, ...cacheWriteMeta(now) })).catch(() => {});
       void kvSet(`dash.perms:${user?.id ?? "none"}`, res.permissions?.financials ? "1" : "0").catch(() => {});
     } catch (e) {
       if (seq !== loadSeq.current || scopeRef.current !== keyAtStart) return;
@@ -262,7 +264,10 @@ export default function Home() {
         try {
           const raw = await kvGet(cacheKey);
           const cached = raw ? JSON.parse(raw) : null;
-          if (cached?.data && scopeRef.current === keyAtStart) showData(cached.data, "cached", cached.savedAt ?? null, keyAtStart);
+          if (cached?.data && scopeRef.current === keyAtStart) {
+            void touchCacheAccess(cacheKey, raw);
+            showData(cached.data, "cached", cached.savedAt ?? null, keyAtStart);
+          }
         } catch { /* leave the previous data in place */ }
       }
     } finally {
@@ -291,6 +296,7 @@ export default function Home() {
       const raw = await kvGet(cacheKey);
       cached = raw ? JSON.parse(raw) : null;
       if (cached?.data && seq === loadSeq.current && scopeRef.current === keyAtStart) {
+        void touchCacheAccess(cacheKey, raw);
         showData(cached.data, "cached", cached.savedAt ?? null, keyAtStart);
         setLoading(false);
       }

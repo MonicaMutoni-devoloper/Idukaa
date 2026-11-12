@@ -260,8 +260,8 @@ export function KeyValue({ label, value, strong }: { label: string; value: React
   const c = useTheme();
   return (
     <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: space.md, paddingVertical: 5, borderTopWidth: strong ? 1 : 0, borderTopColor: c.line, marginTop: strong ? 4 : 0, paddingTop: strong ? 9 : 5 }}>
-      <Text style={{ color: strong ? c.ink : c.muted, fontSize: strong ? 15 : 13, fontWeight: strong ? "700" : "400" }}>{label}</Text>
-      <Text style={{ color: c.ink, fontSize: strong ? 18 : 14, fontWeight: strong ? "800" : "600", fontVariant: ["tabular-nums"] }}>{value}</Text>
+      <Text style={{ flexShrink: 1, color: strong ? c.ink : c.muted, fontSize: strong ? 15 : 13, fontWeight: strong ? "700" : "400" }}>{label}</Text>
+      <Text style={{ flexShrink: 1, maxWidth: "62%", textAlign: "right", color: c.ink, fontSize: strong ? 18 : 14, fontWeight: strong ? "800" : "600", fontVariant: ["tabular-nums"] }}>{value}</Text>
     </View>
   );
 }

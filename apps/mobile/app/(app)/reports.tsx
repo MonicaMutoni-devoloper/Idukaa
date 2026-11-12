@@ -11,6 +11,7 @@ import {
 import { useT } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
 import { ApiError, request, useSession } from "../../src/services/api";
+import { cacheWriteMeta, touchCacheAccess } from "../../src/services/cache-meta";
 import {
   loadFinancial, loadInventory, loadMovements, loadSales, peekCachedReport,
   type FinancialData, type InventoryData, type Loaded, type MovementsData, type ReportCategory, type SalesData,
@@ -248,12 +249,13 @@ export default function Reports() {
     try {
       const raw = await kvGet(cacheKey);
       const cached = raw ? JSON.parse(raw) : null;
-      if (cached?.detail) { setDetail(cached.detail); shown = true; }
+      if (cached?.detail) { void touchCacheAccess(cacheKey, raw); setDetail(cached.detail); shown = true; }
     } catch { /* the report row above is still usable */ }
     try {
       const fresh = await request<SaleDetail>(`/reports/sales/${id}`);
       setDetail(fresh);
-      void kvSet(cacheKey, JSON.stringify({ savedAt: new Date().toISOString(), detail: fresh })).catch(() => {});
+      const now = new Date().toISOString();
+      void kvSet(cacheKey, JSON.stringify({ savedAt: now, detail: fresh, ...cacheWriteMeta(now) })).catch(() => {});
     } catch {
       if (!shown) setDetailFailed(true);
     }
