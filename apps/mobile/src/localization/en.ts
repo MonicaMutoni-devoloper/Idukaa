@@ -72,6 +72,7 @@ export const en = {
   "sell.remaining": "Available", "sell.lineTotal": "Line total", "sell.subtotal": "Subtotal", "sell.save": "Save sale",
   "sell.savedTitle": "Sale saved", "sell.savedText": "Saved on this device. It will sync when you are online.",
   "sell.notSaved": "Not saved", "sell.saveFailed": "The sale could not be saved on this device. Nothing was recorded — try again.",
+  "sell.checkDetails": "Check the sale details before saving.",
   "sell.balance": "Balance", "sell.fullyPaid": "Paid in full", "sell.insufficient": "Not enough stock",
   "sell.addProduct": "Add product", "sell.saved": "Sale saved", "sell.quickDesc": "Record a sale and take payment.",
   "sell.quickLead": "Set the quantity, then add it to the cart. Stock is checked before adding.",

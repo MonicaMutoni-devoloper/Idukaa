@@ -77,6 +77,7 @@ export const rw: Record<Key, string> = {
   "sell.remaining": "Bihari", "sell.lineTotal": "Igiciro cy'umurongo", "sell.subtotal": "Igiteranyo",
   "sell.save": "Bika Igurisha", "sell.savedTitle": "Igurisha ryabitswe", "sell.savedText": "Byabitswe kuri iki gikoresho. Bizahuzwa interineti nigaruka.",
   "sell.notSaved": "Ntibyabitswe", "sell.saveFailed": "Igurisha ntiryashoboye kubikwa kuri iki gikoresho. Nta cyanditswe — ongera ugerageze.",
+  "sell.checkDetails": "Reba amakuru y'igurisha mbere yo kubika.",
   "sell.balance": "Isigaye", "sell.fullyPaid": "Byishyuwe byose", "sell.insufficient": "Ububiko ntibuhagije",
   "sell.addProduct": "Ongeraho igicuruzwa", "sell.saved": "Igurisha ryabitswe", "sell.quickDesc": "Andika Igurisha wakire amafaranga.",
   "sell.quickLead": "Shyiraho ingano, hanyuma wiyongere ku byaguzwe. Ububiko burarebwa mbere yo kongeraho.",

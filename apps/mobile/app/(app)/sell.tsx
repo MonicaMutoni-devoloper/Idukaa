@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Platform, Pressable, Text, View } from "react-native";
+import { Keyboard, Platform, Pressable, Text, View } from "react-native";
 import { formatQty, formatRwf, lineAmount, toBaseQty, type PaymentMethod } from "@sms/shared";
 import { Badge, Banner, Button, Card, Empty, Field, Modal, Screen, Segmented, useToasts, useWide } from "../../src/components/ui";
 import { Appear, Disclosure, Dismiss, Shake } from "../../src/components/motion";
@@ -141,10 +141,20 @@ export default function Sell() {
     : quickErr;
 
   function openQuick(p: LocalProduct) {
+    Keyboard.dismiss();
     setSaved(null); setSaveError(null); setQuick(p); setQuickQty("1"); setQuickErr(null);
   }
   function closeQuick() {
+    Keyboard.dismiss();
     setQuick(null); setQuickQty("1"); setQuickErr(null);
+  }
+  function openCart() {
+    Keyboard.dismiss();
+    setCartOpen(true);
+  }
+  function closeCart() {
+    Keyboard.dismiss();
+    setCartOpen(false);
   }
   function addQuick() {
     if (!quick || !quickCheck?.ok) return;
@@ -176,6 +186,7 @@ export default function Sell() {
   };
 
   async function save() {
+    setSaveError(null);
     const e: Record<string, string> = {};
     lines.forEach((l, i) => {
       const qn = qtyOrNull(l.qty);
@@ -188,7 +199,12 @@ export default function Sell() {
       e.d = t("sell.discountLimit").replace("{pct}", String(maxDiscount));
     if (tendered === null) e.paid = t("v.invalid");
     setErrs(e);
-    if (Object.keys(e).length) setErrCount((n) => n + 1);
+    if (Object.keys(e).length) {
+      setErrCount((n) => n + 1);
+      // The review sheet only edits quantities and prices; a bad discount or payment value lives
+      // on the sale form behind it, so explain why Save sale did nothing.
+      if (cartOpen) setSaveError(t("sell.checkDetails"));
+    }
     if (!lines.length || Object.keys(e).length) return;
 
     const saleTotal = total, count = lines.length, saleId = uuid(), at = new Date().toISOString();
@@ -202,7 +218,7 @@ export default function Sell() {
       // `at` is passed as the record timestamp so today's local figures place the sale on the
       // Kigali business day it was made, not on whichever day the sync later ran.
       await enqueue(user.id, uuid(), "sale.create", payload, deltas, undefined, at); // durable BEFORE success is shown
-      setLines([]); setDiscount("0"); setPaid(null); setErrs({});
+      setLines([]); setDiscount("0"); setPaid(null); setErrs({}); setCartOpen(false); Keyboard.dismiss();
       setSaved({ total: saleTotal, count, ref: `RC-${saleId.slice(0, 8).toUpperCase()}`, paid: appliedPaid, change, at, method });
       await refreshCounts(); void syncNow();
     } catch {
@@ -376,12 +392,12 @@ export default function Sell() {
               <Text style={{ color: c.surface, fontSize: 12, fontWeight: "600" }}>{lines.length} {t("sell.cartItems")} · {formatQty(cartSellingQty(lines))}</Text>
               <Text testID="sell-cart-bar-total" style={{ color: c.surface, fontSize: 18, lineHeight: 23, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{formatRwf(total)}</Text>
             </View>
-            <Button testID="sell-view-cart" size="sm" kind="secondary" label={t("sell.viewCart")} onPress={() => setCartOpen(true)} />
+            <Button testID="sell-view-cart" size="sm" kind="secondary" label={t("sell.viewCart")} onPress={openCart} />
           </View>
         </View>
       ) : null}
 
-      <Modal open={!!quick} onClose={closeQuick} title={quick?.name ?? t("sell.addProduct")} description={t("sell.quickLead")} width={460}
+      <Modal open={!!quick} onClose={closeQuick} title={quick?.name ?? t("sell.addProduct")} description={t("sell.quickLead")} width={460} scroll
         headerAction={
           <Pressable testID="sell-quick-close" accessibilityRole="button" accessibilityLabel={t("common.close")} onPress={closeQuick}
             style={({ hovered, pressed }: any) => ({ width: 44, height: 44, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: hovered || pressed ? c.hover : "transparent" })}>
@@ -426,14 +442,24 @@ export default function Sell() {
         ) : null}
       </Modal>
 
-      <Modal open={cartOpen} onClose={() => setCartOpen(false)} title={t("sell.cart")} description={t("sell.cartReviewDesc")} width={560} scroll
+      <Modal open={cartOpen} onClose={closeCart} title={t("sell.cart")} description={t("sell.cartReviewDesc")} width={560} scroll
         headerAction={
-          <Pressable testID="sell-cart-close" accessibilityRole="button" accessibilityLabel={t("common.close")} onPress={() => setCartOpen(false)}
+          <Pressable testID="sell-cart-close" accessibilityRole="button" accessibilityLabel={t("common.close")} onPress={closeCart}
             style={({ hovered, pressed }: any) => ({ width: 44, height: 44, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: hovered || pressed ? c.hover : "transparent" })}>
             <Icon name="close" size={18} color={c.inkSoft} />
           </Pressable>
         }
-        footer={<Button kind="secondary" label={t("common.close")} onPress={() => setCartOpen(false)} />}>
+        footer={
+          <View style={{ flex: 1, flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>
+            <View style={{ flexGrow: 1, minWidth: 96, gap: 1 }}>
+              <Text style={{ color: c.muted, fontSize: 11 }}>{t("common.total")}</Text>
+              <Text testID="sell-cart-total" style={{ color: c.ink, ...type.money }}>{formatRwf(total)}</Text>
+            </View>
+            <Button kind="secondary" label={t("common.close")} onPress={closeCart} />
+            <Button testID="sell-cart-save" label={t("sell.save")} loading={busy} disabled={!lines.length} onPress={() => void save()} />
+          </View>
+        }>
+        {saveError ? <Banner tone="danger" title={t("sell.notSaved")} text={saveError} /> : null}
         {lines.length ? lines.map((l, i) => (
           <View key={l.p.id} style={{ borderWidth: 1, borderColor: c.line, borderRadius: radius.md, padding: space.md, gap: space.sm }}>
             <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>

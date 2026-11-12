@@ -427,12 +427,17 @@ export function Modal({ open, onClose, title, description, children, footer, wid
   if (!mounted) return null;
   return (
     <RNModal visible transparent animationType="none" onRequestClose={onClose} statusBarTranslucent {...({ "aria-label": title } as any)}>
-      <View style={{ flex: 1, justifyContent: wide ? "center" : "flex-end", alignItems: "center" }}>
+      {/* Keep the sheet in the visible area when the keyboard opens. The action row lives outside
+          the scroll body, so Add to cart / Save sale never scroll away or sit under the keyboard. */}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : Platform.OS === "android" ? "height" : undefined}
+        style={{ flex: 1, justifyContent: wide ? "center" : "flex-end", alignItems: "center" }}>
         <Animated.View style={{ ...StyleSheetAbsoluteFill, backgroundColor: c.overlay, opacity: progress }}>
           <Pressable style={{ flex: 1 }} accessibilityRole="button" accessibilityLabel={t("common.close")} onPress={onClose} />
         </Animated.View>
         <Animated.View accessibilityViewIsModal style={{
-          width: "100%", maxWidth: wide ? width : undefined, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line,
+          width: "100%", maxWidth: wide ? width : undefined, maxHeight: wide ? "88%" : "92%", flexShrink: 1, overflow: "hidden",
+          backgroundColor: c.surface, borderWidth: 1, borderColor: c.line,
           borderRadius: wide ? radius.lg : 0, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg,
           padding: space.xl, paddingBottom: wide ? space.xl : space.xxl, gap: space.md, ...elevation.raised,
           opacity: progress, transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [wide ? 10 : 32, 0] }) }, { scale: progress.interpolate({ inputRange: [0, 1], outputRange: [wide ? 0.98 : 1, 1] }) }],
@@ -445,11 +450,18 @@ export function Modal({ open, onClose, title, description, children, footer, wid
             {headerAction}
           </View>
           {scroll
-            ? <ScrollView style={{ maxHeight: wide ? 460 : 330 }} keyboardShouldPersistTaps="handled" contentContainerStyle={{ gap: space.md }}>{children}</ScrollView>
+            ? <ScrollView style={{ flexShrink: 1, maxHeight: wide ? 460 : 330 }} keyboardShouldPersistTaps="handled"
+                keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+                contentContainerStyle={{ gap: space.md }}>{children}</ScrollView>
             : children}
-          <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: space.sm, marginTop: space.xs }}>{footer}</View>
+          {footer ? (
+            <View style={{
+              flexDirection: "row", justifyContent: "flex-end", alignItems: "center", gap: space.sm,
+              marginTop: space.xs, paddingTop: space.md, borderTopWidth: 1, borderTopColor: c.line,
+            }}>{footer}</View>
+          ) : null}
         </Animated.View>
-      </View>
+      </KeyboardAvoidingView>
     </RNModal>
   );
 }
