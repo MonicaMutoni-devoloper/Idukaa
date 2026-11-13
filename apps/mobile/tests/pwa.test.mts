@@ -34,7 +34,7 @@ test("Idukaa manifest is installable and correctly branded", () => {
 
 test("the service worker caches only the shell and never API responses", () => {
   const sw = read("public/sw.js");
-  assert.match(sw, /const CACHE = "idukaa-shell-v4"/);
+  assert.match(sw, /const CACHE = "idukaa-shell-v5"/);
   assert.match(sw, /"\/manifest\.json"/);
   assert.match(sw, /"\/icon-maskable-512\.png"/);
   for (const prefix of ["/auth", "/sync", "/reports", "/sales", "/purchases"]) {
@@ -43,6 +43,9 @@ test("the service worker caches only the shell and never API responses", () => {
   assert.match(sw, /if \(isApiPath\(url\.pathname\)\) return;/);
   assert.match(sw, /if \(req\.headers\.get\("authorization"\)\) return;/);
   assert.match(sw, /caches\.match\("\/"\)/, "a navigation must fall back to the cached shell");
+  // A launch may not wait on a hanging network: the cached shell answers after a bounded delay.
+  assert.match(sw, /const NAV_TIMEOUT_MS = \d+;/);
+  assert.match(sw, /setTimeout\(/, "the navigation path must be time-bounded");
 });
 
 test("both web HTML entry points register the worker and use Idukaa metadata", () => {

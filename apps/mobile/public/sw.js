@@ -1,10 +1,14 @@
 // App-shell cache only. Business data lives in the local database, NOT in this cache.
 // Authentication and business API responses are never cached, even when the API is deployed on the
 // same origin as the web app: their paths are excluded explicitly and authorized requests are skipped.
-// v4: Idukaa manifest/theme and the maskable icon. Bumping the cache removes the old branded shell
-// on activate, so an installed app cannot keep opening an outdated name or theme.
-const CACHE = "idukaa-shell-v4";
+// v5: bounded navigation wait (see NAV_TIMEOUT_MS). Bumping the cache removes the old shell on
+// activate, so an installed app cannot keep opening an outdated name or theme.
+const CACHE = "idukaa-shell-v5";
 const SHELL = ["/", "/manifest.json", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png"];
+// How long a launch may wait for the network before the saved shell is used instead. A phone whose
+// Wi-Fi is connected but has no internet keeps the request open until the platform gives up, which
+// made an installed app sit on a blank screen for many seconds before the cached shell appeared.
+const NAV_TIMEOUT_MS = 3000;
 
 // Every REST prefix used by the API. A response from any of these is always fetched live.
 const API_PREFIXES = ["/auth", "/sync", "/reports", "/notifications", "/audit", "/sales", "/purchases", "/shop", "/admin", "/health"];
@@ -39,14 +43,28 @@ self.addEventListener("fetch", (e) => {
   if (isApiPath(url.pathname)) return;                 // never cache auth or business data
   if (req.headers.get("authorization")) return;        // never cache an authorized response
 
-  // Client-side routes: always try the network, fall back to the cached shell when offline.
+  // Client-side routes: always try the network, but never wait on it indefinitely — a fresh
+  // response is preferred, the cached shell answers after NAV_TIMEOUT_MS or the first failure.
   if (req.mode === "navigate") {
-    e.respondWith(fetch(req).catch(async () => (await caches.match("/")) || new Response(
-      "<!doctype html><meta name=\"viewport\" content=\"width=device-width\">" +
-      "<title>Idukaa</title><body style=\"font-family:system-ui;padding:24px\">" +
-      "<h1>Idukaa</h1><p>Open Idukaa once with internet to save the application for offline use.</p>",
-      { headers: { "Content-Type": "text/html; charset=utf-8" } },
-    )));
+    e.respondWith((async () => {
+      const savedShell = async () => (await caches.match("/")) || new Response(
+        "<!doctype html><meta name=\"viewport\" content=\"width=device-width\">" +
+        "<title>Idukaa</title><body style=\"font-family:system-ui;padding:24px\">" +
+        "<h1>Idukaa</h1><p>Open Idukaa once with internet to save the application for offline use.</p>",
+        { headers: { "Content-Type": "text/html; charset=utf-8" } },
+      );
+      let timer;
+      const timedOut = new Promise((resolve) => {
+        timer = setTimeout(() => { savedShell().then(resolve); }, NAV_TIMEOUT_MS);
+      });
+      try {
+        return await Promise.race([fetch(req), timedOut]);
+      } catch {
+        return await savedShell();
+      } finally {
+        clearTimeout(timer);
+      }
+    })());
     return;
   }
 

@@ -266,11 +266,14 @@ export const useSession = create<{
     try { user = rawUser ? JSON.parse(rawUser) as SessionUser : null; } catch { user = null; }
     accessToken = WEB ? null : await storage.get(ACCESS_KEY);
     if (user) await bindShop(user.shopId); // restore scoped to this account's shop before screens read
-    set({ user, token: accessToken });
+    set({ user, token: accessToken, ready: true });
     // On the web the cookie is the credential, so a reload needs one refresh to get an access token.
-    // Offline this fails quietly: cached data stays visible and sync resumes when the network returns.
-    if (WEB && user) await refreshSession();
-    set({ ready: true });
+    // It must NOT be awaited before `ready`: on a phone whose Wi-Fi has no internet the request hangs
+    // until its timeout (two 30-second attempts), and the whole app stays on a spinner — measured at
+    // 61.6 s to the Overview. Starting it here keeps that work off the first paint; screens render
+    // from the saved session and cached copy, and an authenticated request that needs the token
+    // waits for this same in-flight refresh (see `request`).
+    if (WEB && user) void refreshSession();
   },
 
   login: async (email, password) => {
