@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Switch, Text, View } from "react-native";
 import { Banner, Button, Card, Field, Screen, Segmented } from "../../src/components/ui";
+import { DayField } from "../../src/components/date-range-picker";
 import { enqueue } from "../../src/database/local";
 import { useT } from "../../src/localization";
 import { useSession } from "../../src/services/api";
@@ -48,7 +49,7 @@ export default function Expense() {
           </View>
           <View style={{ flexDirection: "row", gap: space.md, flexWrap: "wrap" }}>
             <Field testID="expense-amount" label={`${t("common.amount")} (RWF)`} value={amount} keyboardType="number-pad" onChangeText={(x) => { setSaved(false); setAmount(x); }} error={err} />
-            <Field testID="expense-date" label={t("expense.date")} value={day} onChangeText={setDay} placeholder="YYYY-MM-DD" hint={t("expense.dateHelp")} />
+            <DayField testID="expense-date" label={t("expense.date")} value={day} onChangeText={setDay} hint={t("expense.dateHelp")} />
           </View>
           <Field testID="expense-note" label={t("common.note")} value={note} onChangeText={setNote} placeholder={t("common.optional")} />
           <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>

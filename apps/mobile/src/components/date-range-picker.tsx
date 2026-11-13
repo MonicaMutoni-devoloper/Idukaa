@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, Text, View } from "react-native";
-import { Button, Modal } from "./ui";
+import { Pressable, Text, View, type ViewStyle } from "react-native";
+import { Button, Field, Modal } from "./ui";
 import { Icon } from "./icons";
 import { useT, type Key } from "../localization";
 import { kigaliDay } from "@sms/shared";
 import {
-  OVERVIEW_PRESETS, OVERVIEW_PRESET_LABEL, formatSelectionRange, monthMatrix, monthOfDay,
+  OVERVIEW_PRESETS, OVERVIEW_PRESET_LABEL, formatSelectionRange, isBusinessDay, monthMatrix, monthOfDay,
   rangeSelection, selectionDays, shiftMonth, todaySelection, type OverviewPreset, type OverviewSelection,
 } from "../services/overview-period";
 import { radius, space, type, useTheme } from "../theme/tokens";
@@ -20,6 +20,80 @@ const fmtDay = (day: string, withYear = true) => {
 const WEEKDAYS = Array.from({ length: 7 }, (_, i) =>
   new Date(Date.UTC(2024, 0, 1 + i)).toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }),
 );
+
+/**
+ * Monday-first Kigali month grid. Shared by the Overview period control and every single-day field,
+ * so choosing a date looks and behaves the same wherever the app asks for one.
+ */
+function MonthGrid({ start, end, mode, today, view, onShift, onToday, onPick }: {
+  /** First selected day, or the day being edited. */ start: string;
+  /** Last selected day of a range; null for a single day. */ end: string | null;
+  mode: "day" | "range"; today: string;
+  view: { year: number; month: number };
+  onShift: (delta: number) => void; onToday: () => void; onPick: (day: string) => void;
+}) {
+  const t = useT(); const c = useTheme();
+  const cells = useMemo(() => monthMatrix(view.year, view.month, today), [view.year, view.month, today]);
+  const monthLabel = new Date(Date.UTC(view.year, view.month - 1, 1)).toLocaleDateString(undefined, {
+    month: "long", year: "numeric", timeZone: "UTC",
+  });
+  const customMode = mode === "range";
+  return (
+    <View style={{ gap: space.sm }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+        <Pressable testID="calendar-prev" accessibilityRole="button" accessibilityLabel={t("date.previousMonth")}
+          onPress={() => onShift(-1)}
+          style={({ pressed }: any) => ({ width: 40, height: 40, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: pressed ? c.pressed : c.surfaceMuted })}>
+          <Icon name="chevronLeft" size={16} color={c.inkSoft} />
+        </Pressable>
+        <Text testID="calendar-month" style={{ flex: 1, textAlign: "center", color: c.ink, fontSize: 15, fontWeight: "700" }}>{monthLabel}</Text>
+        <Pressable testID="calendar-next" accessibilityRole="button" accessibilityLabel={t("date.nextMonth")}
+          onPress={() => onShift(1)}
+          style={({ pressed }: any) => ({ width: 40, height: 40, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: pressed ? c.pressed : c.surfaceMuted })}>
+          <Icon name="chevronRight" size={16} color={c.inkSoft} />
+        </Pressable>
+        <Pressable testID="calendar-today" accessibilityRole="button" onPress={onToday} style={({ pressed }: any) => ({
+          minHeight: 40, paddingHorizontal: space.md, borderRadius: radius.sm, justifyContent: "center",
+          borderWidth: 1, borderColor: c.lineStrong, backgroundColor: pressed ? c.pressed : c.surface,
+        })}>
+          <Text style={{ color: c.primaryStrong, fontSize: 12, fontWeight: "700" }}>{t("common.today")}</Text>
+        </Pressable>
+      </View>
+
+      <View style={{ flexDirection: "row", gap: 2 }}>
+        {WEEKDAYS.map((d, i) => (
+          <Text key={`${d}-${i}`} style={{ flex: 1, textAlign: "center", color: c.muted, fontSize: 10, fontWeight: "700", paddingVertical: 2 }}>{d}</Text>
+        ))}
+      </View>
+
+      {Array.from({ length: 6 }, (_, row) => (
+        <View key={row} style={{ flexDirection: "row", gap: 2 }}>
+          {cells.slice(row * 7, row * 7 + 7).map((cell) => {
+            const selected = cell.day === start || cell.day === end;
+            const between = customMode && !!start && !!end && cell.day > start && cell.day < end;
+            return (
+              <Pressable key={cell.day} testID={`calendar-day-${cell.day}`} accessibilityRole="button"
+                accessibilityLabel={fmtDay(cell.day)}
+                accessibilityState={{ selected }} onPress={() => onPick(cell.day)}
+                style={({ pressed, focused }: any) => ({
+                  flex: 1, minHeight: 40, borderRadius: radius.sm, alignItems: "center", justifyContent: "center",
+                  borderWidth: focused ? 2 : cell.isToday && !selected ? 1 : 0,
+                  borderColor: focused ? c.focus : c.primary,
+                  backgroundColor: selected ? c.primaryStrong : between ? c.primarySoft : pressed ? c.pressed : "transparent",
+                })}>
+                <Text style={{
+                  color: selected ? c.onPrimary : between ? c.primaryStrong : cell.inMonth ? c.ink : c.muted,
+                  fontSize: 13, fontWeight: selected || cell.isToday ? "700" : "500",
+                  opacity: cell.inMonth ? 1 : 0.55, fontVariant: ["tabular-nums"],
+                }}>{Number(cell.day.slice(-2))}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      ))}
+    </View>
+  );
+}
 
 /**
  * Overview period control: presets plus a Monday-first Kigali calendar for one day or a range.
@@ -48,10 +122,6 @@ export function PeriodSelector({ selection, onChange, testID = "period-selector"
 
   useEffect(() => { if (open) reset(); /* draft is seeded from the committed selection */ }, [open, selection]);
 
-  const cells = useMemo(() => monthMatrix(view.year, view.month, today), [view.year, view.month, today]);
-  const monthLabel = new Date(Date.UTC(view.year, view.month - 1, 1)).toLocaleDateString(undefined, {
-    month: "long", year: "numeric", timeZone: "UTC",
-  });
   const customMode = mode === "range";
   const rangeReady = !!start && (!customMode || !!end);
   const heading = selection.kind === "preset"
@@ -161,64 +231,14 @@ export function PeriodSelector({ selection, onChange, testID = "period-selector"
 
         <View style={{ height: 1, backgroundColor: c.line }} />
 
-        <View style={{ gap: space.sm }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-            <Pressable testID="calendar-prev" accessibilityRole="button" accessibilityLabel={t("date.previousMonth")}
-              onPress={() => setView(shiftMonth(view.year, view.month, -1))}
-              style={({ pressed }: any) => ({ width: 40, height: 40, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: pressed ? c.pressed : c.surfaceMuted })}>
-              <Icon name="chevronLeft" size={16} color={c.inkSoft} />
-            </Pressable>
-            <Text testID="calendar-month" style={{ flex: 1, textAlign: "center", color: c.ink, fontSize: 15, fontWeight: "700" }}>{monthLabel}</Text>
-            <Pressable testID="calendar-next" accessibilityRole="button" accessibilityLabel={t("date.nextMonth")}
-              onPress={() => setView(shiftMonth(view.year, view.month, 1))}
-              style={({ pressed }: any) => ({ width: 40, height: 40, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: pressed ? c.pressed : c.surfaceMuted })}>
-              <Icon name="chevronRight" size={16} color={c.inkSoft} />
-            </Pressable>
-            <Pressable testID="calendar-today" accessibilityRole="button" onPress={() => {
-              const next = todaySelection();
-              const days = selectionDays(next);
-              setMode("day"); setDirty(true); setStart(days.fromDay); setEnd(days.fromDay);
-              setView(monthOfDay(days.fromDay));
-            }} style={({ pressed }: any) => ({
-              minHeight: 40, paddingHorizontal: space.md, borderRadius: radius.sm, justifyContent: "center",
-              borderWidth: 1, borderColor: c.lineStrong, backgroundColor: pressed ? c.pressed : c.surface,
-            })}>
-              <Text style={{ color: c.primaryStrong, fontSize: 12, fontWeight: "700" }}>{t("common.today")}</Text>
-            </Pressable>
-          </View>
-
-          <View style={{ flexDirection: "row", gap: 2 }}>
-            {WEEKDAYS.map((d, i) => (
-              <Text key={`${d}-${i}`} style={{ flex: 1, textAlign: "center", color: c.muted, fontSize: 10, fontWeight: "700", paddingVertical: 2 }}>{d}</Text>
-            ))}
-          </View>
-
-          {Array.from({ length: 6 }, (_, row) => (
-            <View key={row} style={{ flexDirection: "row", gap: 2 }}>
-              {cells.slice(row * 7, row * 7 + 7).map((cell) => {
-                const selected = cell.day === start || cell.day === end;
-                const between = customMode && !!start && !!end && cell.day > start && cell.day < end;
-                return (
-                  <Pressable key={cell.day} testID={`calendar-day-${cell.day}`} accessibilityRole="button"
-                    accessibilityLabel={fmtDay(cell.day)}
-                    accessibilityState={{ selected }} onPress={() => pick(cell.day)}
-                    style={({ pressed, focused }: any) => ({
-                      flex: 1, minHeight: 40, borderRadius: radius.sm, alignItems: "center", justifyContent: "center",
-                      borderWidth: focused ? 2 : cell.isToday && !selected ? 1 : 0,
-                      borderColor: focused ? c.focus : c.primary,
-                      backgroundColor: selected ? c.primaryStrong : between ? c.primarySoft : pressed ? c.pressed : "transparent",
-                    })}>
-                    <Text style={{
-                      color: selected ? c.onPrimary : between ? c.primaryStrong : cell.inMonth ? c.ink : c.muted,
-                      fontSize: 13, fontWeight: selected || cell.isToday ? "700" : "500",
-                      opacity: cell.inMonth ? 1 : 0.55, fontVariant: ["tabular-nums"],
-                    }}>{Number(cell.day.slice(-2))}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          ))}
-        </View>
+        <MonthGrid start={start} end={end} mode={mode} today={today} view={view}
+          onShift={(delta) => setView(shiftMonth(view.year, view.month, delta))}
+          onToday={() => {
+            const days = selectionDays(todaySelection());
+            setMode("day"); setDirty(true); setStart(days.fromDay); setEnd(days.fromDay);
+            setView(monthOfDay(days.fromDay));
+          }}
+          onPick={pick} />
 
         <View style={{ gap: 3, padding: space.md, borderRadius: radius.sm, backgroundColor: c.surfaceMuted }}>
           <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("date.selected")}</Text>
@@ -228,6 +248,67 @@ export function PeriodSelector({ selection, onChange, testID = "period-selector"
               : fmtDay(start)}
           </Text>
           {customMode && !end ? <Text style={{ color: c.muted, fontSize: 11 }}>{t("date.rangeHint")}</Text> : null}
+        </View>
+      </Modal>
+    </>
+  );
+}
+
+/**
+ * A `YYYY-MM-DD` form field that can still be typed, plus a calendar button so a day can always be
+ * picked instead of remembered. Used wherever a record is dated (expense, purchase, credit due,
+ * custom report ranges), keeping the same Kigali business-day calendar as the Overview.
+ */
+export function DayField({ label, value, onChangeText, testID, error, hint, placeholder = "YYYY-MM-DD", containerStyle }: {
+  label: string; value: string; onChangeText: (text: string) => void; testID?: string;
+  error?: string | null; hint?: string; placeholder?: string; containerStyle?: ViewStyle;
+}) {
+  const t = useT(); const c = useTheme();
+  const [open, setOpen] = useState(false);
+  const today = kigaliDay(Date.now());
+  // A half-typed or invalid value must not open the calendar on a random month: fall back to today.
+  const seed = isBusinessDay(value.trim()) ? value.trim() : today;
+  const [picked, setPicked] = useState(seed);
+  const [view, setView] = useState(() => monthOfDay(seed));
+  const id = (suffix: string) => (testID ? `${testID}-${suffix}` : undefined);
+
+  useEffect(() => {
+    if (!open) return;
+    const next = isBusinessDay(value.trim()) ? value.trim() : today;
+    setPicked(next); setView(monthOfDay(next));
+  }, [open, value, today]);
+
+  const apply = () => { onChangeText(picked); setOpen(false); };
+
+  return (
+    <>
+      <Field testID={testID} containerStyle={containerStyle} label={label} value={value} onChangeText={onChangeText}
+        placeholder={placeholder} error={error} hint={hint}
+        trailing={
+          <Pressable testID={id("calendar")} accessibilityRole="button"
+            accessibilityLabel={`${label}: ${t("date.openCalendar")}`} onPress={() => setOpen(true)}
+            style={({ pressed, hovered, focused }: any) => ({
+              width: 44, height: 44, borderRadius: radius.sm, alignItems: "center", justifyContent: "center",
+              borderWidth: focused ? 2 : 1, borderColor: focused ? c.focus : c.lineStrong,
+              backgroundColor: pressed ? c.pressed : hovered ? c.hover : c.surface,
+            })}>
+            <Icon name="calendar" size={18} color={c.primaryStrong} bg={c.surface} />
+          </Pressable>
+        } />
+
+      <Modal open={open} onClose={() => setOpen(false)} title={t("date.pickTitle")} description={t("date.pickHelp")}
+        footer={<>
+          <Button testID={id("calendar-cancel")} kind="secondary" label={t("common.cancel")} onPress={() => setOpen(false)} />
+          <Button testID={id("calendar-apply")} label={t("common.apply")} onPress={apply} />
+        </>}>
+        <MonthGrid start={picked} end={null} mode="day" today={today} view={view}
+          onShift={(delta) => setView(shiftMonth(view.year, view.month, delta))}
+          onToday={() => { setPicked(today); setView(monthOfDay(today)); }}
+          onPick={setPicked} />
+
+        <View style={{ gap: 3, padding: space.md, borderRadius: radius.sm, backgroundColor: c.surfaceMuted }}>
+          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("date.selected")}</Text>
+          <Text testID={id("calendar-summary")} style={{ color: c.ink, fontSize: 13, fontWeight: "700" }}>{fmtDay(picked)}</Text>
         </View>
       </Modal>
     </>

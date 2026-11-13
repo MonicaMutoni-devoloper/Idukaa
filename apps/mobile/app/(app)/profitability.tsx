@@ -5,6 +5,7 @@ import {
   TARGET_GROSS_MARGIN_BPS, breakEven, formatQty, formatRwf, grossMarginPct, markupPct, recommendedPrice,
 } from "@sms/shared";
 import { Badge, Banner, Button, Card, DataTable, Empty, ErrorState, Field, Loading, Screen, Segmented, useWide } from "../../src/components/ui";
+import { DayField } from "../../src/components/date-range-picker";
 import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
 import { request, useSession } from "../../src/services/api";
@@ -229,8 +230,8 @@ export default function Profitability() {
       {period === "custom" ? (
         <Card style={{ gap: space.md }}>
           <View style={{ flexDirection: "row", gap: space.md, flexWrap: "wrap" }}>
-            <Field testID="prof-from" label={t("common.from")} value={customFrom} onChangeText={setCustomFrom} placeholder="YYYY-MM-DD" />
-            <Field testID="prof-to" label={t("common.to")} value={customTo} onChangeText={setCustomTo} placeholder="YYYY-MM-DD" />
+            <DayField testID="prof-from" label={t("common.from")} value={customFrom} onChangeText={setCustomFrom} />
+            <DayField testID="prof-to" label={t("common.to")} value={customTo} onChangeText={setCustomTo} />
             <View style={{ justifyContent: "flex-end", paddingBottom: 1 }}>
               <Button testID="prof-apply" label={t("common.apply")} onPress={applyCustom} />
             </View>

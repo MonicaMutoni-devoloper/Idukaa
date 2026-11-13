@@ -263,6 +263,8 @@ export const en = {
   "date.previousMonth": "Previous month", "date.nextMonth": "Next month", "date.selected": "Selected period",
   "date.pickDay": "Pick a day from the calendar", "date.pickEnd": "Pick the end date",
   "date.rangeHint": "Tap the start date, then the end date. The end cannot be before the start.",
+  "date.pickTitle": "Choose a date", "date.pickHelp": "Pick the day on the calendar, or type it as YYYY-MM-DD. Dates are Africa/Kigali business days.",
+  "date.openCalendar": "Choose from the calendar",
   "dash.noPrior": "No data in the previous period",
   "dash.transactions": "Transactions", "dash.unitsSold": "Units sold", "dash.unitsSoldHint": "Across all sale lines",
   "dash.avgSale": "Average sale", "dash.avgSaleHint": "Net sales per transaction",

@@ -22,6 +22,7 @@ import { Pressable, Text, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { costPerBaseUnit, formatQty, formatRwf, lineAmount, parseQty, priceBelowCost, profitPerBaseUnit, toBaseQty } from "@sms/shared";
 import { Badge, Banner, Button, Card, DataTable, Empty, Field, KeyValue, Modal, Screen, Segmented, useWide } from "../../src/components/ui";
+import { DayField } from "../../src/components/date-range-picker";
 import { enqueue, kvGet, listProducts, listSuppliers, upsertLocalProduct, type LocalProduct } from "../../src/database/local";
 import { useT } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
@@ -542,8 +543,8 @@ export default function Stock() {
             <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap", alignItems: "flex-end" }}>
               <Field containerStyle={{ flexBasis: 150 }} testID="stock-reference" label={t("receive.reference")} value={s.reference}
                 onChangeText={(x) => setS({ ...s, reference: x })} placeholder={t("receive.referencePlaceholder")} />
-              <Field containerStyle={{ flexBasis: 130 }} testID="stock-date" label={t("receive.purchaseDate")} value={s.date}
-                onChangeText={(x) => setS({ ...s, date: x })} placeholder="YYYY-MM-DD" hint={t("expense.dateHelp")} error={s.date && !dayToDate(s.date) ? t("expense.dateError") : null} />
+              <DayField containerStyle={{ flexBasis: 130 }} testID="stock-date" label={t("receive.purchaseDate")} value={s.date}
+                onChangeText={(x) => setS({ ...s, date: x })} hint={t("expense.dateHelp")} error={s.date && !dayToDate(s.date) ? t("expense.dateError") : null} />
             </View>
             <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("receive.supplierOptional")}</Text>
             <Segmented value={s.supplier} onChange={(x) => setS({ ...s, supplier: x })} label={t("common.supplier")}

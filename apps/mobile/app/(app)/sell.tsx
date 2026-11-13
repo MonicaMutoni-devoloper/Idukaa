@@ -4,6 +4,7 @@ import { formatQty, formatRwf, lineAmount, toBaseQty, type PaymentMethod } from 
 import { Badge, Banner, Button, Card, Empty, Field, Modal, Screen, Segmented, useToasts, useWide } from "../../src/components/ui";
 import { Appear, Disclosure, Dismiss, Shake } from "../../src/components/motion";
 import { Icon } from "../../src/components/icons";
+import { DayField } from "../../src/components/date-range-picker";
 import { cartSellingQty, maxSellingMilli, mergeCartQty, stepSellingQty, validateQuickAddQty } from "../../src/services/sell-quick-add";
 import { enqueue, listCustomers, listProducts, type LocalCustomer, type LocalProduct } from "../../src/database/local";
 import { useT } from "../../src/localization";
@@ -351,7 +352,7 @@ export default function Sell() {
                 {customer ? (
                   <View style={{ gap: space.sm }}>
                     <Text style={{ color: c.muted, fontSize: 11 }}>{t("credit.limit")}: {formatRwf(creditLimit)} · {customer.phone ?? "—"}</Text>
-                    {balance > 0 ? <Field label={t("credit.due")} value={dueDate} onChangeText={setDueDate} placeholder="YYYY-MM-DD" /> : null}
+                    {balance > 0 ? <DayField testID="credit-due-date" label={t("credit.due")} value={dueDate} onChangeText={setDueDate} /> : null}
                     {balance > 0 ? (
                       <Field label={t("credit.overrideReason")} value={overrideReason} onChangeText={setOverrideReason}
                         hint={t("credit.overrideHint")} />

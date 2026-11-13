@@ -5,6 +5,7 @@ import { formatQty, formatRwf, kigaliDay } from "@sms/shared";
 import {
   Badge, Banner, Button, ConfirmDialog, Field, KeyValue, Loading, Modal, Screen, Segmented,
 } from "../../src/components/ui";
+import { DayField } from "../../src/components/date-range-picker";
 import {
   FinancialReport, InventoryReport, MovementsReport, ReportsLanding, SalesReport,
 } from "../../src/components/reports";
@@ -295,8 +296,8 @@ export default function Reports() {
     }>
       {choice === "custom" ? (
         <View style={{ flexDirection: "row", gap: space.md, flexWrap: "wrap" }}>
-          <Field testID="reports-from" label={t("common.from")} value={customFrom} onChangeText={setCustomFrom} placeholder="YYYY-MM-DD" />
-          <Field testID="reports-to" label={t("common.to")} value={customTo} onChangeText={setCustomTo} placeholder="YYYY-MM-DD" />
+          <DayField testID="reports-from" label={t("common.from")} value={customFrom} onChangeText={setCustomFrom} />
+          <DayField testID="reports-to" label={t("common.to")} value={customTo} onChangeText={setCustomTo} />
           <View style={{ justifyContent: "flex-end", paddingBottom: 1 }}><Button testID="reports-apply" label={t("common.apply")} onPress={applyCustom} /></View>
           {rangeError ? <Text style={{ color: c.danger, fontSize: 12, alignSelf: "center" }}>{rangeError}</Text> : null}
         </View>
