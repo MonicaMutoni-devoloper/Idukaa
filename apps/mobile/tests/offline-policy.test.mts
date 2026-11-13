@@ -9,7 +9,11 @@ import {
 const NOW = Date.parse("2026-11-11T08:00:00.000Z");
 
 test("automatic offline periods use Kigali calendar boundaries", () => {
-  assert.deepEqual(OFFLINE_PERIODS, ["thisMonth", "lastMonth", "thisYear", "lastYear"]);
+  // Today is downloaded too: the Overview opens on it, and its cache key is the exact day.
+  assert.deepEqual(OFFLINE_PERIODS, ["today", "thisMonth", "lastMonth", "thisYear", "lastYear"]);
+  assert.deepEqual(periodRangeFor("today", new Date(NOW)), {
+    from: "2026-11-10T22:00:00.000Z", to: "2026-11-11T22:00:00.000Z",
+  });
   assert.deepEqual(periodRangeFor("thisMonth", new Date(NOW)), {
     from: "2026-10-31T22:00:00.000Z", to: "2026-11-30T22:00:00.000Z",
   });

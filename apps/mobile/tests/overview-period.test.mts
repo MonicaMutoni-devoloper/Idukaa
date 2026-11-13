@@ -76,8 +76,9 @@ test("the readable label uses the inclusive end day and does not shift a day", (
   assert.doesNotMatch(label, /October|December/);
 });
 
-test("defaults are role-aware and never a custom stale payload", () => {
+test("every role opens on today, never on a wider or custom period", () => {
   assert.deepEqual(defaultSelection("manager"), { kind: "preset", preset: "today" });
-  assert.deepEqual(defaultSelection("owner"), { kind: "preset", preset: "thisMonth" });
-  assert.deepEqual(defaultSelection(undefined), { kind: "preset", preset: "thisMonth" });
+  assert.deepEqual(defaultSelection("owner"), { kind: "preset", preset: "today" });
+  assert.deepEqual(defaultSelection("system_admin"), { kind: "preset", preset: "today" });
+  assert.deepEqual(defaultSelection(undefined), { kind: "preset", preset: "today" });
 });

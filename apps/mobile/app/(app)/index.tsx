@@ -197,8 +197,13 @@ export default function Home() {
     setView(next && from ? { key, data: next, source: from, staleAt: savedAt } : null);
   }, [scopeKey]);
 
-  /** Recalculate only this device's figures. No request, no loading state, no remount. */
-  const refreshLocal = useCallback(async () => {
+  /**
+   * Recalculate only this device's figures. No request, no loading state, no remount.
+   * `adoptWithoutRecords` is used only when the server and its saved copy both failed: it lets the
+   * device's records render a period that has no record of its own yet (today, early in the day)
+   * instead of leaving the screen on "could not load".
+   */
+  const refreshLocal = useCallback(async (adoptWithoutRecords = false) => {
     if (!user?.id) return;
     const keyAtStart = scopeKey;
     const rangeAtStart = range;
@@ -213,7 +218,7 @@ export default function Home() {
       // Adopt local figures only when this device holds a record INSIDE the range. A fresh install,
       // or a period whose history lives only on the server, must never replace good figures with
       // zeros just because the local ledger happens to be empty for that period.
-      if (localInRange(local, rangeAtStart.to)) {
+      if (localInRange(local, rangeAtStart.to) || (adoptWithoutRecords && local.counts.total > 0)) {
         const hasUnconfirmed = local.counts.pending > 0 || local.counts.awaitingApproval > 0 || local.counts.failed > 0;
         // A server response and a revision-validated saved copy are both authoritative snapshots.
         // Keep them on screen unless this device has work the server cannot have counted yet; a
@@ -270,6 +275,10 @@ export default function Home() {
           }
         } catch { /* leave the previous data in place */ }
       }
+      // Still nothing for this range — typically the first open of a new day while offline, where
+      // no copy of "today" can exist yet. Render what this device recorded rather than a dead end;
+      // it is labelled "calculated on this device" like any other local figure.
+      if (viewRef.current?.key !== keyAtStart) await refreshLocal(true);
     } finally {
       if (inFlight.current?.promise === promise) {
         inFlight.current = null;
@@ -281,7 +290,7 @@ export default function Home() {
       }
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [range, scopeKey, cacheKey, revisionKey, scope, showData, user?.id]);
+  }, [range, scopeKey, cacheKey, revisionKey, scope, showData, refreshLocal, user?.id]);
 
   /**
    * A scope change (range, account, shop or role) is the only time old figures are cleared. The

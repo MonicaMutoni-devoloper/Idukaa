@@ -82,8 +82,12 @@ export function selectionDays(selection: OverviewSelection, now = new Date()): {
   return { fromDay: kigaliDay(r.from), toDay: kigaliDay(Date.parse(r.to) - 1) };
 }
 
-export function defaultSelection(role: "owner" | "manager" | "system_admin" | undefined): OverviewSelection {
-  return { kind: "preset", preset: role === "manager" ? "today" : "thisMonth" };
+/**
+ * Overview always opens on Today, for every role: the day's takings are the question the owner or
+ * manager opens the app to answer, and a month-to-date figure hid them behind a period change.
+ */
+export function defaultSelection(_role?: "owner" | "manager" | "system_admin" | undefined): OverviewSelection {
+  return { kind: "preset", preset: "today" };
 }
 
 /** Human-readable range, using the same inclusive end day the API range describes. */

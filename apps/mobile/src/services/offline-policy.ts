@@ -28,7 +28,7 @@ export interface OfflinePeriodStatus {
   modules: { dashboard: boolean; inventory: boolean; movements: boolean; sales: boolean; financial: boolean };
 }
 
-export type OfflinePeriodKey = "thisMonth" | "lastMonth" | "thisYear" | "lastYear";
+export type OfflinePeriodKey = "today" | "thisMonth" | "lastMonth" | "thisYear" | "lastYear";
 
 export interface OfflineArchiveStatus {
   /** Oldest month that can contain this shop's data (YYYY-MM), from the shop profile. */
@@ -72,10 +72,16 @@ export const REPORT_RETENTION_MS = 180 * 24 * 60 * 60_000;
 /** Older months are fetched a few at a time so a large shop never blocks one sync for minutes. */
 export const ARCHIVE_MONTHS_PER_RUN = 3;
 
-export const OFFLINE_PERIODS: OfflinePeriodKey[] = ["thisMonth", "lastMonth", "thisYear", "lastYear"];
+/**
+ * Periods downloaded for offline use. "today" is first because it is the Overview's default and a
+ * range cache is keyed by its exact dates: without this entry, the first look at a new day could
+ * only come from the network.
+ */
+export const OFFLINE_PERIODS: OfflinePeriodKey[] = ["today", "thisMonth", "lastMonth", "thisYear", "lastYear"];
 
 export const periodRangeFor = (key: OfflinePeriodKey, now = new Date()): PeriodRange =>
-  key === "thisMonth" ? presetRange("month", now.getTime())
+  key === "today" ? presetRange("today", now.getTime())
+  : key === "thisMonth" ? presetRange("month", now.getTime())
   : key === "lastMonth" ? presetRange("prevMonth", now.getTime())
   : key === "thisYear" ? presetRange("year", now.getTime())
   : presetRange("prevYear", now.getTime());
