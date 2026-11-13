@@ -269,7 +269,7 @@ export const rw: Record<Key, string> = {
   "date.pickDay": "Hitamo umunsi ku kalendari", "date.pickEnd": "Hitamo itariki yo kurangiriza",
   "date.rangeHint": "Kanda itariki yo gutangira, hanyuma iyo kurangiriza. Iyo kurangiriza ntishobora kuba mbere y'iyo gutangira.",
   "date.pickTitle": "Hitamo itariki", "date.pickHelp": "Hitamo umunsi ku kalendari, cyangwa uwandike nka YYYY-MM-DD. Itariki zikurikiza umunsi w'ubucuruzi wa Afurika/Kigali.",
-  "date.openCalendar": "Hitamo ku kalendari",
+  "date.openCalendar": "Hitamo ku kalendari", "date.openRange": "Hitamo itariki zombi ku kalendari",
   "dash.invalidRange": "Shyiramo amatariki abiri yemewe, itariki yo gutangira itarashyira itariki yo kurangira.",
   "dash.noPrior": "Nta makuru mu gihe cyabanje",
   "dash.transactions": "Ibikorwa", "dash.unitsSold": "Ibyagurishijwe", "dash.unitsSoldHint": "Ku mirongo yose y'Igurisha",

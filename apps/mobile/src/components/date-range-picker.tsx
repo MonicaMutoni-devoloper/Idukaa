@@ -255,9 +255,87 @@ export function PeriodSelector({ selection, onChange, testID = "period-selector"
 }
 
 /**
+ * A From/To pair with ONE range calendar: both ends are chosen on the same month grid, so a custom
+ * period can never be half-picked or end before it starts. Typing each box still works.
+ */
+export function DayRangeField({ fromLabel, toLabel, from, to, onChangeFrom, onChangeTo, testID, fromTestID, toTestID, hint, onApplied }: {
+  fromLabel: string; toLabel: string; from: string; to: string;
+  onChangeFrom: (text: string) => void; onChangeTo: (text: string) => void;
+  testID?: string; fromTestID?: string; toTestID?: string; hint?: string;
+  /** Run the period the moment both dates are picked, so Apply is not asked for twice. */
+  onApplied?: (from: string, to: string) => void;
+}) {
+  const t = useT(); const c = useTheme();
+  const [open, setOpen] = useState(false);
+  const today = kigaliDay(Date.now());
+  const seedFrom = isBusinessDay(from.trim()) ? from.trim() : today;
+  const seedTo = isBusinessDay(to.trim()) && to.trim() >= seedFrom ? to.trim() : seedFrom;
+  const [start, setStart] = useState(seedFrom);
+  const [end, setEnd] = useState<string | null>(seedTo);
+  const [view, setView] = useState(() => monthOfDay(seedFrom));
+  const id = (suffix: string) => (testID ? `${testID}-${suffix}` : undefined);
+
+  useEffect(() => {
+    if (!open) return;
+    const f = isBusinessDay(from.trim()) ? from.trim() : today;
+    const l = isBusinessDay(to.trim()) && to.trim() >= f ? to.trim() : f;
+    setStart(f); setEnd(l); setView(monthOfDay(f));
+  }, [open, from, to, today]);
+
+  // Same rule as the Overview control: the first tap starts a new range, the second closes it, and
+  // an end before the start restarts the range instead of producing an impossible period.
+  const pick = (day: string) => {
+    if (!start || (start && end)) { setStart(day); setEnd(null); return; }
+    if (day < start) { setStart(day); setEnd(null); return; }
+    setEnd(day);
+  };
+  const apply = () => {
+    if (!start || !end) return;
+    onChangeFrom(start); onChangeTo(end); onApplied?.(start, end); setOpen(false);
+  };
+
+  return (
+    <>
+      <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap", alignItems: "flex-end", flexGrow: 1, flexBasis: 320 }}>
+        <Field testID={fromTestID} containerStyle={{ flexBasis: 140 }} label={fromLabel} value={from} onChangeText={onChangeFrom} placeholder="YYYY-MM-DD" />
+        <Field testID={toTestID} containerStyle={{ flexBasis: 140 }} label={toLabel} value={to} onChangeText={onChangeTo} placeholder="YYYY-MM-DD" />
+        <Pressable testID={id("calendar")} accessibilityRole="button"
+          accessibilityLabel={t("date.openRange")} onPress={() => setOpen(true)}
+          style={({ pressed, hovered, focused }: any) => ({
+            width: 44, height: 44, borderRadius: radius.sm, alignItems: "center", justifyContent: "center",
+            borderWidth: focused ? 2 : 1, borderColor: focused ? c.focus : c.lineStrong,
+            backgroundColor: pressed ? c.pressed : hovered ? c.hover : c.surface,
+          })}>
+          <Icon name="calendar" size={18} color={c.primaryStrong} bg={c.surface} />
+        </Pressable>
+      </View>
+      {hint ? <Text style={{ color: c.muted, fontSize: 12 }}>{hint}</Text> : null}
+
+      <Modal open={open} onClose={() => setOpen(false)} title={`${fromLabel} – ${toLabel}`} description={t("date.rangeHint")}
+        footer={<>
+          <Button testID={id("calendar-cancel")} kind="secondary" label={t("common.cancel")} onPress={() => setOpen(false)} />
+          <Button testID={id("calendar-apply")} label={t("common.apply")} disabled={!start || !end} onPress={apply} />
+        </>}>
+        <MonthGrid start={start} end={end} mode="range" today={today} view={view}
+          onShift={(delta) => setView(shiftMonth(view.year, view.month, delta))}
+          onToday={() => { setStart(today); setEnd(today); setView(monthOfDay(today)); }}
+          onPick={pick} />
+
+        <View style={{ gap: 3, padding: space.md, borderRadius: radius.sm, backgroundColor: c.surfaceMuted }}>
+          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("date.selected")}</Text>
+          <Text testID={id("calendar-summary")} style={{ color: c.ink, fontSize: 13, fontWeight: "700" }}>
+            {`${fmtDay(start)}${end ? ` – ${fmtDay(end)}` : ` · ${t("date.pickEnd")}`}`}
+          </Text>
+        </View>
+      </Modal>
+    </>
+  );
+}
+
+/**
  * A `YYYY-MM-DD` form field that can still be typed, plus a calendar button so a day can always be
- * picked instead of remembered. Used wherever a record is dated (expense, purchase, credit due,
- * custom report ranges), keeping the same Kigali business-day calendar as the Overview.
+ * picked instead of remembered. Used wherever a record is dated (expense, purchase, credit due),
+ * keeping the same Kigali business-day calendar as the Overview.
  */
 export function DayField({ label, value, onChangeText, testID, error, hint, placeholder = "YYYY-MM-DD", containerStyle }: {
   label: string; value: string; onChangeText: (text: string) => void; testID?: string;

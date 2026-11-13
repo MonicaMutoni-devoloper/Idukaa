@@ -5,7 +5,7 @@ import { formatQty, formatRwf, kigaliDay } from "@sms/shared";
 import {
   Badge, Banner, Button, ConfirmDialog, Field, KeyValue, Loading, Modal, Screen, Segmented,
 } from "../../src/components/ui";
-import { DayField } from "../../src/components/date-range-picker";
+import { DayRangeField } from "../../src/components/date-range-picker";
 import {
   FinancialReport, InventoryReport, MovementsReport, ReportsLanding, SalesReport,
 } from "../../src/components/reports";
@@ -218,8 +218,8 @@ export default function Reports() {
     void kvSet(RECENT_KEY, JSON.stringify(list)).catch(() => {});
   };
 
-  const applyCustom = () => {
-    const r = customRange(customFrom, customTo);
+  const applyCustom = (f = customFrom, l = customTo) => {
+    const r = customRange(f, l);
     if (!r) { setRangeError(t("dash.invalidRange")); return; }
     setRangeError(null); setApplied(r);
   };
@@ -296,8 +296,9 @@ export default function Reports() {
     }>
       {choice === "custom" ? (
         <View style={{ flexDirection: "row", gap: space.md, flexWrap: "wrap" }}>
-          <DayField testID="reports-from" label={t("common.from")} value={customFrom} onChangeText={setCustomFrom} />
-          <DayField testID="reports-to" label={t("common.to")} value={customTo} onChangeText={setCustomTo} />
+          <DayRangeField testID="reports-custom" fromTestID="reports-from" toTestID="reports-to"
+            fromLabel={t("common.from")} toLabel={t("common.to")} from={customFrom} to={customTo}
+            onChangeFrom={setCustomFrom} onChangeTo={setCustomTo} onApplied={applyCustom} />
           <View style={{ justifyContent: "flex-end", paddingBottom: 1 }}><Button testID="reports-apply" label={t("common.apply")} onPress={applyCustom} /></View>
           {rangeError ? <Text style={{ color: c.danger, fontSize: 12, alignSelf: "center" }}>{rangeError}</Text> : null}
         </View>

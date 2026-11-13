@@ -5,7 +5,7 @@ import {
   TARGET_GROSS_MARGIN_BPS, breakEven, formatQty, formatRwf, grossMarginPct, markupPct, recommendedPrice,
 } from "@sms/shared";
 import { Badge, Banner, Button, Card, DataTable, Empty, ErrorState, Field, Loading, Screen, Segmented, useWide } from "../../src/components/ui";
-import { DayField } from "../../src/components/date-range-picker";
+import { DayRangeField } from "../../src/components/date-range-picker";
 import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet } from "../../src/database";
 import { request, useSession } from "../../src/services/api";
@@ -140,8 +140,8 @@ export default function Profitability() {
     if (data && fixedCosts === "") setFixedCosts(String(data.totals.operatingExpenses || 0));
   }, [data, fixedCosts]);
 
-  const applyCustom = () => {
-    const r = customRange(customFrom, customTo);
+  const applyCustom = (f = customFrom, l = customTo) => {
+    const r = customRange(f, l);
     if (!r) { setCustomError(t("dash.invalidRange")); return; }
     setCustomError(null); setAppliedCustom(r);
   };
@@ -230,8 +230,9 @@ export default function Profitability() {
       {period === "custom" ? (
         <Card style={{ gap: space.md }}>
           <View style={{ flexDirection: "row", gap: space.md, flexWrap: "wrap" }}>
-            <DayField testID="prof-from" label={t("common.from")} value={customFrom} onChangeText={setCustomFrom} />
-            <DayField testID="prof-to" label={t("common.to")} value={customTo} onChangeText={setCustomTo} />
+            <DayRangeField testID="prof-custom" fromTestID="prof-from" toTestID="prof-to"
+              fromLabel={t("common.from")} toLabel={t("common.to")} from={customFrom} to={customTo}
+              onChangeFrom={setCustomFrom} onChangeTo={setCustomTo} onApplied={applyCustom} />
             <View style={{ justifyContent: "flex-end", paddingBottom: 1 }}>
               <Button testID="prof-apply" label={t("common.apply")} onPress={applyCustom} />
             </View>
