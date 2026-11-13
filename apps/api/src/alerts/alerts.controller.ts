@@ -100,9 +100,9 @@ export class AlertsController {
       if (!old) throw new NotFoundException("alert_not_found");
       const resolved = b.data.status === "resolved" || b.data.status === "legitimate";
       const { rows: [row] } = await c.query(
-        `UPDATE business_alerts SET status=$2, notes=trim(notes || E'\n' || $3), assigned_to=$4,
-                resolved_at=CASE WHEN $5 THEN now() ELSE NULL END,
-                resolved_by=CASE WHEN $5 THEN $4 ELSE NULL END, updated_at=now()
+        `UPDATE business_alerts SET status=$2, notes=trim(notes || E'\n' || $3), assigned_to=$4::uuid,
+                resolved_at=CASE WHEN $5::boolean THEN now() ELSE NULL END,
+                resolved_by=CASE WHEN $5::boolean THEN $4::uuid ELSE NULL END, updated_at=now()
           WHERE id=$1 RETURNING *`, [id, b.data.status, b.data.note, u.id, resolved]);
       await c.query("INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note) VALUES ($1,$2,$3,$4,$5)",
         [id, u.shopId, u.id, b.data.status, b.data.note]);
@@ -138,7 +138,7 @@ export class AlertsController {
        ), recent AS (
          SELECT d.*, row_number() OVER (PARTITION BY product_id ORDER BY d DESC) rn FROM daily d
        )
-       SELECT r.product_id, p.name, p.unit, r.d::text AS day, r.q,
+       SELECT r.product_id, p.name, p.unit, r.d::text AS "day", r.q,
               COALESCE(AVG(b.q),0) AS baseline
          FROM recent r JOIN products p ON p.id=r.product_id
          LEFT JOIN daily b ON b.product_id=r.product_id AND b.d < r.d AND b.d >= r.d - 28
@@ -166,7 +166,7 @@ export class AlertsController {
            FROM sales WHERE shop_id=$1 AND status='posted' AND sold_at >= now()-interval '37 days' AND sold_at < now()-interval '7 days'
        )
        SELECT s.*, u.full_name AS cashier, base.avg_pct FROM s JOIN users u ON u.id=s.user_id CROSS JOIN base
-        WHERE s.pct >= 0.20 AND (base.avg_pct IS NULL OR s.pct >= base.avg_pct * 2)`,
+        WHERE s.pct >= 0.20 AND base.avg_pct IS NOT NULL AND s.pct >= base.avg_pct * 2`,
       [shopId]);
     for (const r of discounts) {
       out.push({ key: `discount:${r.id}`, category: "discount", severity: Number(r.pct) >= 0.35 ? "critical" : "warning",
@@ -223,8 +223,8 @@ export class AlertsController {
            FROM expenses WHERE shop_id=$1 AND incurred_at >= now()-interval '37 days'
           GROUP BY 1
        ), base AS (SELECT AVG(amount) avg_amount FROM daily WHERE d < current_date - 6)
-       SELECT d.d::text day, d.amount, base.avg_amount FROM daily d CROSS JOIN base
-        WHERE d.d >= current_date - 6 AND d.amount >= 10000 AND (base.avg_amount = 0 OR d.amount >= base.avg_amount * 3)
+       SELECT d.d::text AS "day", d.amount, base.avg_amount FROM daily d CROSS JOIN base
+        WHERE d.d >= current_date - 6 AND d.amount >= 10000 AND base.avg_amount > 0 AND d.amount >= base.avg_amount * 3
         ORDER BY d.d DESC`, [shopId]);
     for (const r of expenses) {
       out.push({ key: `expense:${r.day}`, category: "expense", severity: Number(r.amount) >= Number(r.avg_amount ?? 0) * 6 ? "critical" : "warning",
@@ -239,8 +239,12 @@ export class AlertsController {
               COALESCE((SELECT SUM(gross_amount-discount-amount_paid) FROM sales WHERE shop_id=c.shop_id AND customer_id=c.id AND status='posted'),0)
               - COALESCE((SELECT SUM(amount) FROM credit_payments WHERE shop_id=c.shop_id AND customer_id=c.id),0)
               + COALESCE((SELECT SUM(amount) FROM credit_adjustments WHERE shop_id=c.shop_id AND customer_id=c.id),0) AS balance,
-              (SELECT COALESCE(SUM(gross_amount-discount-amount_paid),0) FROM sales
-                WHERE shop_id=c.shop_id AND customer_id=c.id AND status='posted' AND due_at IS NOT NULL AND due_at < now()) AS overdue
+              GREATEST(0, LEAST(
+                COALESCE((SELECT SUM(gross_amount-discount-amount_paid) FROM sales WHERE shop_id=c.shop_id AND customer_id=c.id AND status='posted'),0)
+                - COALESCE((SELECT SUM(amount) FROM credit_payments WHERE shop_id=c.shop_id AND customer_id=c.id),0)
+                + COALESCE((SELECT SUM(amount) FROM credit_adjustments WHERE shop_id=c.shop_id AND customer_id=c.id),0),
+                (SELECT COALESCE(SUM(gross_amount-discount-amount_paid),0) FROM sales
+                  WHERE shop_id=c.shop_id AND customer_id=c.id AND status='posted' AND due_at IS NOT NULL AND due_at < now()))) AS overdue
          FROM customers c WHERE c.shop_id=$1`, [shopId]);
     for (const r of credit) {
       const balance = Number(r.balance); if (balance <= 0) continue;

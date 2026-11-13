@@ -71,6 +71,16 @@ const auth = async (email: string): Promise<Session> => {
   return s;
 };
 
+/** Administrator confirms the shop's pending payment before operational routes open. */
+async function activateShop(adminToken: string, id: string) {
+  const pending = await call("GET", "/subscriptions/admin/pending", undefined, adminToken);
+  assert.equal(pending.status, 200, JSON.stringify(pending.data));
+  const sub = pending.data.find((s: any) => s.shopId === id);
+  assert.ok(sub, "approval creates a pending per-shop subscription");
+  const verified = await call("POST", `/subscriptions/${sub.id}/verify`, { paymentReference: "TEST-REGISTRATION" }, adminToken);
+  assert.equal(verified.status, 201, JSON.stringify(verified.data));
+}
+
 /** The five-field form: no location, no category, and a role field the server must ignore. */
 const registration = (email: string, shopName: string) => ({
   contactName: "Regina Register",
@@ -197,12 +207,23 @@ test("approval activates the owner account and the proposed shop", { skip }, asy
   assert.ok(owner.user.shopId, "the session carries the shop");
   const me = await call("GET", "/auth/me", undefined, owner.token);
   assert.equal(me.data.shopName, "Pending Mart");
+  const gated = await call("GET", "/shop/staff", undefined, owner.token);
+  assert.equal(gated.status, 403, "a new shop stays closed until its payment is verified");
+  assert.equal(msg(gated.data), "subscription_inactive");
+  await activateShop(admin.token, row.app_shop);
+
   const staff = await call("GET", "/shop/staff", undefined, owner.token);
   assert.equal(staff.status, 200, "the owner can open their own shop's dashboard data");
   assert.equal(staff.data.staff.length, 1);
 
-  // Duplicate shop creation stays impossible for the new owner too.
-  assert.equal((await call("POST", "/shop", { name: "Second Mart" }, owner.token)).status, 409);
+  // Multi-shop is additive: a second shop is created, but the owner remains on Pending Mart.
+  const second = await call("POST", "/shop", { name: "Second Mart" }, owner.token);
+  assert.equal(second.status, 201, JSON.stringify(second.data));
+  const active = (await pool.query("SELECT shop_id FROM users WHERE lower(email)=lower($1)", [PENDING_EMAIL])).rows[0];
+  assert.equal(active.shop_id, row.app_shop, "creating another shop does not switch the active shop");
+  const stillStaff = await call("GET", "/shop/staff", undefined, owner.token);
+  assert.equal(stillStaff.status, 200);
+  assert.ok(stillStaff.data.staff.some((s: any) => s.email === PENDING_EMAIL), "staff list still belongs to Pending Mart");
 });
 
 /* ------------------------------------------------------------------ 3. rejection */

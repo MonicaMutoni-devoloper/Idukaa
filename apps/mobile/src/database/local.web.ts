@@ -15,7 +15,7 @@ import type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend
 export type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot };
 
 interface LocalSupplier { id: string; name: string; phone?: string | null }
-interface WebCustomer { id: string; shop_id: string | null; name: string; phone: string | null; address: string | null; notes: string | null; credit_limit: number; status: "active" | "blocked"; updated_at?: string | null }
+interface WebCustomer { id: string; shop_id: string | null; name: string; phone: string | null; address: string | null; notes: string | null; credit_limit: number; status: "active" | "blocked"; updated_at?: string | null; balance?: number; overdue?: number }
 interface WebProduct extends LocalProduct { barcode: string | null; active: number; purchase_unit: string | null; selling_unit: string | null; units_per_purchase: number; units_per_selling: number }
 interface State { kv: Record<string, string>; products: WebProduct[]; suppliers: LocalSupplier[]; customers: WebCustomer[]; outbox: OutboxRow[]; records: LocalRecord[]; seq: number }
 
@@ -324,6 +324,15 @@ export async function applyResults(results: { opId: string; status: string; mess
     for (const r of results) {
       const row = s.outbox.find((x) => x.op_id === r.opId); if (!row) continue;
       for (const [pid, q] of Object.entries(JSON.parse(row.deltas) as Record<string, number>)) { const p = s.products.find((p) => p.id === pid); if (p) p.pending_delta -= q; }
+      // A refused repayment never reached the ledger: restore the optimistic local balance once.
+      if ((r.status === "rejected" || r.status === "conflict") && row.type === "credit.payment.create"
+        && row.status !== "rejected" && row.status !== "conflict") {
+        try {
+          const p = JSON.parse(row.payload) as { customerId?: string; amount?: number };
+          const cu = p.customerId ? s.customers.find((x) => x.id === p.customerId) : undefined;
+          if (cu && p.amount) cu.balance = Math.max(0, Number(cu.balance ?? 0)) + Math.max(0, Math.round(p.amount));
+        } catch { /* malformed legacy payload must not block the verdict */ }
+      }
       row.status = (r.status === "applied" || r.status === "duplicate" ? "synced" : r.status) as OutboxStatus;
       row.message = r.message ?? null;
       row.deltas = "{}";
@@ -366,7 +375,9 @@ export async function applyPull(changes: { entity: string; id: string; data: any
       if (c.entity === "customer") {
         const x = c.data; const ex = s.customers.find((v) => v.id === x.id);
         const row: WebCustomer = { id: x.id, shop_id: s.kv["local.shop"] ?? null, name: x.name, phone: x.phone ?? null, address: x.address ?? null, notes: x.notes ?? null,
-          credit_limit: Number(x.creditLimit) || 0, status: x.status === "blocked" ? "blocked" : "active", updated_at: new Date().toISOString() };
+          credit_limit: Number(x.creditLimit) || 0, status: x.status === "blocked" ? "blocked" : "active", updated_at: new Date().toISOString(),
+          balance: x.balance != null ? Math.max(0, Math.round(Number(x.balance) || 0)) : ex?.balance ?? 0,
+          overdue: x.overdue != null ? Math.max(0, Math.round(Number(x.overdue) || 0)) : ex?.overdue ?? 0 };
         if (ex) Object.assign(ex, row); else s.customers.push(row);
       }
     }
@@ -378,6 +389,27 @@ export const listCustomers = async (q = "") => {
   return s.customers.filter((c) => (c.shop_id ?? null) === shop && (!needle || c.name.toLowerCase().includes(needle) || (c.phone ?? "").toLowerCase().includes(needle)))
     .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 500);
 };
+
+/** Store the server's authoritative balances for the bound shop's cached customers. */
+export async function cacheCustomerBalances(rows: { id: string; balance?: number; overdue?: number }[]) {
+  const shop = (await readState()).kv["local.shop"] ?? null;
+  await mutate((s) => {
+    for (const r of rows) {
+      const cu = s.customers.find((x) => x.id === r.id && (x.shop_id ?? null) === shop);
+      if (!cu) continue;
+      cu.balance = Math.max(0, Math.round(Number(r.balance) || 0));
+      cu.overdue = Math.max(0, Math.round(Number(r.overdue) || 0));
+    }
+  });
+}
+/** Apply a queued repayment optimistically so a second offline payment cannot reuse the old balance. */
+export async function applyLocalCreditPayment(customerId: string, amount: number) {
+  const shop = (await readState()).kv["local.shop"] ?? null;
+  await mutate((s) => {
+    const cu = s.customers.find((x) => x.id === customerId && (x.shop_id ?? null) === shop);
+    if (cu) cu.balance = Math.max(0, Number(cu.balance ?? 0) - Math.max(0, Math.round(amount)));
+  });
+}
 
 export const listProducts = async (q = "") => {
   const needle = q.trim().toLowerCase();

@@ -1084,6 +1084,7 @@ export const rw: Record<Key, string> = {
   "credit.reminder": "Tegura ubutumwa", "credit.notSent": "Ubutumwa bwatunganyijwe. Nta butumwa bwoherejwe kuko nta serivisi ihujwe.",
   "credit.saved": "Umukiriya yabitswe.", "credit.noCustomers": "Nta bakiriya barahari", "credit.paymentSaved": "Ubwishyu bwarabitswe butegereje guhuza.",
   "credit.paymentHint": "Ubwishyu bugabanya inguzanyo isigaye; amateka ntahindurwa.",
+  "credit.paymentExceeds": "Ubwishyu buruta inguzanyo isigaye igaragara. Ongera ugereranye konti mbere yo kubandika.",
 
   "alerts.title": "Imenyesha ry'ubucuruzi", "alerts.subtitle": "Imenyesha risobanutse ku bikorwa bidasanzwe. Ni ubutumwa bwo kureba, si gihamya y'ubugizi bwa nabi.",
   "alerts.detect": "Genzura ubu", "alerts.none": "Nta menyesha ahuye n'iyi shungura",

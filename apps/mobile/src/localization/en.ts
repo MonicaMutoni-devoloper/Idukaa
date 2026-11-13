@@ -1073,6 +1073,7 @@ export const en = {
   "credit.reminder": "Prepare reminder", "credit.notSent": "Reminder prepared. No message was sent because no provider is connected.",
   "credit.saved": "Customer saved.", "credit.noCustomers": "No customers yet", "credit.paymentSaved": "Payment saved and queued for sync.",
   "credit.paymentHint": "Payments reduce the balance derived from posted sales; history is never edited.",
+  "credit.paymentExceeds": "The payment is larger than the outstanding balance shown. Refresh the account before recording it.",
 
   "alerts.title": "Business alerts", "alerts.subtitle": "Explainable warnings for unusual activity. An alert is a prompt to investigate, not proof of wrongdoing.",
   "alerts.detect": "Run detection", "alerts.none": "No alerts match this filter",

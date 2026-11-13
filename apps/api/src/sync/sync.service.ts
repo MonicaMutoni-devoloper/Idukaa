@@ -186,8 +186,10 @@ export class SyncService {
         if (credit > 0) {
           const owing = await this.creditOutstanding(c, shopId, p.customerId!);
           const limit = Number(customer.credit_limit);
-          // A zero limit means no credit line, not an unlimited one: otherwise a manager could
-          // register a customer with the default limit and extend unlimited credit.
+          // A zero limit means no credit line, not an unlimited one. This is an unconditional
+          // refusal: owner-approval and reason-override policies cannot be used to open a credit
+          // line the owner deliberately set to zero.
+          if (limit <= 0) throw new BizError("rejected", `credit_limit_exceeded:${limit}:owing=${owing}:proposed=${credit}`);
           if (owing + credit > limit) {
             const { credit_limit_policy } = await this.policy(c, shopId);
             if (credit_limit_policy === "block") throw new BizError("rejected", `credit_limit_exceeded:${limit}:owing=${owing}:proposed=${credit}`);

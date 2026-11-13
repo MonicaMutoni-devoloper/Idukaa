@@ -40,9 +40,10 @@ export class CustomersController {
     const search = typeof q.search === "string" ? q.search.trim() : "";
     const rows = await this.db.query(
       `SELECT c.*, ${balanceSql} AS balance,
-              (SELECT COALESCE(SUM(s.gross_amount-s.discount-s.amount_paid),0) FROM sales s
-                WHERE s.shop_id=c.shop_id AND s.customer_id=c.id AND s.status='posted'
-                  AND s.due_at IS NOT NULL AND s.due_at < now()) AS overdue,
+              GREATEST(0, LEAST((${balanceSql}),
+                (SELECT COALESCE(SUM(s.gross_amount-s.discount-s.amount_paid),0) FROM sales s
+                  WHERE s.shop_id=c.shop_id AND s.customer_id=c.id AND s.status='posted'
+                    AND s.due_at IS NOT NULL AND s.due_at < now()))) AS overdue,
               (SELECT max(p.paid_at) FROM credit_payments p WHERE p.shop_id=c.shop_id AND p.customer_id=c.id) AS last_payment_at
          FROM customers c WHERE c.shop_id=$1
            AND ($2='' OR c.name ILIKE '%'||$2||'%' OR COALESCE(c.phone,'') ILIKE '%'||$2||'%')
@@ -59,9 +60,10 @@ export class CustomersController {
               COUNT(*) FILTER (WHERE x.balance > 0)::int with_balance,
               COUNT(*) FILTER (WHERE x.limit_used >= 0.8 AND x.balance > 0)::int near_limit
          FROM (SELECT ${balanceSql} AS balance,
-                      (SELECT COALESCE(SUM(s.gross_amount-s.discount-s.amount_paid),0) FROM sales s
-                        WHERE s.shop_id=c.shop_id AND s.customer_id=c.id AND s.status='posted'
-                          AND s.due_at IS NOT NULL AND s.due_at < now()) AS overdue,
+                      GREATEST(0, LEAST((${balanceSql}),
+                        (SELECT COALESCE(SUM(s.gross_amount-s.discount-s.amount_paid),0) FROM sales s
+                          WHERE s.shop_id=c.shop_id AND s.customer_id=c.id AND s.status='posted'
+                            AND s.due_at IS NOT NULL AND s.due_at < now()))) AS overdue,
                       CASE WHEN c.credit_limit > 0 THEN (${balanceSql})::numeric / c.credit_limit ELSE 0 END AS limit_used
                  FROM customers c WHERE c.shop_id=$1) x`, [u.shopId]);
     const [today] = await this.db.query(
@@ -78,7 +80,13 @@ export class CustomersController {
   @Get(":id")
   async get(@Me() u: AuthUser, @Param("id") id: string) {
     if (!z.string().uuid().safeParse(id).success) throw new NotFoundException("customer_not_found");
-    const [row] = await this.db.query(`SELECT c.*, ${balanceSql} AS balance FROM customers c WHERE c.id=$1 AND c.shop_id=$2`, [id, u.shopId]);
+    const [row] = await this.db.query(
+      `SELECT c.*, ${balanceSql} AS balance,
+              GREATEST(0, LEAST((${balanceSql}),
+                (SELECT COALESCE(SUM(s.gross_amount-s.discount-s.amount_paid),0) FROM sales s
+                  WHERE s.shop_id=c.shop_id AND s.customer_id=c.id AND s.status='posted'
+                    AND s.due_at IS NOT NULL AND s.due_at < now()))) AS overdue
+         FROM customers c WHERE c.id=$1 AND c.shop_id=$2`, [id, u.shopId]);
     if (!row) throw new NotFoundException("customer_not_found");
     return shape(row);
   }

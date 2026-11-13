@@ -39,6 +39,8 @@ export interface StorageUsageSnapshot {
 export interface LocalCustomer {
   id: string; shop_id?: string | null; name: string; phone: string | null; address: string | null; notes: string | null;
   credit_limit: number; status: "active" | "blocked"; updated_at?: string | null;
+  /** Last server-confirmed balance, so an offline repayment can start from a real figure. */
+  balance?: number; overdue?: number;
 }
 
 export interface LocalProduct {
@@ -56,7 +58,8 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, code TEXT, barcode TEXT, name TEXT NOT NULL, category TEXT, unit TEXT, selling_price INTEGER NOT NULL DEFAULT 0, low_threshold INTEGER NOT NULL DEFAULT 0, on_hand INTEGER NOT NULL DEFAULT 0, pending_delta INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE IF NOT EXISTS suppliers (id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT);
     CREATE TABLE IF NOT EXISTS customers (id TEXT PRIMARY KEY, shop_id TEXT, name TEXT NOT NULL, phone TEXT, address TEXT, notes TEXT,
-      credit_limit INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', updated_at TEXT);
+      credit_limit INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', updated_at TEXT,
+      balance INTEGER NOT NULL DEFAULT 0, overdue INTEGER NOT NULL DEFAULT 0);
     CREATE INDEX IF NOT EXISTS customers_shop ON customers(shop_id, name);
     CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, shop_id TEXT, type TEXT NOT NULL, payload TEXT NOT NULL, deltas TEXT NOT NULL DEFAULT '{}',
       status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, message TEXT, created_at TEXT NOT NULL, synced_at TEXT);
@@ -82,6 +85,12 @@ export async function initDb() {
   if (!obCols.includes("shop_id")) await d.runAsync("ALTER TABLE outbox ADD COLUMN shop_id TEXT");
   const recCols = (await d.getAllAsync<{ name: string }>("PRAGMA table_info(records)")).map((r) => r.name);
   if (!recCols.includes("shop_id")) await d.runAsync("ALTER TABLE records ADD COLUMN shop_id TEXT");
+  // Credit balances arrived after the first offline installs. Keeping the last server-confirmed
+  // figure on the device is what makes the repayment form usable when the network is down; the
+  // server remains authoritative when the queued payment is pushed.
+  const cuCols = (await d.getAllAsync<{ name: string }>("PRAGMA table_info(customers)")).map((r) => r.name);
+  if (!cuCols.includes("balance")) await d.runAsync("ALTER TABLE customers ADD COLUMN balance INTEGER NOT NULL DEFAULT 0");
+  if (!cuCols.includes("overdue")) await d.runAsync("ALTER TABLE customers ADD COLUMN overdue INTEGER NOT NULL DEFAULT 0");
   await d.runAsync("CREATE INDEX IF NOT EXISTS outbox_shop ON outbox(shop_id, status, next_attempt_at)");
   await d.runAsync("CREATE INDEX IF NOT EXISTS records_shop_at ON records(shop_id, at)");
   const bound = (await d.getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k='local.shop'"))?.v ?? null;
@@ -250,8 +259,19 @@ export async function applyResults(results: { opId: string; status: string; mess
   const d = await db();
   await d.withTransactionAsync(async () => {
     for (const r of results) {
-      const row = await d.getFirstAsync<OutboxRow>("SELECT deltas FROM outbox WHERE op_id=?", [r.opId]); if (!row) continue;
+      const row = await d.getFirstAsync<OutboxRow & { type: string; payload: string }>("SELECT deltas, type, payload, status FROM outbox WHERE op_id=?", [r.opId]); if (!row) continue;
       for (const [pid, q] of Object.entries(JSON.parse(row.deltas) as Record<string, number>)) await d.runAsync("UPDATE products SET pending_delta = pending_delta - ? WHERE id=?", [q, pid]);
+      // A refused repayment never reached the ledger: put the optimistic local balance back so the
+      // screen does not keep claiming money was received. Only restore once, on the first verdict.
+      if ((r.status === "rejected" || r.status === "conflict") && row.type === "credit.payment.create"
+        && row.status !== "rejected" && row.status !== "conflict") {
+        try {
+          const p = JSON.parse(row.payload) as { customerId?: string; amount?: number };
+          if (p.customerId && p.amount) await d.runAsync(
+            "UPDATE customers SET balance=COALESCE(balance,0)+? WHERE id=? AND shop_id=(SELECT v FROM kv WHERE k='local.shop')",
+            [Math.max(0, Math.round(p.amount)), p.customerId]);
+        } catch { /* a malformed legacy payload must not block the verdict */ }
+      }
       const st = r.status === "applied" || r.status === "duplicate" ? "synced" : r.status;
       const next = st === "pending_approval" ? Date.now() + 60_000 : 0;
       await d.runAsync("UPDATE outbox SET status=?, message=?, deltas='{}', synced_at=?, next_attempt_at=? WHERE op_id=?", [st, r.message ?? null, new Date().toISOString(), next, r.opId]);
@@ -279,7 +299,10 @@ export async function applyPull(changes: { entity: string; id: string; data: any
       if (c.entity === "supplier") await d.runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone", [c.data.id, c.data.name, c.data.phone ?? null]);
       if (c.entity === "customer") { const x = c.data; await d.runAsync(
         "INSERT INTO customers(id,shop_id,name,phone,address,notes,credit_limit,status,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,address=excluded.address,notes=excluded.notes,credit_limit=excluded.credit_limit,status=excluded.status,updated_at=excluded.updated_at",
-        [x.id, (await d.getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k='local.shop'"))?.v ?? null, x.name, x.phone ?? null, x.address ?? null, x.notes ?? null, x.creditLimit ?? 0, x.status ?? "active", new Date().toISOString()]); }
+        [x.id, (await d.getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k='local.shop'"))?.v ?? null, x.name, x.phone ?? null, x.address ?? null, x.notes ?? null, x.creditLimit ?? 0, x.status ?? "active", new Date().toISOString()]);
+        // Balance is not part of the customer sync row; only overwrite it when the server sent one.
+        if (x.balance != null || x.overdue != null) await d.runAsync(
+          "UPDATE customers SET balance=COALESCE(?,balance), overdue=COALESCE(?,overdue) WHERE id=?", [x.balance ?? null, x.overdue ?? null, x.id]); }
     }
   });
 }
@@ -287,3 +310,19 @@ export const listProducts = async (q = "") => (await db()).getAllAsync<LocalProd
 export const listSuppliers = async () => (await db()).getAllAsync<{ id: string; name: string }>("SELECT id,name FROM suppliers ORDER BY name");
 export const listCustomers = async (q = "") => (await db()).getAllAsync<LocalCustomer>(
   "SELECT * FROM customers WHERE shop_id=(SELECT v FROM kv WHERE k='local.shop') AND (name LIKE ? OR COALESCE(phone,'') LIKE ?) ORDER BY name LIMIT 500", [`%${q}%`, `%${q}%`]);
+/** Store the server's authoritative balances for the bound shop's cached customers. */
+export async function cacheCustomerBalances(rows: { id: string; balance?: number; overdue?: number }[]) {
+  const d = await db();
+  await d.withTransactionAsync(async () => {
+    for (const r of rows) {
+      await d.runAsync(
+        "UPDATE customers SET balance=?, overdue=?, updated_at=? WHERE id=? AND shop_id=(SELECT v FROM kv WHERE k='local.shop')",
+        [Math.max(0, Math.round(Number(r.balance) || 0)), Math.max(0, Math.round(Number(r.overdue) || 0)), new Date().toISOString(), r.id]);
+    }
+  });
+}
+/** Apply a queued repayment optimistically so a second offline payment cannot reuse the old balance. */
+export const applyLocalCreditPayment = async (customerId: string, amount: number) =>
+  (await db()).runAsync(
+    "UPDATE customers SET balance=MAX(0, COALESCE(balance,0)-?) WHERE id=? AND shop_id=(SELECT v FROM kv WHERE k='local.shop')",
+    [Math.max(0, Math.round(amount)), customerId]);

@@ -3,7 +3,7 @@ import { Text, View } from "react-native";
 import { formatRwf } from "@sms/shared";
 import { Badge, Banner, Button, Card, Empty, Field, Modal, Screen, Segmented, useToasts } from "../../src/components/ui";
 import { useT } from "../../src/localization";
-import { enqueue, listCustomers, type LocalCustomer } from "../../src/database";
+import { applyLocalCreditPayment, cacheCustomerBalances, enqueue, listCustomers, type LocalCustomer } from "../../src/database";
 import { useSession } from "../../src/services/api";
 import { syncNow } from "../../src/synchronization/engine";
 import {
@@ -34,10 +34,13 @@ export default function Customers() {
     setError(null);
     // Cached accounts keep the screen useful offline; the server refresh adds authoritative balances.
     const cached = await listCustomers(search).catch(() => [] as LocalCustomer[]);
-    setRows(cached.map((x) => ({ id: x.id, name: x.name, phone: x.phone, address: x.address, notes: x.notes, creditLimit: x.credit_limit, status: x.status })));
+    setRows(cached.map((x) => ({ id: x.id, name: x.name, phone: x.phone, address: x.address, notes: x.notes,
+      creditLimit: x.credit_limit, status: x.status, balance: x.balance ?? 0, overdue: x.overdue ?? 0 })));
     try {
       const [serverRows, serverSummary] = await Promise.all([getCustomers(search), getCreditSummary()]);
       setRows(serverRows); setSummary(serverSummary);
+      // Keep the last confirmed balance on the device so a repayment can be queued offline.
+      await cacheCustomerBalances(serverRows).catch(() => undefined);
     } catch (e: any) {
       if (e?.status === 403) setError(t("shops.pending"));
     }
@@ -65,12 +68,18 @@ export default function Customers() {
   async function pay() {
     if (!selected || !(Number(amount) > 0)) return;
     const at = new Date().toISOString(); const value = Math.round(Number(amount));
+    // The server remains authoritative, but a stale cached balance must not let the form queue an
+    // obviously oversized repayment. The queued operation is still checked again on push.
+    if (typeof selected.balance === "number" && value > selected.balance) {
+      setError(t("credit.paymentExceeds")); return;
+    }
     setBusy(true); setError(null);
     try {
       const ref = reference.trim() || `PAY-${uuid().slice(0, 8).toUpperCase()}`;
       await enqueue(user.id, uuid(), "credit.payment.create", {
         paymentId: uuid(), customerId: selected.id, amount: value, paidAt: at, method, reference: ref,
-      }, {}, undefined, at);
+      }, {}, () => applyLocalCreditPayment(selected.id, value), at);
+      setSelected({ ...selected, balance: Math.max(0, (selected.balance ?? 0) - value) });
       setPayOpen(false); setAmount(""); setReference("");
       toast(t("credit.paymentSaved")); await syncNow();
       await openStatement(selected); await load();

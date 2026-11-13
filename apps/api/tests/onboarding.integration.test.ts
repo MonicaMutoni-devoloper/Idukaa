@@ -67,6 +67,19 @@ const auth = async (email: string): Promise<Session> => {
   return s;
 };
 
+/** Administrator confirms the shop's pending payment; this is the only activation path. */
+async function activateShop(adminToken: string, id: string) {
+  const pending = await call("GET", "/subscriptions/admin/pending", undefined, adminToken);
+  assert.equal(pending.status, 200, JSON.stringify(pending.data));
+  const sub = pending.data.find((s: any) => s.shopId === id);
+  assert.ok(sub, "the new shop has a pending subscription");
+  assert.equal(sub.status, "pending_payment");
+  const verified = await call("POST", `/subscriptions/${sub.id}/verify`, { paymentReference: "TEST-ONBOARDING" }, adminToken);
+  assert.equal(verified.status, 201, JSON.stringify(verified.data));
+  assert.equal(verified.data.subscription.status, "active");
+  return sub;
+}
+
 const application = (email: string, shopName: string) => ({
   contactName: "Aline Applicant",
   email,
@@ -269,7 +282,7 @@ test("activation: token-gated, server-side password policy, single use, then sig
 
 /* ------------------------------------------------------------------ 4. shop creation */
 
-test("shop creation: once, by the activated owner only", { skip }, async () => {
+test("shop creation: second shop is additive and never steals the active context", { skip }, async () => {
   const owner = await auth(OWNER_EMAIL);
 
   assert.equal((await call("POST", "/shop", { name: "Ubumwe Mart" })).status, 401, "anonymous callers get nothing");
@@ -282,15 +295,30 @@ test("shop creation: once, by the activated owner only", { skip }, async () => {
   shopId = created.data.id;
   assert.ok(shopId);
 
-  // One shop per owner, ever — a second call (or a race) loses cleanly.
-  const again = await call("POST", "/shop", { name: "Ubumwe Mart 2" }, owner.token);
-  assert.equal(again.status, 409);
-  assert.equal(msg(again.data), "shop_already_created");
+  // A brand-new shop is deliberately unpaid until an administrator verifies the payment. The owner
+  // can read the subscription screen, but no operational route opens yet.
+  const blocked = await call("GET", "/shop/staff", undefined, owner.token);
+  assert.equal(blocked.status, 403);
+  assert.equal(msg(blocked.data), "subscription_inactive");
+  assert.equal((await call("POST", `/subscriptions/${shopId}/verify`, {}, owner.token)).status, 403,
+    "only a system administrator can verify a payment");
 
+  await activateShop(admin.token, shopId);
+
+  // A second shop is allowed, but it must not move the owner away from the shop they are working in.
+  const second = await call("POST", "/shop", { name: "Ubumwe Mart 2" }, owner.token);
+  assert.equal(second.status, 201, JSON.stringify(second.data));
+  assert.notEqual(second.data.id, shopId);
   const row = (await pool.query(
     "SELECT u.shop_id, a.shop_id AS app_shop FROM owner_applications a JOIN users u ON u.id=a.user_id WHERE a.id=$1", [app1])).rows[0];
-  assert.equal(row.shop_id, shopId, "the owner is attached to their shop");
-  assert.equal(row.app_shop, shopId, "the application is tied to the shop for the audit trail");
+  assert.equal(row.shop_id, shopId, "the owner stays on their current shop");
+  assert.equal(row.app_shop, shopId, "the application is tied to the original shop for the audit trail");
+  assert.equal(Number((await pool.query("SELECT count(*)::int n FROM shop_memberships WHERE user_id=(SELECT id FROM users WHERE email=$1) AND status='active'", [OWNER_EMAIL])).rows[0].n), 2,
+    "both shops are authorized memberships");
+  const secondSub = (await pool.query("SELECT status FROM shop_subscriptions WHERE shop_id=$1", [second.data.id])).rows[0];
+  assert.equal(secondSub.status, "pending_payment", "the new shop has its own unpaid subscription");
+  assert.equal((await pool.query("SELECT status FROM shop_subscriptions WHERE shop_id=$1", [shopId])).rows[0].status, "active",
+    "the first shop's subscription is unaffected");
   assert.ok(Number((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action='shop.create' AND entity_id=$1", [shopId])).rows[0].n) >= 1);
 
   const me = await call("GET", "/auth/me", undefined, owner.token);
@@ -423,8 +451,11 @@ test("role enforcement over HTTP: every surface is closed to the wrong role", { 
   // Team management belongs to the owner of that shop — the manager cannot invite or revoke.
   assert.equal((await call("GET", "/shop/staff", undefined, mgr.token)).status, 403);
   assert.equal((await call("POST", "/shop/staff/invitations", { fullName: "X", email: "x@onboarding.test" }, mgr.token)).status, 403);
-  // ...and no route can move another shop: the shop always comes from the signed-in row.
-  assert.equal((await call("POST", "/shop", { name: "Second Shop" }, owner.token)).status, 409, "still one shop per owner");
+  // ...and no route can choose another shop: creation is always for the signed-in owner, and the
+  // active shop remains unchanged until an explicit /shop/switch.
+  const extra = await call("POST", "/shop", { name: "Second Shop" }, owner.token);
+  assert.equal(extra.status, 201);
+  assert.equal((await pool.query("SELECT shop_id FROM users WHERE email=$1", [OWNER_EMAIL])).rows[0].shop_id, shopId);
 
   // The manager works inside the shop: read access to their own team's shop is owner-only too,
   // but reports stay open to both roles (an existing authorization rule, unchanged here).

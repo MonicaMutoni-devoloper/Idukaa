@@ -107,6 +107,9 @@ export class SalesController {
       // Reversing a credit sale removes the debt. If repayments already cover that debt, the
       // customer would be left with a negative balance; require an explicit credit adjustment first.
       if (sale.customer_id) {
+        // Serialize with repayments and adjustments. Without this lock a repayment can commit
+        // between the balance check below and the reversal, leaving the customer negative.
+        await c.query("SELECT id FROM customers WHERE id=$1 AND shop_id=$2 FOR UPDATE", [sale.customer_id, u.shopId]);
         const credit = Number(sale.gross_amount) - Number(sale.discount) - Number(sale.amount_paid);
         if (credit > 0) {
           const { rows: [b] } = await c.query(

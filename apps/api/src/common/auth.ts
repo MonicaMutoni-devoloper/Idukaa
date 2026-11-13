@@ -61,7 +61,8 @@ export class AuthGuard implements CanActivate {
     }
     const path = String(req.path ?? req.url ?? "").split("?")[0] ?? "";
     const subscriptionExempt = path.startsWith("/auth") || path.startsWith("/subscriptions")
-      || path.startsWith("/shop/memberships") || path.startsWith("/shop/switch") || path === "/shop/profile"
+      || path.startsWith("/shop/memberships") || path.startsWith("/shop/switch")
+      || (req.method === "GET" && path === "/shop/profile")
       || path === "/health" || path.startsWith("/app-version");
     // Paid functionality requires a server-confirmed active subscription. Reading the shop list,
     // plan catalog and renewal screen stays available so the owner can resolve the state.

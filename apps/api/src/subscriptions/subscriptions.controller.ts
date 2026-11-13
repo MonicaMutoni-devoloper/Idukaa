@@ -59,12 +59,20 @@ export class SubscriptionsController {
     const [plan] = await this.db.query("SELECT id, price_rwf, duration_days FROM subscription_plans WHERE code=$1 AND active=true", [b.data.planCode]);
     if (!plan) throw new NotFoundException("plan_not_found");
     return this.db.tx(async (c) => {
-      const { rows: [active] } = await c.query("SELECT id, status, ends_at FROM shop_subscriptions WHERE shop_id=$1 ORDER BY created_at DESC LIMIT 1 FOR UPDATE", [shopId]);
+      const { rows: [active] } = await c.query(
+        `SELECT ss.*, p.code AS plan_code, p.name AS plan_name, p.price_rwf, p.duration_days
+           FROM shop_subscriptions ss JOIN subscription_plans p ON p.id=ss.plan_id
+          WHERE ss.shop_id=$1 ORDER BY ss.created_at DESC LIMIT 1 FOR UPDATE OF ss`, [shopId]);
       if (active?.status === "active" && (!active.ends_at || new Date(active.ends_at).getTime() > Date.now())) {
-        return { ok: true, alreadyActive: true, subscription: shape({ ...active, plan_code: b.data.planCode, plan_name: "", price_rwf: plan.price_rwf, duration_days: plan.duration_days }) };
+        return { ok: true, alreadyActive: true, subscription: shape(active) };
       }
+      // Clear every non-current row before inserting the renewal. An `active` row whose ends_at
+      // has passed is no longer current, but still occupies the partial unique index until it is
+      // explicitly marked expired here.
       await c.query(
-        "UPDATE shop_subscriptions SET status='expired', updated_at=now() WHERE shop_id=$1 AND status IN ('pending_payment','verification_required')", [shopId]);
+        `UPDATE shop_subscriptions SET status='expired', updated_at=now()
+          WHERE shop_id=$1 AND (status IN ('pending_payment','verification_required')
+             OR (status='active' AND ends_at IS NOT NULL AND ends_at <= now()))`, [shopId]);
       const { rows: [row] } = await c.query(
         `INSERT INTO shop_subscriptions(shop_id, plan_id, status) VALUES ($1,$2,'pending_payment')
          RETURNING id, shop_id, status, starts_at, ends_at, created_at`, [shopId, plan.id]);
@@ -77,22 +85,29 @@ export class SubscriptionsController {
 
   /** System administrator controls pricing and plan availability; prices are never hardcoded in the app. */
   @Post("plans/:id") @Roles("system_admin")
-  async updatePlan(@Param("id") id: string, @Body() body: unknown) {
+  async updatePlan(@Me() u: AuthUser, @Param("id") id: string, @Body() body: unknown) {
     if (!z.string().uuid().safeParse(id).success) throw new NotFoundException("plan_not_found");
     const b = z.object({
       name: z.string().trim().min(2).max(80).optional(),
-      priceRwf: z.number().int().nonnegative().optional(),
+      priceRwf: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
       durationDays: z.number().int().min(1).max(3660).optional(),
       active: z.boolean().optional(),
     }).refine((v) => Object.keys(v).length > 0, "no_changes").safeParse(body);
     if (!b.success) throw new BadRequestException(b.error.issues[0]?.message);
     const v = b.data;
-    const { rows: [row] } = await this.db.pool.query(
-      `UPDATE subscription_plans SET name=COALESCE($2,name), price_rwf=COALESCE($3,price_rwf),
-              duration_days=COALESCE($4,duration_days), active=COALESCE($5,active)
-        WHERE id=$1 RETURNING id, code, name, price_rwf, duration_days, active`, [id, v.name ?? null, v.priceRwf ?? null, v.durationDays ?? null, v.active ?? null]);
-    if (!row) throw new NotFoundException("plan_not_found");
-    return { id: row.id, code: row.code, name: row.name, priceRwf: Number(row.price_rwf), durationDays: Number(row.duration_days), active: row.active };
+    return this.db.tx(async (c) => {
+      const { rows: [old] } = await c.query("SELECT id, code, name, price_rwf, duration_days, active FROM subscription_plans WHERE id=$1 FOR UPDATE", [id]);
+      if (!old) throw new NotFoundException("plan_not_found");
+      const { rows: [row] } = await c.query(
+        `UPDATE subscription_plans SET name=COALESCE($2,name), price_rwf=COALESCE($3,price_rwf),
+                duration_days=COALESCE($4,duration_days), active=COALESCE($5,active)
+          WHERE id=$1 RETURNING id, code, name, price_rwf, duration_days, active`,
+        [id, v.name ?? null, v.priceRwf ?? null, v.durationDays ?? null, v.active ?? null]);
+      await audit(c, { shopId: null, actorId: u.id, action: "subscription.plan.update", entity: "subscription_plan", entityId: id,
+        oldValue: { name: old.name, priceRwf: Number(old.price_rwf), durationDays: Number(old.duration_days), active: old.active },
+        newValue: { name: row.name, priceRwf: Number(row.price_rwf), durationDays: Number(row.duration_days), active: row.active } });
+      return { id: row.id, code: row.code, name: row.name, priceRwf: Number(row.price_rwf), durationDays: Number(row.duration_days), active: row.active };
+    });
   }
 
   @Get("admin/pending") @Roles("system_admin")
@@ -127,7 +142,8 @@ export class SubscriptionsController {
                 activated_by=$5, activated_at=now(), updated_at=now() WHERE id=$1
          RETURNING id, shop_id, status, starts_at, ends_at, payment_reference, activated_at, created_at`,
         [id, startsAt, endsAt, b.data.paymentReference ?? null, u.id]);
-      await c.query("UPDATE shops SET subscription_required=true, status='active' WHERE id=$1", [sub.shop_id]);
+      // Activation never overrides an administrator's suspension: it only turns on paid access.
+      await c.query("UPDATE shops SET subscription_required=true WHERE id=$1", [sub.shop_id]);
       await audit(c, { shopId: sub.shop_id, actorId: u.id, action: "subscription.verify", entity: "shop_subscription", entityId: id,
         oldValue: { status: sub.status }, newValue: { status: "active", startsAt, endsAt, paymentReference: b.data.paymentReference ?? null } });
       return { ok: true, alreadyActive: false, subscription: shape({ ...row, duration_days: sub.duration_days, price_rwf: sub.price_rwf }) };
