@@ -59,6 +59,10 @@ const CONTROLLERS: Record<string, () => Promise<Record<string, unknown>>> = {
   sales: () => import("../src/sales/sales.controller"),
   shop: () => import("../src/shop/shop.controller"),
   staff: () => import("../src/shop/staff.controller"),
+  "shop-memberships": () => import("../src/shop/memberships.controller"),
+  subscriptions: () => import("../src/subscriptions/subscriptions.controller"),
+  customers: () => import("../src/customers/customers.controller"),
+  alerts: () => import("../src/alerts/alerts.controller"),
   sync: () => import("../src/sync/sync.controller"),
 };
 

@@ -5,7 +5,7 @@ import { Badge, Banner, Button, Card, Empty, Field, Modal, Screen, Segmented, us
 import { Appear, Disclosure, Dismiss, Shake } from "../../src/components/motion";
 import { Icon } from "../../src/components/icons";
 import { cartSellingQty, maxSellingMilli, mergeCartQty, stepSellingQty, validateQuickAddQty } from "../../src/services/sell-quick-add";
-import { enqueue, listProducts, type LocalProduct } from "../../src/database/local";
+import { enqueue, listCustomers, listProducts, type LocalCustomer, type LocalProduct } from "../../src/database/local";
 import { useT } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
 import { fullResync, refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
@@ -43,6 +43,10 @@ export default function Sell() {
   const [q, setQ] = useState(""); const [list, setList] = useState<LocalProduct[]>([]); const [lines, setLines] = useState<Line[]>([]);
   const [discount, setDiscount] = useState("0"); const [paid, setPaid] = useState<string | null>(null);
   const [method, setMethod] = useState<PaymentMethod>("cash");
+  const [customers, setCustomers] = useState<LocalCustomer[]>([]);
+  const [customerId, setCustomerId] = useState<string | null>(null);
+  const [dueDate, setDueDate] = useState("");
+  const [overrideReason, setOverrideReason] = useState("");
   const [maxDiscount, setMaxDiscount] = useState<number | null>(null);
   const [policyTime, setPolicyTime] = useState<string | null>(null);
   const [policyMissing, setPolicyMissing] = useState(false);
@@ -95,6 +99,8 @@ export default function Sell() {
     return () => { live = false; };
   }, [user.shopId, user.role]);
   useEffect(() => { void listProducts("").then(setAll).catch(() => setAll([])); }, [v, saved]);
+  useEffect(() => { void listCustomers("").then(setCustomers).catch(() => setCustomers([])); }, [v, saved]);
+  useEffect(() => { if (method === "credit" && paid === null) setPaid("0"); }, [method, paid]);
 
   const retMatches = all.filter((p) => {
     const needle = retQuery.trim().toLowerCase();
@@ -127,6 +133,8 @@ export default function Sell() {
   const appliedPaid = tendered === null ? 0 : Math.min(tendered, total); // change is not revenue
   const change = tendered === null ? 0 : Math.max(0, tendered - total);
   const balance = tendered === null ? 0 : Math.max(0, total - tendered);
+  const customer = customers.find((x) => x.id === customerId) ?? null;
+  const creditLimit = customer?.credit_limit ?? 0;
 
   const quickStock = quick ? eff(quick) : 0;
   const quickFactor = quick ? unitsSellingOf(quick) : 1;
@@ -198,6 +206,7 @@ export default function Sell() {
     else if (user.role !== "owner" && maxDiscount !== null && gross > 0 && disc > Math.floor((gross * maxDiscount) / 100))
       e.d = t("sell.discountLimit").replace("{pct}", String(maxDiscount));
     if (tendered === null) e.paid = t("v.invalid");
+    if (balance > 0 && !customerId) e.paid = t("credit.customerRequired");
     setErrs(e);
     if (Object.keys(e).length) {
       setErrCount((n) => n + 1);
@@ -208,17 +217,22 @@ export default function Sell() {
     if (!lines.length || Object.keys(e).length) return;
 
     const saleTotal = total, count = lines.length, saleId = uuid(), at = new Date().toISOString();
-    const payload = { saleId, soldAt: at, discount: disc, amountPaid: appliedPaid, paymentMethod: method, lines: lines.map((l) => {
-      const natural = qtyOrNull(l.qty)!;                         // milli SELLING units as entered
-      return { productId: l.p.id, qty: toBaseQty(natural, unitsSellingOf(l.p)), unitPrice: parseRwf(l.price)!, sellingQty: natural };
-    }) };
+    const payload = { saleId, soldAt: at, discount: disc, amountPaid: appliedPaid, paymentMethod: method,
+      customerId: balance > 0 ? customerId : customerId ?? undefined,
+      dueAt: balance > 0 && /^\d{4}-\d{2}-\d{2}$/.test(dueDate) && !Number.isNaN(new Date(`${dueDate}T12:00:00Z`).getTime())
+        ? new Date(`${dueDate}T12:00:00Z`).toISOString() : undefined,
+      creditOverrideReason: balance > 0 && overrideReason.trim().length >= 3 ? overrideReason.trim() : undefined,
+      lines: lines.map((l) => {
+        const natural = qtyOrNull(l.qty)!;                         // milli SELLING units as entered
+        return { productId: l.p.id, qty: toBaseQty(natural, unitsSellingOf(l.p)), unitPrice: parseRwf(l.price)!, sellingQty: natural };
+      }) };
     const deltas: Record<string, number> = {}; payload.lines.forEach((l) => (deltas[l.productId] = (deltas[l.productId] ?? 0) - l.qty));
     setBusy(true); setSaveError(null);
     try {
       // `at` is passed as the record timestamp so today's local figures place the sale on the
       // Kigali business day it was made, not on whichever day the sync later ran.
       await enqueue(user.id, uuid(), "sale.create", payload, deltas, undefined, at); // durable BEFORE success is shown
-      setLines([]); setDiscount("0"); setPaid(null); setErrs({}); setCartOpen(false); Keyboard.dismiss();
+      setLines([]); setDiscount("0"); setPaid(null); setErrs({}); setCartOpen(false); setCustomerId(null); setDueDate(""); setOverrideReason(""); Keyboard.dismiss();
       setSaved({ total: saleTotal, count, ref: `RC-${saleId.slice(0, 8).toUpperCase()}`, paid: appliedPaid, change, at, method });
       await refreshCounts(); void syncNow();
     } catch {
@@ -322,6 +336,29 @@ export default function Sell() {
 
           {lines.length ? (
             <Card style={{ gap: space.md }}>
+              <View style={{ gap: 5 }}>
+                <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("credit.select")}</Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                  {customers.slice(0, 8).map((cu) => (
+                    <Pressable key={cu.id} testID={`sell-customer-${cu.id}`} onPress={() => setCustomerId(customerId === cu.id ? null : cu.id)}
+                      style={({ pressed }: any) => ({ paddingVertical: 7, paddingHorizontal: space.md, borderRadius: 8, borderWidth: 1,
+                        borderColor: customerId === cu.id ? c.success : c.line, backgroundColor: customerId === cu.id ? c.surfaceMuted : pressed ? c.pressed : c.surface })}>
+                      <Text style={{ color: c.ink, fontSize: 12, fontWeight: customerId === cu.id ? "700" : "500" }}>{cu.name}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+                {!customers.length ? <Text style={{ color: c.muted, fontSize: 11 }}>{t("credit.noCustomers")}</Text> : null}
+                {customer ? (
+                  <View style={{ gap: space.sm }}>
+                    <Text style={{ color: c.muted, fontSize: 11 }}>{t("credit.limit")}: {formatRwf(creditLimit)} · {customer.phone ?? "—"}</Text>
+                    {balance > 0 ? <Field label={t("credit.due")} value={dueDate} onChangeText={setDueDate} placeholder="YYYY-MM-DD" /> : null}
+                    {balance > 0 ? (
+                      <Field label={t("credit.overrideReason")} value={overrideReason} onChangeText={setOverrideReason}
+                        hint={t("credit.overrideHint")} />
+                    ) : null}
+                  </View>
+                ) : null}
+              </View>
               <View style={{ gap: 4 }}>
                 <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("sell.paymentMethod")}</Text>
                 <Segmented<PaymentMethod> label={t("sell.paymentMethod")} value={method} onChange={setMethod} options={[

@@ -28,6 +28,8 @@ export type AuthCategory =
   | "invalid_access_token" // missing, malformed, bad signature or expired bearer
   | "session_state_mismatch" // token_version moved on (logout-all / revocation)
   | "shop_suspended"
+  | "shop_membership_missing"
+  | "subscription_inactive"
   | "role_not_allowed"
   | "database_error"
   | "ok";

@@ -5,7 +5,7 @@ import type { Role } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { authLog } from "./auth-log";
 
-export interface AuthUser { id: string; role: Role; shopId: string | null }
+export interface AuthUser { id: string; role: Role; shopId: string | null; subscriptionStatus?: string | null }
 export const Roles = (...r: Role[]) => SetMetadata("roles", r);
 export const Public = () => SetMetadata("public", true);
 export const Me = createParamDecorator((_d, ctx: ExecutionContext): AuthUser => ctx.switchToHttp().getRequest().user);
@@ -31,7 +31,11 @@ export class AuthGuard implements CanActivate {
       throw new UnauthorizedException("session_expired");
     }
     const [u] = await this.db.query(
-      `SELECT u.id, u.role, u.shop_id, u.active, u.account_status, u.token_version, s.status AS shop_status
+      `SELECT u.id, u.role, u.shop_id, u.active, u.account_status, u.token_version, s.status AS shop_status,
+              s.subscription_required,
+              (SELECT ss.status FROM shop_subscriptions ss WHERE ss.shop_id=u.shop_id ORDER BY ss.created_at DESC LIMIT 1) AS subscription_status,
+              (SELECT ss.ends_at FROM shop_subscriptions ss WHERE ss.shop_id=u.shop_id ORDER BY ss.created_at DESC LIMIT 1) AS subscription_ends_at,
+              EXISTS(SELECT 1 FROM shop_memberships m WHERE m.user_id=u.id AND m.shop_id=u.shop_id AND m.status='active') AS has_membership
          FROM users u LEFT JOIN shops s ON s.id = u.shop_id WHERE u.id=$1`, [p.sub]);
     if (!u || !u.active || u.account_status !== "active") {
       authLog(req, "guard.rejected", "session_revoked", { userId: p.sub, active: !!u?.active, accountStatus: u?.account_status });
@@ -48,7 +52,27 @@ export class AuthGuard implements CanActivate {
       authLog(req, "guard.rejected", "shop_suspended", { userId: u.id });
       throw new ForbiddenException("shop_suspended");
     }
-    req.user = { id: u.id, role: u.role, shopId: u.shop_id } satisfies AuthUser;
+    // A user is authorized for the active shop only through an explicit membership. The migration
+    // backfills every existing account, so a missing row is a real isolation failure, not a legacy
+    // state that may be guessed past.
+    if (u.shop_id && u.has_membership !== true) {
+      authLog(req, "guard.rejected", "shop_membership_missing", { userId: u.id, shopId: u.shop_id });
+      throw new ForbiddenException("shop_access_denied");
+    }
+    const path = String(req.path ?? req.url ?? "").split("?")[0] ?? "";
+    const subscriptionExempt = path.startsWith("/auth") || path.startsWith("/subscriptions")
+      || path.startsWith("/shop/memberships") || path.startsWith("/shop/switch") || path === "/shop/profile"
+      || path === "/health" || path.startsWith("/app-version");
+    // Paid functionality requires a server-confirmed active subscription. Reading the shop list,
+    // plan catalog and renewal screen stays available so the owner can resolve the state.
+    const subscriptionActive = u.subscription_status === "active"
+      && (!u.subscription_ends_at || new Date(u.subscription_ends_at).getTime() > Date.now());
+    if (u.shop_id && u.subscription_required && !subscriptionActive && !subscriptionExempt) {
+      authLog(req, "guard.rejected", "subscription_inactive", { userId: u.id, shopId: u.shop_id, status: u.subscription_status ?? "missing" });
+      throw new ForbiddenException("subscription_inactive");
+    }
+    req.user = { id: u.id, role: u.role, shopId: u.shop_id,
+      subscriptionStatus: subscriptionActive ? "active" : (u.subscription_status ?? null) } satisfies AuthUser;
     const need = this.ref.getAllAndOverride<Role[]>("roles", [ctx.getHandler(), ctx.getClass()]);
     if (need && !need.includes(u.role)) {
       authLog(req, "guard.rejected", "role_not_allowed", { userId: u.id, role: u.role });

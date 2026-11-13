@@ -16,7 +16,7 @@ import { space, type, useTheme } from "../../src/theme/tokens";
 
 interface Me { id: string; email: string; name: string; role: "owner" | "manager" | "system_admin"; shopId: string | null; shopName: string | null }
 interface ShopProfile { id: string; name: string; currency: string; createdAt: string }
-interface ShopPolicy { managerFinancialAccess: boolean; belowCostPolicy: "acknowledge" | "block"; maxDiscountPercent: number }
+interface ShopPolicy { managerFinancialAccess: boolean; belowCostPolicy: "acknowledge" | "block"; maxDiscountPercent: number; creditLimitPolicy: "block" | "owner_approval" | "reason_override" }
 type Note = { tone: "ok" | "danger"; text: string } | null;
 
 export default function Settings() {
@@ -124,7 +124,7 @@ export default function Settings() {
         const cached = await readCachedPolicy(user.shopId ?? null).catch(() => null);
         if (!live) return;
         if (cached) {
-          setPolicy({ managerFinancialAccess: cached.managerFinancialAccess, belowCostPolicy: cached.belowCostPolicy, maxDiscountPercent: cached.maxDiscountPercent });
+          setPolicy({ managerFinancialAccess: cached.managerFinancialAccess, belowCostPolicy: cached.belowCostPolicy, maxDiscountPercent: cached.maxDiscountPercent, creditLimitPolicy: "block" });
           setDiscountInput(String(cached.maxDiscountPercent));
           setPolicyMsg({ tone: "danger", text: t("offline.cached").replace("{time}", new Date(cached.fetchedAt).toLocaleString()) });
         } else {
@@ -259,6 +259,17 @@ export default function Settings() {
                 </Text>
               </View>
               <Field testID="policy-max-discount" label={t("settings.maxDiscount")} value={discountInput} keyboardType="number-pad" onChangeText={setDiscountInput} hint={t("settings.maxDiscountHelp")} />
+              <View style={{ gap: 4 }}>
+                <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{t("settings.creditPolicy")}</Text>
+                <Segmented<"block" | "owner_approval" | "reason_override"> label={t("settings.creditPolicy")} value={policy.creditLimitPolicy}
+                  onChange={(v) => setPolicy({ ...policy, creditLimitPolicy: v })}
+                  options={[
+                    { value: "block", label: t("settings.creditBlock") },
+                    { value: "owner_approval", label: t("settings.creditApproval") },
+                    { value: "reason_override", label: t("settings.creditReason") },
+                  ]} />
+                <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("settings.creditPolicyHelp")}</Text>
+              </View>
               <Button testID="policy-save" label={t("common.save")} loading={policyBusy} onPress={() => void savePolicy()} />
             </>
           ) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("common.loading")}</Text>}

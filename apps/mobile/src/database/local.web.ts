@@ -15,8 +15,9 @@ import type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend
 export type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot };
 
 interface LocalSupplier { id: string; name: string; phone?: string | null }
+interface WebCustomer { id: string; shop_id: string | null; name: string; phone: string | null; address: string | null; notes: string | null; credit_limit: number; status: "active" | "blocked"; updated_at?: string | null }
 interface WebProduct extends LocalProduct { barcode: string | null; active: number; purchase_unit: string | null; selling_unit: string | null; units_per_purchase: number; units_per_selling: number }
-interface State { kv: Record<string, string>; products: WebProduct[]; suppliers: LocalSupplier[]; outbox: OutboxRow[]; records: LocalRecord[]; seq: number }
+interface State { kv: Record<string, string>; products: WebProduct[]; suppliers: LocalSupplier[]; customers: WebCustomer[]; outbox: OutboxRow[]; records: LocalRecord[]; seq: number }
 
 const IDB_NAME = "sms-local";
 const IDB_STORE = "state";
@@ -24,7 +25,7 @@ const IDB_KEY = "state";
 const LEGACY_KEY = "sms.localdb.v1";
 const CHANNEL = "sms-local";
 
-const empty = (): State => ({ kv: {}, products: [], suppliers: [], outbox: [], records: [], seq: 0 });
+const empty = (): State => ({ kv: {}, products: [], suppliers: [], customers: [], outbox: [], records: [], seq: 0 });
 const hasIDB = typeof indexedDB !== "undefined";
 const hasLS = typeof localStorage !== "undefined";
 
@@ -75,6 +76,7 @@ function normalize(raw: unknown): State {
     kv: s.kv && typeof s.kv === "object" ? s.kv : {},
     products: Array.isArray(s.products) ? s.products.map(normalizeProduct) : [],
     suppliers: Array.isArray(s.suppliers) ? s.suppliers : [],
+    customers: Array.isArray(s.customers) ? s.customers : [],
     outbox: Array.isArray(s.outbox) ? s.outbox.map((r) => ({ ...r, shop_id: r.shop_id ?? null })) : [],
     records: Array.isArray(s.records) ? s.records.map((r) => ({ ...r, shop_id: r.shop_id ?? null })) : [],
     seq: typeof s.seq === "number" ? s.seq : (Array.isArray(s.outbox) ? s.outbox.reduce((m, r) => Math.max(m, r.seq ?? 0), 0) : 0),
@@ -301,7 +303,7 @@ export async function upsertLocalSupplier(x: { id: string; name: string; phone?:
 
 export const dueOps = async (userId: string, shopId: string | null, limit = 50) =>
   (await readState()).outbox
-    .filter((r) => r.user_id === userId && (r.shop_id ?? null) === shopId && (r.status === "pending" || r.status === "retry") && r.next_attempt_at <= Date.now())
+    .filter((r) => r.user_id === userId && (r.shop_id ?? null) === shopId && (r.status === "pending" || r.status === "retry" || r.status === "pending_approval") && r.next_attempt_at <= Date.now())
     .sort((a, b) => a.seq - b.seq)
     .slice(0, limit)
     .map((r) => ({ ...r }));
@@ -326,6 +328,7 @@ export async function applyResults(results: { opId: string; status: string; mess
       row.message = r.message ?? null;
       row.deltas = "{}";
       row.synced_at = new Date().toISOString();
+      row.next_attempt_at = row.status === "pending_approval" ? Date.now() + 60_000 : 0;
     }
   });
 }
@@ -360,9 +363,21 @@ export async function applyPull(changes: { entity: string; id: string; data: any
         const ex = s.suppliers.find((x) => x.id === c.data.id);
         if (ex) { ex.name = c.data.name; ex.phone = c.data.phone ?? null; } else s.suppliers.push({ id: c.data.id, name: c.data.name, phone: c.data.phone ?? null });
       }
+      if (c.entity === "customer") {
+        const x = c.data; const ex = s.customers.find((v) => v.id === x.id);
+        const row: WebCustomer = { id: x.id, shop_id: s.kv["local.shop"] ?? null, name: x.name, phone: x.phone ?? null, address: x.address ?? null, notes: x.notes ?? null,
+          credit_limit: Number(x.creditLimit) || 0, status: x.status === "blocked" ? "blocked" : "active", updated_at: new Date().toISOString() };
+        if (ex) Object.assign(ex, row); else s.customers.push(row);
+      }
     }
   });
 }
+
+export const listCustomers = async (q = "") => {
+  const needle = q.trim().toLowerCase(); const s = await readState(); const shop = s.kv["local.shop"] ?? null;
+  return s.customers.filter((c) => (c.shop_id ?? null) === shop && (!needle || c.name.toLowerCase().includes(needle) || (c.phone ?? "").toLowerCase().includes(needle)))
+    .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 500);
+};
 
 export const listProducts = async (q = "") => {
   const needle = q.trim().toLowerCase();

@@ -17,6 +17,7 @@ export const OP_ROLES: Record<OperationT["type"], Role[]> = {
   // The owner sells, buys, receives, counts, corrects, and maintains the catalogue exactly like a
   // manager. Being the owner must never mean "cannot use my own shop".
   "sale.create": ["manager", "owner"],
+  "credit.payment.create": ["manager", "owner"],
   "purchase.create": ["manager", "owner"],
   "receipt.create": ["manager", "owner"],
   "count.submit": ["manager", "owner"],

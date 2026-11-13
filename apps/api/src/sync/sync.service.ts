@@ -74,6 +74,20 @@ export class SyncService {
       if (!ins.rowCount) { // idempotent replay: return the ORIGINAL outcome
         const { rows: [ex] } = await c.query("SELECT shop_id,status,message FROM operations WHERE op_id=$1", [op.opId]);
         if (ex.shop_id !== shopId) return { opId, status: "rejected", message: "op_id_in_use" } as OpResult;
+        // A credit sale waiting for the owner can be approved between two sync passes. The client
+        // keeps retrying this operation, so resolve the verdict from the sale instead of returning
+        // "pending" forever and leaving the manager's outbox permanently stuck.
+        if (ex.status === "pending_approval" && op.type === "sale.create") {
+          const { rows: [sale] } = await c.query("SELECT status FROM sales WHERE shop_id=$1 AND op_id=$2", [shopId, op.opId]);
+          if (sale?.status === "posted") {
+            await c.query("UPDATE operations SET status='applied', message='approved_after_review' WHERE op_id=$1", [op.opId]);
+            return { opId, status: "duplicate", message: "approved_after_review" } as OpResult;
+          }
+          if (sale?.status === "rejected") {
+            await c.query("UPDATE operations SET status='rejected', message='credit_rejected' WHERE op_id=$1", [op.opId]);
+            return { opId, status: "rejected", message: "credit_rejected" } as OpResult;
+          }
+        }
         return { opId, status: ex.status === "applied" ? "duplicate" : ex.status, message: ex.message ?? undefined } as OpResult;
       }
       await c.query("SAVEPOINT op");
@@ -93,8 +107,20 @@ export class SyncService {
   }
 
   private async policy(c: PoolClient, shopId: string) {
-    const { rows: [s] } = await c.query("SELECT below_cost_policy, max_discount_percent FROM shops WHERE id=$1", [shopId]);
-    return s as { below_cost_policy: "acknowledge" | "block"; max_discount_percent: number };
+    const { rows: [s] } = await c.query("SELECT below_cost_policy, max_discount_percent, credit_limit_policy FROM shops WHERE id=$1", [shopId]);
+    return s as { below_cost_policy: "acknowledge" | "block"; max_discount_percent: number; credit_limit_policy: "block" | "owner_approval" | "reason_override" };
+  }
+
+  /** Customer balance derived from posted credit sales, repayments and signed adjustments. */
+  private async creditOutstanding(c: PoolClient, shopId: string, customerId: string): Promise<number> {
+    const { rows: [r] } = await c.query(
+      `SELECT
+         COALESCE((SELECT SUM(gross_amount-discount-amount_paid) FROM sales
+                    WHERE shop_id=$1 AND customer_id=$2 AND status='posted'),0)
+         - COALESCE((SELECT SUM(amount) FROM credit_payments WHERE shop_id=$1 AND customer_id=$2),0)
+         + COALESCE((SELECT SUM(amount) FROM credit_adjustments WHERE shop_id=$1 AND customer_id=$2),0) AS owing`,
+      [shopId, customerId]);
+    return Number(r?.owing ?? 0);
   }
   private async lock(c: PoolClient, shopId: string, ids: string[]): Promise<Map<string, { unitsPerPurchase: number; unitsPerSelling: number }>> {
     const uniq = [...new Set(ids)].sort();
@@ -146,7 +172,47 @@ export class SyncService {
         const maxDiscount = Number((BigInt(gross) * BigInt(max_discount_percent)) / 100n);
         if (u.role !== "owner" && p.discount > maxDiscount) throw new BizError("rejected", `discount_above_limit:${max_discount_percent}%`);
         if (p.amountPaid > gross - p.discount) throw new BizError("rejected", "paid_exceeds_total");
-        await c.query("INSERT INTO sales(id,shop_id,op_id,user_id,sold_at,gross_amount,discount,amount_paid,payment_method) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)", [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod]);
+        const net = gross - p.discount;
+        const credit = net - p.amountPaid;
+        let customer: any = null;
+        if (p.customerId) {
+          const { rows: [cu] } = await c.query(
+            "SELECT id, credit_limit, status FROM customers WHERE id=$1 AND shop_id=$2 FOR UPDATE", [p.customerId, shopId]);
+          if (!cu) throw new BizError("rejected", "unknown_customer");
+          if (cu.status !== "active") throw new BizError("rejected", "customer_blocked");
+          customer = cu;
+        }
+        if (credit > 0 && !customer) throw new BizError("rejected", "customer_required_for_credit");
+        if (credit > 0) {
+          const owing = await this.creditOutstanding(c, shopId, p.customerId!);
+          const limit = Number(customer.credit_limit);
+          // A zero limit means no credit line, not an unlimited one: otherwise a manager could
+          // register a customer with the default limit and extend unlimited credit.
+          if (owing + credit > limit) {
+            const { credit_limit_policy } = await this.policy(c, shopId);
+            if (credit_limit_policy === "block") throw new BizError("rejected", `credit_limit_exceeded:${limit}:owing=${owing}:proposed=${credit}`);
+            if (credit_limit_policy === "owner_approval" && u.role !== "owner") {
+              const { rows: [pending] } = await c.query(
+                `INSERT INTO sales(id,shop_id,op_id,user_id,sold_at,gross_amount,discount,amount_paid,payment_method,customer_id,due_at,status)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending_approval')
+                 RETURNING id`,
+                [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod, p.customerId, p.dueAt ?? null]);
+              for (const [i, l] of p.lines.entries()) {
+                await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered) VALUES ($1,$2,$3,$4,$5,$6)",
+                  [pending.id, l.productId, l.qty, l.unitPrice, amounts[i], natural[i]]);
+              }
+              await audit(c, { shopId, actorId: u.id, action: "sale.credit.approval_requested", entity: "sale", entityId: p.saleId,
+                newValue: { credit, limit, owing, customerId: p.customerId, reason: p.creditOverrideReason ?? null } });
+              return "pending_approval";
+            }
+            if (!p.creditOverrideReason) throw new BizError("rejected", "credit_override_reason_required");
+            await audit(c, { shopId, actorId: u.id, action: "sale.credit.override", entity: "sale", entityId: p.saleId,
+              newValue: { credit, limit, owing, customerId: p.customerId }, reason: p.creditOverrideReason });
+          }
+        }
+        await c.query(
+          "INSERT INTO sales(id,shop_id,op_id,user_id,sold_at,gross_amount,discount,amount_paid,payment_method,customer_id,due_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+          [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod, p.customerId ?? null, p.dueAt ?? null]);
         if (u.role !== "owner" && p.discount > 0) await audit(c, { shopId, actorId: u.id, action: "sale.discount", entity: "sale", entityId: p.saleId, newValue: { discount: p.discount, gross, limitPercent: max_discount_percent } });
         for (const [i, l] of p.lines.entries()) {
           await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered) VALUES ($1,$2,$3,$4,$5,$6)", [p.saleId, l.productId, l.qty, l.unitPrice, amounts[i], natural[i]]);
@@ -254,6 +320,25 @@ export class SyncService {
         await c.query("INSERT INTO adjustments(id,shop_id,op_id,product_id,qty,reason,note,refund_amount,requested_by,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')", [p.adjustmentId, shopId, op.opId, p.productId, p.qty, p.reason, p.note, p.refundAmount ?? null, u.id]);
         return "pending_approval"; // owner must approve before any stock movement is posted
       }
+      case "credit.payment.create": {
+        const p = op.payload;
+        const { rows: [customer] } = await c.query(
+          "SELECT id FROM customers WHERE id=$1 AND shop_id=$2 FOR UPDATE", [p.customerId, shopId]);
+        if (!customer) throw new BizError("rejected", "unknown_customer");
+        const owing = await this.creditOutstanding(c, shopId, p.customerId);
+        if (p.amount > owing) throw new BizError("rejected", `payment_exceeds_balance:${owing}`);
+        try {
+          await c.query(
+            "INSERT INTO credit_payments(id,shop_id,customer_id,op_id,user_id,amount,method,paid_at,reference) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            [p.paymentId, shopId, p.customerId, op.opId, u.id, p.amount, p.method, p.paidAt, p.reference]);
+        } catch (e: any) {
+          if (e?.code === "23505") throw new BizError("rejected", "payment_reference_already_used");
+          throw e;
+        }
+        await audit(c, { shopId, actorId: u.id, action: "credit.payment.create", entity: "customer", entityId: p.customerId,
+          newValue: { paymentId: p.paymentId, amount: p.amount, method: p.method, reference: p.reference, balanceBefore: owing } });
+        return;
+      }
       case "product.upsert": {
         const p = op.payload;
         // One product row = one initial-stock registration. The advisory lock serialises two create
@@ -338,20 +423,22 @@ export class SyncService {
   /** Incremental pull. Checkpoint is an opaque JSON cursor: {p:[ts,id], s:[ts,id]} using (updated_at,id) row comparison. */
   async pull(user: AuthUser, checkpoint?: string, limit = 200) {
     const cur = checkpoint ? JSON.parse(checkpoint) : {}; const epoch = "1970-01-01T00:00:00.000000Z", nil = "00000000-0000-0000-0000-000000000000";
-    const [pt, pid] = cur.p ?? [epoch, nil]; const [st, sid] = cur.s ?? [epoch, nil];
+    const [pt, pid] = cur.p ?? [epoch, nil]; const [st, sid] = cur.s ?? [epoch, nil]; const [ct, cid] = cur.c ?? [epoch, nil];
     const ts = `to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
     const products = await this.db.query(`SELECT p.*, ${ts} AS ts, COALESCE((SELECT SUM(qty) FROM stock_movements m WHERE m.product_id=p.id),0)::bigint AS on_hand
       FROM products p WHERE shop_id=$1 AND (updated_at,id) > ($2::timestamptz,$3::uuid) ORDER BY updated_at,id LIMIT $4`, [user.shopId, pt, pid, limit]);
     const suppliers = await this.db.query(`SELECT s.*, ${ts} AS ts FROM suppliers s WHERE shop_id=$1 AND (updated_at,id) > ($2::timestamptz,$3::uuid) ORDER BY updated_at,id LIMIT $4`, [user.shopId, st, sid, limit]);
-    const lp = products.at(-1), ls = suppliers.at(-1);
-    const next = { p: lp ? [lp.ts, lp.id] : [pt, pid], s: ls ? [ls.ts, ls.id] : [st, sid] };
+    const customers = await this.db.query(`SELECT c.*, ${ts} AS ts FROM customers c WHERE shop_id=$1 AND (updated_at,id) > ($2::timestamptz,$3::uuid) ORDER BY updated_at,id LIMIT $4`, [user.shopId, ct, cid, limit]);
+    const lp = products.at(-1), ls = suppliers.at(-1), lc = customers.at(-1);
+    const next = { p: lp ? [lp.ts, lp.id] : [pt, pid], s: ls ? [ls.ts, ls.id] : [st, sid], c: lc ? [lc.ts, lc.id] : [ct, cid] };
     return {
-      checkpoint: JSON.stringify(next), hasMore: products.length === limit || suppliers.length === limit,
+      checkpoint: JSON.stringify(next), hasMore: products.length === limit || suppliers.length === limit || customers.length === limit,
       revision: await this.dashboardRevision(user.shopId!),
       changes: [
         ...products.map(p => ({ entity: "product", id: p.id, data: { id: p.id, code: p.code, barcode: p.barcode, name: p.name, category: p.category, unit: p.unit, sellingPrice: p.selling_price, lowStockThreshold: p.low_stock_threshold, onHand: p.on_hand, active: p.active,
           purchaseUnit: p.purchase_unit, sellingUnit: p.selling_unit, unitsPerPurchase: p.units_per_purchase, unitsPerSelling: p.units_per_selling } })),
         ...suppliers.map(s => ({ entity: "supplier", id: s.id, data: { id: s.id, name: s.name, phone: s.phone } })),
+        ...customers.map(c => ({ entity: "customer", id: c.id, data: { id: c.id, name: c.name, phone: c.phone, address: c.address, notes: c.notes, creditLimit: Number(c.credit_limit), status: c.status } })),
       ],
     };
   }

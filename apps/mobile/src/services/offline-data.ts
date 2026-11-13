@@ -354,13 +354,14 @@ async function runPreparation(force: boolean, changed: boolean): Promise<Offline
     await snap("team", snapshotKeys.team(shopId), "/shop/staff", user.role !== "owner");
     if (user.role === "owner" && !signal.aborted) {
       try {
-        const [adjustments, investigations, conflicts, log] = await Promise.all([
+        const [credit, adjustments, investigations, conflicts, log] = await Promise.all([
+          request<unknown[]>("/sales/pending-credit", { signal }),
           request<unknown[]>("/audit/adjustments/pending", { signal }),
           request<unknown[]>("/audit/investigations", { signal }),
           request<unknown[]>("/audit/conflicts", { signal }),
           request<unknown[]>("/audit/log", { signal }),
         ]);
-        await snapshot(snapshotKeys.approvals(shopId), { adjustments, investigations, conflicts, log });
+        await snapshot(snapshotKeys.approvals(shopId), { credit, adjustments, investigations, conflicts, log });
         cat(categories, "approvals", new Date().toISOString());
       } catch (e: any) {
         cat(categories, "approvals", previous?.categories.find((c) => c.key === "approvals")?.savedAt ?? null, { error: e?.message ?? "error" });

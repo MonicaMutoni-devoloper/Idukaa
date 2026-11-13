@@ -18,6 +18,10 @@ export const SaleOp = z.object({
   payload: z.object({
     saleId: id, soldAt: iso, discount: int.nonnegative().default(0), amountPaid: int.nonnegative(),
     paymentMethod: z.enum(PaymentMethods).default("cash"),
+    /** Optional customer account. Required when any part of the sale is unpaid. */
+    customerId: id.nullable().optional(), dueAt: iso.optional(),
+    /** Explicit, auditable owner decision when a credit limit is exceeded. */
+    creditOverrideReason: z.string().trim().min(3).max(500).optional(),
     lines: z.array(z.object({
       productId: id,
       // `qty` is always BASE milli-units (what stock is deducted in). `sellingQty` is the
@@ -110,8 +114,16 @@ export const SupplierOp = z.object({
   type: z.literal("supplier.upsert"),
   payload: z.object({ supplierId: id, name: z.string().min(1).max(120), phone: z.string().max(30).optional() }),
 });
+/** A repayment against a customer's credit account. One operation = one idempotent payment. */
+export const CreditPaymentOp = z.object({
+  type: z.literal("credit.payment.create"),
+  payload: z.object({
+    paymentId: id, customerId: id, amount: posInt, paidAt: iso,
+    method: z.enum(["cash", "momo", "bank"]), reference: z.string().trim().min(3).max(80),
+  }),
+});
 
-export const Operation = z.discriminatedUnion("type", [SaleOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp]).and(
+export const Operation = z.discriminatedUnion("type", [SaleOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp, CreditPaymentOp]).and(
   z.object({ opId: id, deviceId: z.string().min(1).max(64), createdAt: iso }),
 );
 export type OperationT = z.infer<typeof Operation>;

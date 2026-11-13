@@ -15,6 +15,7 @@ export const NAV: Record<Role, NavGroup[]> = {
     // Sales visibility: a manager sees the same shop activity as the owner (without cost/profit).
     { label: "nav.groupOversight", items: [
       { href: "/reports", key: "nav.reports", description: "nav.reportsDesc" },
+      { href: "/customers", key: "nav.customers", description: "nav.customersDesc" },
     ] },
     { label: "nav.groupAdmin", items: [
       { href: "/expense", key: "nav.expense", description: "nav.expenseDesc" },
@@ -38,6 +39,9 @@ export const NAV: Record<Role, NavGroup[]> = {
       { href: "/reports", key: "nav.reports", description: "nav.reportsDesc" },
       { href: "/profitability", key: "nav.profitability", description: "nav.profitabilityDesc" },
       { href: "/approvals", key: "nav.approvals", description: "nav.approvalsDesc" },
+      { href: "/shops", key: "nav.shops", description: "nav.shopsDesc" },
+      { href: "/customers", key: "nav.customers", description: "nav.customersDesc" },
+      { href: "/alerts", key: "nav.alerts", description: "nav.alertsDesc" },
     ] },
     { label: "nav.groupAdmin", items: [
       { href: "/expense", key: "nav.expense", description: "nav.expenseDesc" },
@@ -54,6 +58,7 @@ export const NAV: Record<Role, NavGroup[]> = {
       { href: "/admin", key: "admin.overview", description: "admin.overviewDesc" },
       { href: "/admin/applications", key: "admin.applications", description: "admin.applicationsDesc" },
       { href: "/admin/shops", key: "admin.shops", description: "admin.shopsDesc" },
+      { href: "/admin/subscriptions", key: "admin.subscriptions", description: "admin.subscriptionsDesc" },
       { href: "/admin/users", key: "admin.users", description: "admin.usersDesc" },
       { href: "/admin/audit", key: "admin.auditNav", description: "admin.auditNavDesc" },
       { href: "/admin/health", key: "admin.health", description: "admin.healthDesc" },

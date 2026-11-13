@@ -4,11 +4,12 @@ import { formatQty, formatRwf } from "@sms/shared";
 import { Badge, Banner, Button, Card, DataTable, Empty, ErrorState, Field, Loading, Screen, Segmented, useToasts } from "../../src/components/ui";
 import { useT, type Key } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
+import { decideCreditSale, getPendingCreditSales, type PendingCreditSale } from "../../src/services/business";
 import { useSync } from "../../src/synchronization/engine";
 import { readOfflineSnapshot, snapshotKeys } from "../../src/services/offline-data";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
-type Tab = "adjustments" | "investigations" | "conflicts" | "activity";
+type Tab = "credit" | "adjustments" | "investigations" | "conflicts" | "activity";
 const statusTone = (s: string) => (s === "open" ? "danger" : s === "investigating" ? "warn" : s === "resolved" || s === "closed" ? "ok" : "neutral") as "danger" | "warn" | "ok" | "neutral";
 
 export default function Approvals() {
@@ -17,25 +18,26 @@ export default function Approvals() {
   // The realtime nudge runs a pull, whose revision bump reloads the pending decisions in place.
   const recordsVersion = useSync((s) => s.recordsVersion);
   const businessVersion = useSync((s) => s.businessVersion);
-  const [tab, setTab] = useState<Tab>("adjustments");
+  const [tab, setTab] = useState<Tab>("credit");
+  const [credit, setCredit] = useState<PendingCreditSale[]>([]);
   const [adj, setAdj] = useState<any[]>([]); const [inv, setInv] = useState<any[]>([]); const [conf, setConf] = useState<any[]>([]); const [log, setLog] = useState<any[]>([]);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [err, setErr] = useState<string | null>(null); const [failed, setFailed] = useState(false); const [loading, setLoading] = useState(true); const [busy, setBusy] = useState<string | null>(null);
   const [cachedAt, setCachedAt] = useState<string | null>(null);
-  interface CachedApprovals { adjustments: any[]; investigations: any[]; conflicts: any[]; log: any[] }
+  interface CachedApprovals { credit?: PendingCreditSale[]; adjustments: any[]; investigations: any[]; conflicts: any[]; log: any[] }
 
   const load = useCallback(async () => {
     setLoading(true); setFailed(false);
     if (user.shopId) {
       const saved = await readOfflineSnapshot<CachedApprovals>(snapshotKeys.approvals(user.shopId)).catch(() => null);
       if (saved) {
-        setAdj(saved.data.adjustments); setInv(saved.data.investigations); setConf(saved.data.conflicts); setLog(saved.data.log);
+        setCredit(saved.data.credit ?? []); setAdj(saved.data.adjustments); setInv(saved.data.investigations); setConf(saved.data.conflicts); setLog(saved.data.log);
         setCachedAt(saved.savedAt); setLoading(false);
       }
     }
     try {
-      const [a, i, cf, lg] = await Promise.all([request<any[]>("/audit/adjustments/pending"), request<any[]>("/audit/investigations"), request<any[]>("/audit/conflicts"), request<any[]>("/audit/log")]);
-      setAdj(a); setInv(i); setConf(cf); setLog(lg); setCachedAt(null);
+      const [cr, a, i, cf, lg] = await Promise.all([getPendingCreditSales(), request<any[]>("/audit/adjustments/pending"), request<any[]>("/audit/investigations"), request<any[]>("/audit/conflicts"), request<any[]>("/audit/log")]);
+      setCredit(cr); setAdj(a); setInv(i); setConf(cf); setLog(lg); setCachedAt(null);
     } catch { setFailed(true); }
     finally { setLoading(false); }
   }, [user.shopId]);
@@ -47,6 +49,12 @@ export default function Approvals() {
     setErr(null); return n;
   };
 
+  async function decideCredit(id: string, approve: boolean) {
+    const note = noteFor(id); if (!note) return;
+    setBusy(id);
+    try { await decideCreditSale(id, approve, note); toast(approve ? t("appr.approved") : t("appr.rejected")); await load(); }
+    catch { setErr(t("common.error")); } finally { setBusy(null); }
+  }
   async function decide(id: string, approve: boolean) {
     const note = noteFor(id); if (!note) return;
     setBusy(id);
@@ -74,6 +82,7 @@ export default function Approvals() {
   return (
     <Screen title={t("appr.title")} subtitle={t("appr.subtitle")}>
       <Segmented value={tab} onChange={setTab} options={[
+        { value: "credit", label: `${t("appr.credit")} (${credit.length})` },
         { value: "adjustments", label: `${t("appr.adjustments")} (${adj.length})` },
         { value: "investigations", label: `${t("appr.investigations")} (${inv.filter((x) => x.status !== "closed").length})` },
         { value: "conflicts", label: `${t("appr.conflicts")} (${conf.length})` },
@@ -83,6 +92,29 @@ export default function Approvals() {
       {cachedAt ? <Banner tone="warn" text={t("offline.cached").replace("{time}", new Date(cachedAt).toLocaleString())} /> : null}
       {loading ? <Loading /> : failed ? <ErrorState onRetry={() => void load()} /> : (
         <>
+          {tab === "credit" ? (credit.length ? credit.map((sale) => (
+            <Card key={sale.id} style={{ gap: space.md }}>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>
+                <Text style={{ color: c.ink, ...type.h2, flexGrow: 1 }}>{sale.customer}</Text>
+                <Badge tone="warn" label={t("appr.creditSale")} />
+                <Text style={{ color: c.ink, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{formatRwf(sale.credit)}</Text>
+              </View>
+              <Text style={{ color: c.muted, fontSize: 12 }}>{new Date(sale.at).toLocaleString()} · {sale.by}</Text>
+              <View style={{ gap: 3 }}>
+                {sale.lines.map((line, index) => (
+                  <Text key={`${line.productId}-${index}`} style={{ color: c.inkSoft, fontSize: 12 }}>
+                    {line.name} · {formatQty(line.qty)} · {formatRwf(line.lineAmount)}
+                  </Text>
+                ))}
+              </View>
+              {reasonField(sale.id, t("appr.decisionNote"))}
+              <View style={{ flexDirection: "row", gap: space.sm }}>
+                <Button testID={`credit-approve-${sale.id}`} label={t("appr.approve")} loading={busy === sale.id} onPress={() => void decideCredit(sale.id, true)} />
+                <Button kind="dangerQuiet" label={t("appr.reject")} disabled={busy === sale.id} onPress={() => void decideCredit(sale.id, false)} />
+              </View>
+            </Card>
+          )) : <Card tone="muted"><Empty icon="checkSquare" title={t("appr.noCredit")} description={t("appr.noCreditDesc")} /></Card>) : null}
+
           {tab === "adjustments" ? (adj.length ? adj.map((a) => (
             <Card key={a.id} style={{ gap: space.md }}>
               <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>

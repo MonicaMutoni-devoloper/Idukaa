@@ -443,14 +443,16 @@ export class ReportsController {
     const offset = Math.max(0, Number(q.offset) || 0);
     const p = [u.shopId, from, to, limit, offset];
     const kind = q.kind;
-    if (kind === "sales") return this.db.query(`SELECT s.id, s.sold_at AT TIME ZONE 'UTC' AS at, s.gross_amount, s.discount, s.amount_paid, s.payment_method, s.status, us.full_name AS by,
+    if (kind === "sales") return this.db.query(`SELECT s.id, s.sold_at AT TIME ZONE 'UTC' AS at, s.gross_amount, s.discount, s.amount_paid, s.payment_method, s.status, s.customer_id, s.due_at, c.name AS customer, us.full_name AS by,
         (SELECT COALESCE(SUM(sl.qty),0)::bigint FROM sale_lines sl WHERE sl.sale_id=s.id) AS units,
         (SELECT COALESCE(string_agg(pr.name, ', ' ORDER BY pr.name), '') FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS products,
         (SELECT COALESCE(json_agg(json_build_object(
           'productId', sl.product_id, 'name', pr.name, 'code', pr.code, 'unit', pr.unit,
           'qty', sl.qty, 'unitPrice', sl.unit_price, 'lineAmount', sl.line_amount
         ) ORDER BY sl.id), '[]'::json) FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS lines
-      FROM sales s JOIN users us ON us.id=s.user_id WHERE s.shop_id=$1 AND s.sold_at>=$2 AND s.sold_at<$3 ORDER BY s.sold_at DESC, s.id DESC LIMIT $4 OFFSET $5`, p);
+      FROM sales s JOIN users us ON us.id=s.user_id LEFT JOIN customers c ON c.id=s.customer_id
+      WHERE s.shop_id=$1 AND s.status IN ('posted','pending_approval') AND s.sold_at>=$2 AND s.sold_at<$3
+      ORDER BY s.sold_at DESC, s.id DESC LIMIT $4 OFFSET $5`, p);
     if (kind === "purchases") return this.db.query(`SELECT pu.id, pu.ordered_at AT TIME ZONE 'UTC' AS at, pu.total_amount, pu.amount_paid, pu.reference, pu.notes, su.name AS supplier,
         (SELECT COALESCE(json_agg(json_build_object(
           'productId', pl.product_id, 'name', pr.name, 'code', pr.code, 'unit', pr.unit,
@@ -501,7 +503,7 @@ export class ReportsController {
       ? await this.db.query(`SELECT to_char(s.sold_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS sold_at, s.id, us.full_name AS cashier, s.payment_method,
              (SELECT COALESCE(string_agg(pr.name, ', ' ORDER BY pr.name), '') FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS products,
              s.gross_amount, s.discount, (s.gross_amount - s.discount) AS net, s.amount_paid, (s.gross_amount - s.discount - s.amount_paid) AS balance, s.status
-             FROM sales s JOIN users us ON us.id=s.user_id WHERE s.shop_id=$1 AND s.sold_at>=$2 AND s.sold_at<$3 ORDER BY s.sold_at DESC LIMIT 5000`, p)
+             FROM sales s JOIN users us ON us.id=s.user_id WHERE s.shop_id=$1 AND s.status='posted' AND s.sold_at>=$2 AND s.sold_at<$3 ORDER BY s.sold_at DESC LIMIT 5000`, p)
       : q.kind === "purchases"
       ? await this.db.query(`SELECT to_char(pu.ordered_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ordered_at, pu.id, su.name AS supplier, pu.reference,
              pu.total_amount, pu.amount_paid, (pu.total_amount - pu.amount_paid) AS balance, pu.notes

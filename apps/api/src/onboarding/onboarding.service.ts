@@ -233,9 +233,12 @@ export class OnboardingService {
         // here on the server — nothing a client sent can influence it — and the shop is created
         // exactly once because the application row is locked FOR UPDATE for the whole decision.
         const { rows: shopRows } = await c.query(
-          "INSERT INTO shops(name, location, category) VALUES ($1,$2,$3) RETURNING id",
+          "INSERT INTO shops(name, location, category, subscription_required) VALUES ($1,$2,$3,true) RETURNING id",
           [norm(app.shop_name), norm(app.location) || null, norm(app.category) || null]);
         const newShopId = shopRows[0].id;
+        await c.query(
+          "INSERT INTO shop_subscriptions(shop_id, plan_id, status) SELECT $1, id, 'pending_payment' FROM subscription_plans WHERE code='starter'",
+          [newShopId]);
         const { rows: userRows } = await c.query(
           `INSERT INTO users(shop_id, email, full_name, password_hash, role, active, account_status)
            VALUES ($1,$2,$3,$4,'owner', true, 'active') RETURNING id`,
@@ -341,18 +344,32 @@ export class OnboardingService {
       const { rows: [u] } = await c.query("SELECT id, role, shop_id, account_status FROM users WHERE id=$1 FOR UPDATE", [user.id]);
       if (!u || u.role !== "owner") throw new ForbiddenException("role_not_allowed");
       if (u.account_status !== "active") throw new ForbiddenException("account_not_active");
-      if (u.shop_id) throw new ConflictException("shop_already_created");
 
+      // A shop is a separately billed business unit. The owner may create more than one; every
+      // new shop gets its own membership and a pending subscription, never a free ride on another
+      // shop's plan. Existing shops keep subscription_required=false from the migration.
       const { rows: [s] } = await c.query(
-        "INSERT INTO shops(name, location, category) VALUES ($1,$2,$3) RETURNING id, name, currency, location, category, to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at",
+        `INSERT INTO shops(name, location, category, subscription_required)
+         VALUES ($1,$2,$3,true)
+         RETURNING id, name, currency, location, category,
+           to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at`,
         [name, norm(input.location ?? "") || null, norm(input.category ?? "") || null]);
-      const upd = await c.query("UPDATE users SET shop_id=$2 WHERE id=$1 AND shop_id IS NULL", [u.id, s.id]);
-      if (!upd.rowCount) throw new ConflictException("shop_already_created"); // lost the race; the extra shop never commits
-      // Tie the shop back to the approved application for the audit trail.
-      await c.query("UPDATE owner_applications SET shop_id=$2, updated_at=now() WHERE user_id=$1 AND status='APPROVED'", [u.id, s.id]);
+      await c.query(
+        "INSERT INTO shop_memberships(user_id, shop_id, role, status) VALUES ($1,$2,'owner','active')", [u.id, s.id]);
+      // Creating another shop must not suspend the owner's current working shop while the new
+      // subscription is pending. Only a legacy owner with no shop is moved into the first one.
+      if (!u.shop_id) {
+        const upd = await c.query("UPDATE users SET shop_id=$2, role='owner' WHERE id=$1", [u.id, s.id]);
+        if (!upd.rowCount) throw new ConflictException("shop_create_failed");
+      }
+      await c.query(
+        `INSERT INTO shop_subscriptions(shop_id, plan_id, status)
+         SELECT $1, id, 'pending_payment' FROM subscription_plans WHERE code='starter'`, [s.id]);
+      // Tie the first shop back to the approved application for the audit trail.
+      await c.query("UPDATE owner_applications SET shop_id=$2, updated_at=now() WHERE user_id=$1 AND status='APPROVED' AND shop_id IS NULL", [u.id, s.id]);
       await audit(c, { shopId: s.id, actorId: u.id, action: "shop.create", entity: "shop", entityId: s.id,
-        newValue: { name, location: s.location, category: s.category } });
-      return s;
+        newValue: { name, location: s.location, category: s.category, subscriptionStatus: "pending_payment" } });
+      return { ...s, subscriptionRequired: true, subscriptionStatus: "pending_payment" };
     });
   }
 
@@ -363,10 +380,11 @@ export class OnboardingService {
     if (!shopId) throw new BadRequestException("shop_required");
     const [staff, invitations] = await Promise.all([
       this.db.query(
-        `SELECT id, email, full_name, role, active, account_status,
-                to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
-         FROM users WHERE shop_id=$1 AND role IN ('owner','manager')
-         ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, full_name`, [shopId]),
+        `SELECT u.id, u.email, u.full_name, m.role, u.active, u.account_status,
+                to_char(m.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+         FROM shop_memberships m JOIN users u ON u.id=m.user_id
+         WHERE m.shop_id=$1 AND m.status='active' AND m.role IN ('owner','manager')
+         ORDER BY CASE m.role WHEN 'owner' THEN 0 ELSE 1 END, u.full_name`, [shopId]),
       this.db.query(
         `SELECT i.id, i.email, i.full_name, i.phone, i.status,
                 to_char(i.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
@@ -384,10 +402,13 @@ export class OnboardingService {
     if (!shopId) throw new BadRequestException("shop_required");
     const email = normEmail(input.email);
 
-    // An invitation can never be aimed at somebody who already runs a shop or the platform.
+    // An invitation can never be aimed at somebody who already runs the platform. Existing manager
+    // accounts may belong to other shops: the membership is added on acceptance without removing
+    // their access there.
     const [existing] = await this.db.query("SELECT id, role, shop_id, active, account_status FROM users WHERE lower(email)=lower($1)", [email]);
     if (existing) {
-      if (existing.shop_id === shopId) throw new ConflictException("staff_already_in_shop");
+      const [member] = await this.db.query("SELECT 1 FROM shop_memberships WHERE user_id=$1 AND shop_id=$2 AND status='active'", [existing.id, shopId]);
+      if (member) throw new ConflictException("staff_already_in_shop");
       if (existing.role === "system_admin" || existing.role === "owner" || existing.account_status === "suspended")
         throw new ConflictException("invitation_target_ineligible");
     }
@@ -524,15 +545,18 @@ export class OnboardingService {
       if (u.shop_id === inv.shop_id) throw new ConflictException("staff_already_in_shop");
 
       const oldShop = u.shop_id;
-      await c.query("UPDATE users SET shop_id=$2, active=true, account_status='active' WHERE id=$1", [u.id, inv.shop_id]);
+      // Add a membership and make the invited shop active for this session. Existing memberships
+      // (and their separate shop subscription) are preserved, so the employee can switch back.
+      await c.query(
+        "INSERT INTO shop_memberships(user_id, shop_id, role, status) VALUES ($1,$2,'manager','active') ON CONFLICT (user_id, shop_id) DO UPDATE SET role='manager', status='active', updated_at=now()",
+        [u.id, inv.shop_id]);
+      await c.query("UPDATE users SET shop_id=$2, role='manager', active=true, account_status='active' WHERE id=$1", [u.id, inv.shop_id]);
       const upd = await c.query(
         "UPDATE staff_invitations SET status='active', accepted_at=now(), accepted_user_id=$2, updated_at=now() WHERE id=$1 AND status='invited'",
         [inv.id, u.id]);
       if (!upd.rowCount) throw new BadRequestException("invitation_invalid");
       await audit(c, { shopId: inv.shop_id, actorId: u.id, action: "staff.invitation.accepted", entity: "staff_invitation",
         entityId: inv.id, newValue: { email: inv.email, role: "manager", previousShopId: oldShop } });
-      await audit(c, { shopId: oldShop, actorId: u.id, action: "staff.transfer_out", entity: "user", entityId: u.id,
-        newValue: { newShopId: inv.shop_id } });
       return { ok: true as const };
     });
   }

@@ -10,18 +10,21 @@ export interface ShopPolicy {
   managerFinancialAccess: boolean;
   belowCostPolicy: "acknowledge" | "block";
   maxDiscountPercent: number;
+  creditLimitPolicy: "block" | "owner_approval" | "reason_override";
 }
 
 const PolicyPatch = z.object({
   managerFinancialAccess: z.boolean().optional(),
   belowCostPolicy: z.enum(["acknowledge", "block"]).optional(),
   maxDiscountPercent: z.number().int().min(0).max(100).optional(),
+  creditLimitPolicy: z.enum(["block", "owner_approval", "reason_override"]).optional(),
 }).refine(v => Object.keys(v).length > 0, { message: "no_changes" });
 
 const shape = (r: any): ShopPolicy => ({
   managerFinancialAccess: r.manager_financial_access,
   belowCostPolicy: r.below_cost_policy,
   maxDiscountPercent: r.max_discount_percent,
+  creditLimitPolicy: r.credit_limit_policy,
 });
 
 export interface ShopProfile { id: string; name: string; currency: string; createdAt: string }
@@ -54,7 +57,7 @@ export class ShopController {
   }
 
   @Get("settings") async get(@Me() u: AuthUser): Promise<ShopPolicy> {
-    const [row] = await this.db.query("SELECT manager_financial_access, below_cost_policy, max_discount_percent FROM shops WHERE id=$1", [u.shopId]);
+    const [row] = await this.db.query("SELECT manager_financial_access, below_cost_policy, max_discount_percent, credit_limit_policy FROM shops WHERE id=$1", [u.shopId]);
     return shape(row);
   }
 
@@ -87,13 +90,14 @@ export class ShopController {
     if (!b.success) throw new BadRequestException(b.error.issues[0]?.message);
     const v = b.data;
     const out = await this.db.tx(async (c) => {
-      const { rows: [old] } = await c.query("SELECT manager_financial_access, below_cost_policy, max_discount_percent FROM shops WHERE id=$1 FOR UPDATE", [u.shopId]);
+      const { rows: [old] } = await c.query("SELECT manager_financial_access, below_cost_policy, max_discount_percent, credit_limit_policy FROM shops WHERE id=$1 FOR UPDATE", [u.shopId]);
       const { rows: [row] } = await c.query(
         `UPDATE shops SET manager_financial_access=COALESCE($2,manager_financial_access),
                           below_cost_policy=COALESCE($3,below_cost_policy),
-                          max_discount_percent=COALESCE($4,max_discount_percent)
-         WHERE id=$1 RETURNING manager_financial_access, below_cost_policy, max_discount_percent`,
-        [u.shopId, v.managerFinancialAccess ?? null, v.belowCostPolicy ?? null, v.maxDiscountPercent ?? null]);
+                          max_discount_percent=COALESCE($4,max_discount_percent),
+                          credit_limit_policy=COALESCE($5,credit_limit_policy)
+         WHERE id=$1 RETURNING manager_financial_access, below_cost_policy, max_discount_percent, credit_limit_policy`,
+        [u.shopId, v.managerFinancialAccess ?? null, v.belowCostPolicy ?? null, v.maxDiscountPercent ?? null, v.creditLimitPolicy ?? null]);
       await audit(c, { shopId: u.shopId, actorId: u.id, action: "shop.policy.update", entity: "shop", entityId: u.shopId ?? undefined, oldValue: shape(old), newValue: shape(row) });
       return shape(row);
     });

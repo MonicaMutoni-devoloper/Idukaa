@@ -36,6 +36,11 @@ export interface StorageUsageSnapshot {
   suppliersBytes: number;
 }
 
+export interface LocalCustomer {
+  id: string; shop_id?: string | null; name: string; phone: string | null; address: string | null; notes: string | null;
+  credit_limit: number; status: "active" | "blocked"; updated_at?: string | null;
+}
+
 export interface LocalProduct {
   id: string; code: string; barcode: string | null; name: string; unit: string; category: string | null;
   selling_price: number; low_threshold: number; on_hand: number; pending_delta: number;
@@ -50,6 +55,9 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, code TEXT, barcode TEXT, name TEXT NOT NULL, category TEXT, unit TEXT, selling_price INTEGER NOT NULL DEFAULT 0, low_threshold INTEGER NOT NULL DEFAULT 0, on_hand INTEGER NOT NULL DEFAULT 0, pending_delta INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE IF NOT EXISTS suppliers (id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT);
+    CREATE TABLE IF NOT EXISTS customers (id TEXT PRIMARY KEY, shop_id TEXT, name TEXT NOT NULL, phone TEXT, address TEXT, notes TEXT,
+      credit_limit INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', updated_at TEXT);
+    CREATE INDEX IF NOT EXISTS customers_shop ON customers(shop_id, name);
     CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, shop_id TEXT, type TEXT NOT NULL, payload TEXT NOT NULL, deltas TEXT NOT NULL DEFAULT '{}',
       status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, message TEXT, created_at TEXT NOT NULL, synced_at TEXT);
     CREATE INDEX IF NOT EXISTS outbox_status ON outbox(status, next_attempt_at);
@@ -224,7 +232,9 @@ export const upsertLocalProduct = async (p: { id: string; code: string; barcode?
 export const upsertLocalSupplier = async (s: { id: string; name: string; phone?: string }) => (await db()).runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name", [s.id, s.name, s.phone ?? null]);
 
 export const dueOps = async (userId: string, shopId: string | null, limit = 50) => (await db()).getAllAsync<OutboxRow>(
-  "SELECT * FROM outbox WHERE user_id=? AND COALESCE(shop_id,'')=? AND status IN ('pending','retry') AND next_attempt_at<=? ORDER BY seq LIMIT ?",
+  // pending_approval is polled slowly: the owner may approve on another device, and the next pass
+  // reconciles this outbox row without the manager re-entering the sale.
+  "SELECT * FROM outbox WHERE user_id=? AND COALESCE(shop_id,'')=? AND status IN ('pending','retry','pending_approval') AND next_attempt_at<=? ORDER BY seq LIMIT ?",
   [userId, shopId ?? "", Date.now(), limit]);
 export const listOutbox = async (userId: string, shopId: string | null) => (await db()).getAllAsync<OutboxRow>(
   "SELECT * FROM outbox WHERE user_id=? AND COALESCE(shop_id,'')=? ORDER BY seq DESC LIMIT 200", [userId, shopId ?? ""]);
@@ -243,7 +253,8 @@ export async function applyResults(results: { opId: string; status: string; mess
       const row = await d.getFirstAsync<OutboxRow>("SELECT deltas FROM outbox WHERE op_id=?", [r.opId]); if (!row) continue;
       for (const [pid, q] of Object.entries(JSON.parse(row.deltas) as Record<string, number>)) await d.runAsync("UPDATE products SET pending_delta = pending_delta - ? WHERE id=?", [q, pid]);
       const st = r.status === "applied" || r.status === "duplicate" ? "synced" : r.status;
-      await d.runAsync("UPDATE outbox SET status=?, message=?, deltas='{}', synced_at=? WHERE op_id=?", [st, r.message ?? null, new Date().toISOString(), r.opId]);
+      const next = st === "pending_approval" ? Date.now() + 60_000 : 0;
+      await d.runAsync("UPDATE outbox SET status=?, message=?, deltas='{}', synced_at=?, next_attempt_at=? WHERE op_id=?", [st, r.message ?? null, new Date().toISOString(), next, r.opId]);
     }
   });
 }
@@ -266,8 +277,13 @@ export async function applyPull(changes: { entity: string; id: string; data: any
     for (const c of changes) {
       if (c.entity === "product") { const p = c.data; await d.runAsync("INSERT INTO products(id,code,barcode,name,category,unit,selling_price,low_threshold,on_hand,active,purchase_unit,selling_unit,units_per_purchase,units_per_selling) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET code=excluded.code,barcode=excluded.barcode,name=excluded.name,category=excluded.category,unit=excluded.unit,selling_price=excluded.selling_price,low_threshold=excluded.low_threshold,on_hand=excluded.on_hand,active=excluded.active,purchase_unit=excluded.purchase_unit,selling_unit=excluded.selling_unit,units_per_purchase=excluded.units_per_purchase,units_per_selling=excluded.units_per_selling", [p.id, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold, p.onHand, p.active ? 1 : 0, p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1]); }
       if (c.entity === "supplier") await d.runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone", [c.data.id, c.data.name, c.data.phone ?? null]);
+      if (c.entity === "customer") { const x = c.data; await d.runAsync(
+        "INSERT INTO customers(id,shop_id,name,phone,address,notes,credit_limit,status,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,address=excluded.address,notes=excluded.notes,credit_limit=excluded.credit_limit,status=excluded.status,updated_at=excluded.updated_at",
+        [x.id, (await d.getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k='local.shop'"))?.v ?? null, x.name, x.phone ?? null, x.address ?? null, x.notes ?? null, x.creditLimit ?? 0, x.status ?? "active", new Date().toISOString()]); }
     }
   });
 }
 export const listProducts = async (q = "") => (await db()).getAllAsync<LocalProduct>("SELECT * FROM products WHERE active=1 AND (name LIKE ? OR code LIKE ? OR COALESCE(barcode,'') LIKE ?) ORDER BY name LIMIT 300", [`%${q}%`, `%${q}%`, `%${q}%`]);
 export const listSuppliers = async () => (await db()).getAllAsync<{ id: string; name: string }>("SELECT id,name FROM suppliers ORDER BY name");
+export const listCustomers = async (q = "") => (await db()).getAllAsync<LocalCustomer>(
+  "SELECT * FROM customers WHERE shop_id=(SELECT v FROM kv WHERE k='local.shop') AND (name LIKE ? OR COALESCE(phone,'') LIKE ?) ORDER BY name LIMIT 500", [`%${q}%`, `%${q}%`]);
