@@ -58,6 +58,9 @@ export interface Financials {
 export interface Operations {
   netSales: number; transactions: number; unitsSold: number; averageTransaction: number;
   cashCollected: number; receivables: number; grossSales: number; discounts: number;
+  /** Collections from credit sales and repayments of older ones are different money; only their sum is "received". */
+  creditRepayments: number; totalReceived: number; outstandingCredit: number;
+  repaymentsByMethod: { cash: number; momo: number; bank: number; other: number };
   deliveries: number; productsReceived: number; unitsReceived: number;
   pendingReceipts: number; inventoryValue: number | null; lowStockCount: number; outOfStockCount: number;
   productCount: number; supplierPayables: number; pendingApprovals: number; openInvestigations: number; openConflicts: number;
@@ -77,7 +80,7 @@ export interface Dashboard {
   financialComparison: { netSales: Change; grossProfit: Change; operatingProfit: Change } | null;
   operations: Operations;
   salesComparison: { netSales: Change };
-  trend: { date: string; netSales: number; transactions: number; grossProfit: number | null; operatingExpenses: number | null }[];
+  trend: { date: string; netSales: number; transactions: number; grossProfit: number | null; operatingExpenses: number | null; repayments: number }[];
   topProducts: { id: string; name: string; qty: number; netSales: number }[];
   worstProducts: { id: string; name: string; qty: number; netSales: number }[];
   activity: ActivityRow[];
@@ -106,13 +109,15 @@ export interface LocalDashboardResult {
 /* ------------------------------------------------------------------ record shapes */
 
 interface SaleLine { productId: string; qty: number; unitPrice: number; sellingQty?: number }
-interface Sale { id: string; at: string; discount: number; paid: number; lines: SaleLine[]; status: string }
+interface Sale { id: string; at: string; discount: number; paid: number; lines: SaleLine[]; status: string; customerId?: string }
+/** A repayment of an existing credit: money in, but never a sale and never revenue. */
+interface Repayment { id: string; at: string; customerId: string; amount: number; method: string }
 interface Expense { id: string; at: string; category: string; amount: number; paid: boolean }
 interface PurchaseLine { productId: string; qty: number; unitCost: number }
 interface Purchase { id: string; at: string; receivedAt: string; receiveNow: boolean; paid: number; lines: PurchaseLine[] }
 interface Adjustment { id: string; at: string; productId: string; qty: number; reason: string; status: string }
 interface RecordSet {
-  sales: Sale[]; expenses: Expense[]; purchases: Purchase[]; adjustments: Adjustment[];
+  sales: Sale[]; expenses: Expense[]; purchases: Purchase[]; adjustments: Adjustment[]; repayments: Repayment[];
   openings: { productId: string; at: string; qty: number; unitCost: number }[];
 }
 
@@ -134,7 +139,7 @@ export const isFailedSync = (status: string) => status === "rejected" || status 
 
 /** Turns stored records into domain rows. Unknown types are ignored; malformed and failed payloads are skipped. */
 export function parseRecords(records: LocalRecord[]): RecordSet {
-  const out: RecordSet = { sales: [], expenses: [], purchases: [], adjustments: [], openings: [] };
+  const out: RecordSet = { sales: [], expenses: [], purchases: [], adjustments: [], repayments: [], openings: [] };
   const expenses = new Map<string, Expense>();
   for (const r of records) {
     if (isFailedSync(r.status)) continue;
@@ -152,8 +157,19 @@ export function parseRecords(records: LocalRecord[]): RecordSet {
             sellingQty: l.sellingQty === undefined ? undefined : num(l.sellingQty),
           })).filter((l: SaleLine) => l.productId && l.qty > 0) : [],
           status: r.status,
+          customerId: p.customerId ? String(p.customerId) : undefined,
         });
         break;
+      case "credit.payment.create": {
+        // Dated by paidAt: yesterday's repayment must never appear in today's collections, and the
+        // original credit-sale date is irrelevant here. A failed/rejected record never got here.
+        out.repayments.push({
+          id: String(p.paymentId ?? r.op_id), at: clampDate(p.paidAt, r.at),
+          customerId: String(p.customerId ?? ""), amount: Math.max(0, num(p.amount)),
+          method: String(p.method ?? "cash"),
+        });
+        break;
+      }
       case "expense.create": {
         const e: Expense = {
           id: String(p.expenseId ?? r.op_id), at, category: String(p.category ?? "other"),
@@ -252,6 +268,7 @@ const purchaseTotal = (p: Purchase) => p.lines.reduce((sum, l) => sum + lineAmou
 
 interface Figures extends PeriodSummary {
   transactions: number; unitsSold: number; cashCollected: number; receivables: number;
+  repaymentsByMethod: { cash: number; momo: number; bank: number; other: number };
   purchasesReceived: { deliveries: number; products: number; units: number; value: number };
   costComplete: boolean;
 }
@@ -286,6 +303,18 @@ export function computeLocalDashboard(input: LocalDashboardInput): LocalDashboar
     const discounts = sales.reduce((s, x) => s + Math.min(x.discount, saleGross(x)), 0);
     const paid = sales.reduce((s, x) => s + Math.min(x.paid, Math.max(0, saleGross(x) - x.discount)), 0);
     const receivable = sales.reduce((s, x) => s + Math.max(0, saleGross(x) - Math.min(x.discount, saleGross(x)) - x.paid), 0);
+    const repayments = recs.repayments.filter((p) => inRange(p.at, a, b));
+    const repaid = repayments.reduce((s, p) => s + p.amount, 0);
+    const byMethod = { cash: 0, momo: 0, bank: 0, other: 0 };
+    for (const p of repayments) {
+      if (p.method === "cash" || p.method === "momo" || p.method === "bank") byMethod[p.method] += p.amount;
+      else byMethod.other += p.amount;
+    }
+    // Outstanding customer credit is a BALANCE as of the period end, across all history, so a
+    // repayment reduces it and a later credit sale raises it. Walk-in partials are not credit accounts.
+    const creditOf = (x: Sale) => Math.max(0, saleGross(x) - Math.min(x.discount, saleGross(x)) - x.paid);
+    const outstanding = recs.sales.filter((s) => s.customerId && s.at < b).reduce((s, x) => s + creditOf(x), 0)
+      - recs.repayments.filter((p) => p.at < b).reduce((s, p) => s + p.amount, 0);
     const operatingExpenses = expenses.reduce((s, e) => s + e.amount, 0);
     const expensesPaid = expenses.filter((e) => e.paid).reduce((s, e) => s + e.amount, 0);
     const products = new Set(receipts.flatMap((p) => p.lines.map((l) => l.productId)));
@@ -296,12 +325,14 @@ export function computeLocalDashboard(input: LocalDashboardInput): LocalDashboar
       operatingExpenses, expensesPaid, cashCollected: paid,
       inventoryPurchases: purchases.reduce((s, p) => s + purchaseTotal(p), 0),
       receivables: receivable, stockLosses: financials ? lossIn(a, b) : 0,
+      creditRepayments: repaid, outstandingCredit: Math.max(0, outstanding),
     });
     return {
       ...base,
       transactions: sales.length,
       unitsSold: sales.reduce((s, x) => s + x.lines.reduce((t, l) => t + l.qty, 0), 0),
       cashCollected: paid, receivables: receivable,
+      repaymentsByMethod: byMethod,
       purchasesReceived: {
         deliveries: receipts.length, products: products.size,
         units: receipts.reduce((s, p) => s + p.lines.reduce((t, l) => t + l.qty, 0), 0), value,
@@ -375,9 +406,17 @@ export function computeLocalDashboard(input: LocalDashboardInput): LocalDashboar
     }
   }
 
+  const repByBucket = new Map<string, number>();
+  for (const p of recs.repayments) {
+    if (!inRange(p.at, from, to)) continue;
+    const k = bucketKey(p.at);
+    repByBucket.set(k, (repByBucket.get(k) ?? 0) + p.amount);
+  }
+
   const keys = [...new Set([
     ...recs.sales.filter((s) => inRange(s.at, from, to)).map((s) => bucketKey(s.at)),
     ...recs.expenses.filter((e) => inRange(e.at, from, to)).map((e) => bucketKey(e.at)),
+    ...recs.repayments.filter((p) => inRange(p.at, from, to)).map((p) => bucketKey(p.at)),
   ])].sort();
 
   /* ---- revenue and cost per product (net of each product's exact discount share) ---- */
@@ -517,6 +556,8 @@ export function computeLocalDashboard(input: LocalDashboardInput): LocalDashboar
       netSales: cur.netSales, transactions: cur.transactions, unitsSold: cur.unitsSold,
       averageTransaction: cur.transactions ? Math.round(cur.netSales / cur.transactions) : 0,
       cashCollected: cur.cashCollected, receivables: cur.receivables,
+      creditRepayments: cur.creditRepayments, totalReceived: cur.totalReceived,
+      outstandingCredit: cur.outstandingCredit, repaymentsByMethod: cur.repaymentsByMethod,
       grossSales: cur.grossSales, discounts: cur.discounts,
       deliveries: cur.purchasesReceived.deliveries, productsReceived: cur.purchasesReceived.products,
       unitsReceived: cur.purchasesReceived.units, purchasesReceivedValue: cur.purchasesReceived.value,
@@ -534,6 +575,7 @@ export function computeLocalDashboard(input: LocalDashboardInput): LocalDashboar
       transactions: txByBucket.get(date) ?? 0,
       grossProfit: financials ? (netByBucket.get(date) ?? 0) - (cogsByBucket.get(date) ?? 0) : null,
       operatingExpenses: financials ? (expByBucket.get(date) ?? 0) : null,
+      repayments: repByBucket.get(date) ?? 0,
     })),
     topProducts,
     worstProducts,

@@ -343,6 +343,9 @@ export interface LocalSummaryTotals {
   grossProfit: number; grossMarginBps: number | null; operatingExpenses: number; operatingProfit: number;
   operatingResultAfterStockLosses: number; stockLosses: number; cashCollected: number; receivables: number;
   outstandingExpenses: number; inventoryPurchases: number; expensesPaid: number;
+  /** Repayments received in the period, and the running customer-credit balance at its end. */
+  creditRepayments: number; totalReceived: number; outstandingCredit: number;
+  repaymentsByMethod: { cash: number; momo: number; bank: number; other: number };
   transactions: number; unitsSold: number;
   purchasesReceived: { deliveries: number; products: number; units: number; value: number };
   openingInventoryValue: number; closingInventoryValue: number;
@@ -405,6 +408,24 @@ export function computeLocalSummary(input: LocalSummaryInput): LocalSummaryPaylo
     const operatingExpenses = expenses.reduce((s, e) => s + e.amount, 0);
     const expensesPaid = expenses.filter((e) => e.paid).reduce((s, e) => s + e.amount, 0);
 
+    // Repayments collect an existing receivable: money received on the day it was paid, never
+    // revenue and never profit. Dated by paidAt, so another day's repayment never lands here.
+    const repayments = recs.repayments.filter((p) => inRange(p.at, a, b));
+    const creditRepayments = repayments.reduce((s, p) => s + p.amount, 0);
+    const repaymentsByMethod = { cash: 0, momo: 0, bank: 0, other: 0 };
+    for (const p of repayments) {
+      if (p.method === "cash" || p.method === "momo" || p.method === "bank") repaymentsByMethod[p.method] += p.amount;
+      else repaymentsByMethod.other += p.amount;
+    }
+    // Balance at the end of the period, from all history: credit sales - repayments.
+    const creditOf = (s: typeof recs.sales[number]) => {
+      const gross = s.lines.reduce((sum, l) => sum + lineAmount(l.sellingQty ?? l.qty, l.unitPrice), 0);
+      return Math.max(0, gross - Math.min(s.discount, gross) - s.paid);
+    };
+    const outstandingCredit = Math.max(0,
+      recs.sales.filter((s) => s.customerId && s.at < b).reduce((s, x) => s + creditOf(x), 0)
+      - recs.repayments.filter((p) => p.at < b).reduce((s, p) => s + p.amount, 0));
+
     let cogs = 0, losses = 0, openingValue = 0, closingValue = 0, openingUnits = 0, closingUnits = 0;
     for (const list of ledger.values()) {
       if (financials) {
@@ -422,12 +443,14 @@ export function computeLocalSummary(input: LocalSummaryInput): LocalSummaryPaylo
       inventoryPurchases: purchases.reduce((s, p) =>
         s + p.lines.reduce((t, l) => t + lineAmount(l.qty, l.unitCost), 0), 0),
       receivables, stockLosses: losses,
+      creditRepayments, outstandingCredit,
     });
 
     return {
       ...base,
       transactions: sales.length,
       unitsSold,
+      repaymentsByMethod,
       purchasesReceived: {
         deliveries: receipts.length,
         products: new Set(receipts.flatMap((p) => p.lines.map((l) => l.productId))).size,

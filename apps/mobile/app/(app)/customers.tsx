@@ -138,7 +138,7 @@ export default function Customers() {
             </View>
             <View style={{ flexDirection: "row", gap: space.sm }}>
               <Button size="sm" kind="secondary" label={t("credit.statement")} onPress={() => void openStatement(customer)} />
-              <Button size="sm" label={t("credit.payment")} disabled={!customer.balance} onPress={() => { setSelected(customer); setPayOpen(true); }} />
+              <Button testID={`credit-pay-${customer.id}`} size="sm" label={t("credit.payment")} disabled={!customer.balance} onPress={() => { setSelected(customer); setPayOpen(true); }} />
             </View>
           </Card>
         ))}
@@ -191,17 +191,17 @@ export default function Customers() {
       <Modal open={payOpen} onClose={() => { setPayOpen(false); setAmount(""); }} title={t("credit.payment")} footer={
         <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: space.sm }}>
           <Button kind="secondary" label={t("common.cancel")} onPress={() => { setPayOpen(false); setAmount(""); }} />
-          <Button label={t("common.save")} loading={busy} disabled={!(Number(amount) > 0)} onPress={() => void pay()} />
+          <Button testID="credit-pay-save" label={t("common.save")} loading={busy} disabled={!(Number(amount) > 0)} onPress={() => void pay()} />
         </View>
       }>
         <View style={{ gap: space.md }}>
           <Text style={{ color: c.ink, fontWeight: "700" }}>{selected?.name}</Text>
           <Text style={{ color: c.muted, fontSize: 12 }}>{t("credit.balance")}: {formatRwf(selected?.balance ?? 0)}</Text>
-          <Field label={t("credit.amount")} value={amount} onChangeText={setAmount} keyboardType="number-pad" />
+          <Field testID="credit-pay-amount" label={t("credit.amount")} value={amount} onChangeText={setAmount} keyboardType="number-pad" />
           <Segmented<Method> label={t("credit.method")} value={method} onChange={setMethod} options={[
             { value: "cash", label: t("sell.cash") }, { value: "momo", label: t("sell.momo") }, { value: "bank", label: t("sell.bank") },
           ]} />
-          <Field label={t("credit.reference")} value={reference} onChangeText={setReference} placeholder="PAY-…" />
+          <Field testID="credit-pay-reference" label={t("credit.reference")} value={reference} onChangeText={setReference} placeholder="PAY-…" />
           <Text style={{ color: c.muted, fontSize: 11 }}>{t("credit.paymentHint")}</Text>
         </View>
       </Modal>

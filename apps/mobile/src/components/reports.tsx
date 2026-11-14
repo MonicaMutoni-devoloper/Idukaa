@@ -720,8 +720,11 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
     [t("fin.resultAfterLosses"), money(cur.operatingResultAfterStockLosses)],
     [t("dash.transactions"), String(cur.transactions)],
     [t("dash.unitsSold"), formatQty(cur.unitsSold)],
-    [t("fin.cash"), money(cur.cashCollected)],
-    [t("fin.receivables"), money(cur.receivables)],
+    [t("fin.salesCollected"), money(cur.cashCollected)],
+    [t("fin.creditRepayments"), money(cur.creditRepayments ?? 0)],
+    [t("fin.totalReceived"), money(cur.totalReceived ?? cur.cashCollected)],
+    [t("fin.outstandingCredit"), money(cur.outstandingCredit ?? 0)],
+    [t("fin.creditIssued"), money(cur.receivables)],
     [t("fin.outstanding"), money(cur.outstandingExpenses)],
     [t("fin.purchases"), money(cur.inventoryPurchases)],
   ] : [];
@@ -853,6 +856,23 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
                     <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{value}</Text>
                   </View>
                 ))}
+              </Card>
+              <Card style={{ gap: 2 }}>
+                <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("fin.moneyReceived")}</Text>
+                {([
+                  [t("fin.salesCollected"), money(cur.cashCollected)],
+                  ...[(["cash", "momo", "bank", "other"] as const)
+                    .filter((k) => (cur.repaymentsByMethod?.[k] ?? 0) > 0)
+                    .map((k) => [`   ${t(`fin.method.${k}` as any)}`, money(cur.repaymentsByMethod![k])] as [string, string])],
+                  [t("fin.creditRepayments"), money(cur.creditRepayments ?? 0)],
+                  [t("fin.totalReceived"), money(cur.totalReceived ?? cur.cashCollected)],
+                ] as [string, string][]).map(([label, value]) => (
+                  <View key={label} style={{ flexDirection: "row", justifyContent: "space-between", gap: space.md, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: c.line }}>
+                    <Text style={{ color: c.muted, fontSize: 13 }}>{label}</Text>
+                    <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{value}</Text>
+                  </View>
+                ))}
+                <Text style={{ color: c.muted, fontSize: 11, marginTop: 4 }}>{t("fin.moneyReceivedNote")}</Text>
               </Card>
               <Card style={{ gap: 2 }}>
                 <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("reports.vsPrevious")}</Text>

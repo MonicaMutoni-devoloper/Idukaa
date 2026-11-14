@@ -120,6 +120,15 @@ export class ReportsController {
        GROUP BY 1`, [shopId, from, to, bucket]), []) : [];
     const expByDate = new Map<string, number>((expTrend as any[]).map(e => [e.date, Number(e.amount)]));
 
+    // Credit repayments per bucket, dated by the day the money was actually paid. They are money in,
+    // but they are NOT revenue: the trend keeps them on their own series so the two are never added.
+    const repTrend = await this.section(req, "trend_repayments", () => this.db.query(
+      `SELECT to_char(date_trunc($4, paid_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS date,
+              COALESCE(SUM(amount),0)::bigint AS amount
+       FROM credit_payments WHERE shop_id=$1 AND paid_at>=$2 AND paid_at<$3
+       GROUP BY 1`, [shopId, from, to, bucket]), []);
+    const repByDate = new Map<string, number>((repTrend as any[]).map(e => [e.date, Number(e.amount)]));
+
     // The calendar year (Africa/Kigali) containing the range start: the monthly chart's year.
     const year = Number(kigaliDay(from).slice(0, 4));
     const yearFrom = dayRange(`${year}-01-01`)?.from ?? from;
@@ -287,6 +296,11 @@ export class ReportsController {
       operations: {
         netSales, transactions, unitsSold: cur.unitsSold, averageTransaction: avgTransaction,
         cashCollected: cur.cashCollected, receivables: cur.receivables,
+        // Collections from sales and credit repayments are separate indicators: only their sum is
+        // "money received". Outstanding credit is a running balance as of the period end.
+        creditRepayments: cur.creditRepayments, totalReceived: cur.totalReceived,
+        repaymentsByMethod: cur.repaymentsByMethod, repaymentCount: cur.repaymentCount,
+        outstandingCredit: cur.outstandingCredit,
         grossSales: cur.grossSales, discounts: cur.discounts,
         deliveries: cur.purchasesReceived.deliveries, productsReceived: cur.purchasesReceived.products,
         unitsReceived: cur.purchasesReceived.units, purchasesReceivedValue: cur.purchasesReceived.value,
@@ -297,11 +311,21 @@ export class ReportsController {
         openConflicts: Number(issues.open_conflicts ?? 0),
       },
       salesComparison: { netSales: comparison.netSales },
-      trend: trend.map((t: any) => ({
-        date: t.date, netSales: Number(t.net_sales), transactions: Number(t.transactions),
-        grossProfit: canSeeFinancials ? Number(t.net_sales) - (cogsByBucket.get(t.date) ?? 0) : null,
-        operatingExpenses: canSeeFinancials ? (expByDate.get(t.date) ?? 0) : null,
-      })),
+      // A day whose only money was a repayment still belongs on the chart, so the series is keyed by
+      // sales days AND repayment days. Revenue stays zero on those days; the repayment is its own series.
+      trend: (() => {
+        const salesRows = new Map<string, any>((trend as any[]).map((t) => [String(t.date), t]));
+        const dates = [...new Set([...salesRows.keys(), ...repByDate.keys()])].sort();
+        return dates.map((date) => {
+          const t = salesRows.get(date);
+          return {
+            date, netSales: Number(t?.net_sales ?? 0), transactions: Number(t?.transactions ?? 0),
+            grossProfit: canSeeFinancials ? Number(t?.net_sales ?? 0) - (cogsByBucket.get(date) ?? 0) : null,
+            operatingExpenses: canSeeFinancials ? (expByDate.get(date) ?? 0) : null,
+            repayments: repByDate.get(date) ?? 0,
+          };
+        });
+      })(),
       topProducts,
       worstProducts,
       activity: activity.map((a: any) => ({
@@ -469,7 +493,13 @@ export class ReportsController {
       LEFT JOIN stock_movements m ON m.source_type='adjustment' AND m.source_id=a.id
       WHERE a.shop_id=$1 AND COALESCE(a.decided_at, o.received_at)>=$2 AND COALESCE(a.decided_at, o.received_at)<$3
       ORDER BY 2 DESC, a.id DESC LIMIT $4 OFFSET $5`, p);
-    throw new BadRequestException("kind must be sales|purchases|expenses|adjustments");
+    // Repayments are their own transaction type: a collection of an earlier receivable, never a sale.
+    if (kind === "repayments") return this.db.query(`SELECT p.id, p.paid_at AT TIME ZONE 'UTC' AS at, p.amount, p.method, p.reference,
+        c.name AS customer, c.phone, us.full_name AS by
+      FROM credit_payments p JOIN customers c ON c.id=p.customer_id LEFT JOIN users us ON us.id=p.user_id
+      WHERE p.shop_id=$1 AND p.paid_at>=$2 AND p.paid_at<$3
+      ORDER BY p.paid_at DESC, p.id DESC LIMIT $4 OFFSET $5`, p);
+    throw new BadRequestException("kind must be sales|purchases|expenses|adjustments|repayments");
   }
 
   /**
@@ -496,9 +526,14 @@ export class ReportsController {
         { key: "incurred_at", title: "incurred_at_utc" }, { key: "id", title: "expense_id" }, { key: "category", title: "category" },
         { key: "amount", title: "amount_rwf" }, { key: "paid", title: "paid" }, { key: "note", title: "note" },
       ],
+      repayments: [
+        { key: "paid_at", title: "paid_at_utc" }, { key: "customer", title: "customer" }, { key: "phone", title: "phone" },
+        { key: "amount", title: "amount_rwf" }, { key: "method", title: "payment_method" },
+        { key: "reference", title: "reference" }, { key: "cashier", title: "recorded_by" },
+      ],
     };
     const def = cols[q.kind];
-    if (!def) throw new BadRequestException("kind must be sales|purchases|expenses");
+    if (!def) throw new BadRequestException("kind must be sales|purchases|expenses|repayments");
     const rows = q.kind === "sales"
       ? await this.db.query(`SELECT to_char(s.sold_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS sold_at, s.id, us.full_name AS cashier, s.payment_method,
              (SELECT COALESCE(string_agg(pr.name, ', ' ORDER BY pr.name), '') FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS products,
@@ -508,6 +543,11 @@ export class ReportsController {
       ? await this.db.query(`SELECT to_char(pu.ordered_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ordered_at, pu.id, su.name AS supplier, pu.reference,
              pu.total_amount, pu.amount_paid, (pu.total_amount - pu.amount_paid) AS balance, pu.notes
              FROM purchases pu LEFT JOIN suppliers su ON su.id=pu.supplier_id WHERE pu.shop_id=$1 AND pu.ordered_at>=$2 AND pu.ordered_at<$3 ORDER BY pu.ordered_at DESC LIMIT 5000`, p)
+      : q.kind === "repayments"
+      ? await this.db.query(`SELECT to_char(pp.paid_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS paid_at,
+             c.name AS customer, c.phone, pp.amount, pp.method, pp.reference, us.full_name AS cashier
+             FROM credit_payments pp JOIN customers c ON c.id=pp.customer_id LEFT JOIN users us ON us.id=pp.user_id
+             WHERE pp.shop_id=$1 AND pp.paid_at>=$2 AND pp.paid_at<$3 ORDER BY pp.paid_at DESC LIMIT 5000`, p)
       : await this.db.query(`SELECT to_char(incurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS incurred_at, id, category, amount, paid, note
              FROM expenses WHERE shop_id=$1 AND incurred_at>=$2 AND incurred_at<$3 ORDER BY incurred_at DESC LIMIT 5000`, p);
 

@@ -51,6 +51,10 @@ interface Financials {
 interface Operations {
   netSales: number; transactions: number; unitsSold: number; averageTransaction: number;
   cashCollected: number; receivables: number; grossSales: number; discounts: number;
+  // Collections from sales and repayments of older credits are separate indicators. Optional so a
+  // payload cached by an older build still renders.
+  creditRepayments?: number; totalReceived?: number; outstandingCredit?: number;
+  repaymentsByMethod?: { cash: number; momo: number; bank: number; other: number };
   deliveries: number; productsReceived: number; unitsReceived: number;
   pendingReceipts: number; inventoryValue: number | null; lowStockCount: number; outOfStockCount: number;
   productCount: number; supplierPayables: number; pendingApprovals: number; openInvestigations: number; openConflicts: number;
@@ -398,6 +402,13 @@ export default function Home() {
   const inStock = Math.max(0, (ops?.productCount ?? 0) - (ops?.lowStockCount ?? 0));
   const chartData = (data?.trend ?? []).map((p) => ({ ...p, netSales: trendMetric === "profit" ? (p.grossProfit ?? 0) : p.netSales }));
   const chartMode: "day" | "month" = (Date.parse(range.to) - Date.parse(range.from)) / 86_400_000 > 400 ? "month" : "day";
+  // Repayments by the method actually used, so a cash collection is never shown as mobile money.
+  const methodNote = ops?.repaymentsByMethod
+    ? (["cash", "momo", "bank", "other"] as const)
+        .filter((k) => (ops.repaymentsByMethod?.[k] ?? 0) > 0)
+        .map((k) => `${t(`fin.method.${k}` as Key)} ${formatRwf(ops.repaymentsByMethod![k])}`)
+        .join(" · ")
+    : "";
 
   const actionLabel = (action: string) => {
     const key = ACTION_KEYS[action];
@@ -473,15 +484,22 @@ export default function Home() {
                   tone={fin.operatingProfit < 0 ? c.danger : c.success} />
               </View>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-                <Kpi label={t("fin.cash")} value={ops.cashCollected} hint={t("dash.cashCollectedHint")} />
-                <Kpi label={t("fin.receivables")} value={ops.receivables} tone={ops.receivables > 0 ? c.accent : undefined} hint={t("dash.receivablesHint")} />
+                <Kpi testID="kpi-salesCollected" label={t("fin.salesCollected")} value={ops.cashCollected} hint={t("fin.salesCollectedHint")} />
+                <Kpi testID="kpi-creditRepayments" label={t("fin.creditRepayments")} value={ops.creditRepayments ?? 0}
+                  hint={methodNote || t("fin.creditRepaymentsHint")} />
+                <Kpi testID="kpi-totalReceived" label={t("fin.totalReceived")} value={ops.totalReceived ?? ops.cashCollected}
+                  hint={t("fin.totalReceivedHint")} />
+                <Kpi testID="kpi-outstandingCredit" label={t("fin.outstandingCredit")} value={ops.outstandingCredit ?? 0}
+                  tone={(ops.outstandingCredit ?? 0) > 0 ? c.accent : undefined} hint={t("fin.outstandingCreditHint")} />
+              </View>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
                 <Kpi label={t("fin.expenses")} value={fin.operatingExpenses} hint={`${t("fin.outstanding")}: ${formatRwf(fin.outstandingExpenses)}`} />
                 <Kpi label={t("fin.purchases")} value={fin.inventoryPurchases}
                   hint={`${t("dash.supplierPayables")}: ${formatRwf(ops.supplierPayables)}`} />
-              </View>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
                 <Kpi testID="kpi-stockLosses" label={t("fin.stockLoss")} value={fin.stockLosses ?? fin.stockLossValue ?? 0}
                   tone={(fin.stockLosses ?? fin.stockLossValue ?? 0) > 0 ? c.danger : undefined} hint={t("fin.stockLossHint")} />
+              </View>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
                 <Kpi testID="kpi-invValue" label={t("fin.invValue")} value={ops.inventoryValue ?? 0} hint={t("dash.inventoryHint")} />
                 <Kpi testID="kpi-resultAfterLosses" label={t("fin.resultAfterLosses")}
                   value={fin.operatingResultAfterStockLosses ?? fin.operatingProfit}
@@ -498,8 +516,13 @@ export default function Home() {
                 <Kpi label={t("dash.avgSale")} value={ops.averageTransaction} hint={t("dash.avgSaleHint")} />
               </View>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-                <Kpi label={t("fin.cash")} value={ops.cashCollected} hint={t("dash.cashCollectedHint")} />
-                <Kpi label={t("dash.outstandingBalance")} value={ops.receivables} tone={ops.receivables > 0 ? c.accent : undefined} hint={t("dash.receivablesHint")} />
+                <Kpi testID="kpi-salesCollected" label={t("fin.salesCollected")} value={ops.cashCollected} hint={t("fin.salesCollectedHint")} />
+                <Kpi testID="kpi-creditRepayments" label={t("fin.creditRepayments")} value={ops.creditRepayments ?? 0}
+                  hint={methodNote || t("fin.creditRepaymentsHint")} />
+                <Kpi testID="kpi-totalReceived" label={t("fin.totalReceived")} value={ops.totalReceived ?? ops.cashCollected}
+                  hint={t("fin.totalReceivedHint")} />
+                <Kpi testID="kpi-outstandingCredit" label={t("fin.outstandingCredit")} value={ops.outstandingCredit ?? 0}
+                  tone={(ops.outstandingCredit ?? 0) > 0 ? c.accent : undefined} hint={t("fin.outstandingCreditHint")} />
                 {ops.inventoryValue !== null
                   ? <Kpi label={t("fin.invValue")} value={ops.inventoryValue} hint={t("dash.inventoryHint")} />
                   : <Kpi label={t("dash.catalogue")} value={ops.productCount} format={(n) => String(n)} hint={t("dash.catalogueHint")} />}

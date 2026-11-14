@@ -31,6 +31,9 @@ export interface PeriodResult extends PeriodSummary {
   closingInventoryUnits: number;
   /** True when any inbound movement in history has no unit cost: historical COGS is then not fully verifiable. */
   costBasisIncomplete: boolean;
+  /** Customer-credit repayments received in the period, split by the method actually used. */
+  repaymentsByMethod: { cash: number; momo: number; bank: number; other: number };
+  repaymentCount: number;
 }
 
 const LOSS_TYPES = new Set(["damage", "expiry", "adjustment", "count_correction"]);
@@ -82,6 +85,20 @@ export class FinanceService {
         COALESCE(SUM(qty),0)::bigint u,
         COALESCE(SUM((qty * COALESCE(unit_cost,0) + 500) / 1000),0)::bigint v
       FROM stock_movements WHERE shop_id=$1 AND type='receipt' AND occurred_at>=$2 AND occurred_at<$3`);
+    // Repayments collect an existing receivable: money received on the day it was paid, never revenue
+    // and never profit. They are read from their own table, dated by paid_at (not by the sale date).
+    const rep = await q<any>(`SELECT COALESCE(SUM(amount),0)::bigint a, COUNT(*)::int n,
+        COALESCE(SUM(amount) FILTER (WHERE method='cash'),0)::bigint cash,
+        COALESCE(SUM(amount) FILTER (WHERE method='momo'),0)::bigint momo,
+        COALESCE(SUM(amount) FILTER (WHERE method='bank'),0)::bigint bank
+      FROM credit_payments WHERE shop_id=$1 AND paid_at>=$2 AND paid_at<$3`);
+    // Outstanding customer credit at the end of the period, derived from ALL history up to `to`:
+    // credit sales - repayments + signed adjustments. This is a balance, not period activity.
+    const owing = await q<any>(`SELECT
+        COALESCE((SELECT SUM(gross_amount-discount-amount_paid) FROM sales
+                  WHERE shop_id=$1 AND customer_id IS NOT NULL AND status='posted' AND sold_at<$2),0)
+        - COALESCE((SELECT SUM(amount) FROM credit_payments WHERE shop_id=$1 AND paid_at<$2),0)
+        + COALESCE((SELECT SUM(amount) FROM credit_adjustments WHERE shop_id=$1 AND created_at<$2),0) AS v`, [shopId, to]);
 
     const mv = moves ?? await this.movements(shopId);
     let cogs = 0, loss = 0, opening = 0, closing = 0, openingUnits = 0, closingUnits = 0, costBasisIncomplete = false;
@@ -98,9 +115,13 @@ export class FinanceService {
       grossSales: sales.g, discounts: sales.d, salesReturns: ret.r, cogs,
       operatingExpenses: exp.a, expensesPaid: exp.p, cashCollected: sales.paid,
       inventoryPurchases: pur.t, receivables: sales.recv, stockLosses: loss,
+      creditRepayments: Number(rep.a), outstandingCredit: Number(owing.v),
     });
+    const cash = Number(rep.cash), momo = Number(rep.momo), bank = Number(rep.bank);
     return {
       ...base, stockLossValue: loss,
+      repaymentsByMethod: { cash, momo, bank, other: Number(rep.a) - cash - momo - bank },
+      repaymentCount: Number(rep.n),
       transactions: sales.n, unitsSold: units.u,
       purchasesReceived: { deliveries: recv.d, products: recv.pr, units: recv.u, value: recv.v },
       openingInventoryValue: opening, closingInventoryValue: closing,

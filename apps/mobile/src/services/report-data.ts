@@ -335,6 +335,9 @@ export interface SummaryTotals {
   grossSales: number; discounts: number; salesReturns: number; netSales: number; cogs: number;
   grossProfit: number; grossMarginBps: number | null; operatingExpenses: number; operatingProfit: number;
   operatingResultAfterStockLosses: number; stockLosses: number; cashCollected: number; receivables: number;
+  /** Collections from credit sales and repayments of older ones are separate; only their sum is "received". */
+  creditRepayments?: number; totalReceived?: number; outstandingCredit?: number;
+  repaymentsByMethod?: { cash: number; momo: number; bank: number; other: number };
   outstandingExpenses: number; inventoryPurchases: number;
   transactions: number; unitsSold: number;
   purchasesReceived: { deliveries: number; products: number; units: number; value: number };

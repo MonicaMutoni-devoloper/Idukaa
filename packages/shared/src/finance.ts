@@ -7,7 +7,14 @@ export interface PeriodInputs {
   expensesPaid: Rwf;         // cash view
   cashCollected: Rwf;
   inventoryPurchases: Rwf;   // NOT an expense; becomes COGS when sold
-  receivables: Rwf;          // sales on credit not yet collected
+  receivables: Rwf;          // credit issued by sales IN THIS PERIOD (not a running balance)
+  /**
+   * Customer-credit repayments received during the period, on their actual payment date. A repayment
+   * collects an existing receivable: it is money received, never revenue and never profit.
+   */
+  creditRepayments?: Rwf;
+  /** Customer credit still outstanding as of the period end, across all history (sales - repayments + adjustments). */
+  outstandingCredit?: Rwf;
   /** Ledger cost of approved abnormal stock losses (damage/expiry/theft/count shortages) in period. */
   stockLosses?: Rwf;
 }
@@ -23,6 +30,12 @@ export interface PeriodSummary extends PeriodInputs {
   /** Gross margin in basis points, or null when net sales are zero (margin is unavailable, not 0%). */
   grossMarginBps: number | null;
   outstandingExpenses: Rwf;
+  /** Repayments received in the period (0 when the caller did not supply them). */
+  creditRepayments: Rwf;
+  /** Total money received in the period = sales collections + credit repayments. Not revenue. */
+  totalReceived: Rwf;
+  /** Customer credit still owed at the period end (0 when the caller did not supply it). */
+  outstandingCredit: Rwf;
 }
 
 /** Policy: operating profit = gross profit - operating expenses incurred. Purchases are never expensed directly. */
@@ -33,9 +46,12 @@ export function summarize(p: PeriodInputs): PeriodSummary {
   const operatingProfit = grossProfit - p.operatingExpenses;
   const operatingResultAfterStockLosses = operatingProfit - stockLosses;
   const grossMarginBps = netSales > 0 ? Math.round((grossProfit * 10000) / netSales) : null;
+  const creditRepayments = p.creditRepayments ?? 0;
   return {
     ...p, stockLosses, netSales, grossProfit, operatingProfit, operatingResultAfterStockLosses,
     grossMarginBps, outstandingExpenses: p.operatingExpenses - p.expensesPaid,
+    creditRepayments, totalReceived: p.cashCollected + creditRepayments,
+    outstandingCredit: p.outstandingCredit ?? 0,
   };
 }
 
