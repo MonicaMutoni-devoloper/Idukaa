@@ -1,5 +1,6 @@
 import * as SQLite from "expo-sqlite";
 import { Paths } from "expo-file-system";
+import { lineAmount } from "@sms/shared";
 
 /**
  * Local persistent store. Every operation is saved here in ONE SQLite transaction (with its optimistic stock delta)
@@ -272,6 +273,19 @@ export async function applyResults(results: { opId: string; status: string; mess
             [Math.max(0, Math.round(p.amount)), p.customerId]);
         } catch { /* a malformed legacy payload must not block the verdict */ }
       }
+      // A refused credit sale never created a debt: take the optimistic balance back off once.
+      if ((r.status === "rejected" || r.status === "conflict") && row.type === "sale.create"
+        && row.status !== "rejected" && row.status !== "conflict") {
+        try {
+          const p = JSON.parse(row.payload) as { customerId?: string; amountPaid?: number; discount?: number; lines?: { qty: number; unitPrice: number }[] };
+          const credit = p.customerId && p.lines
+            ? p.lines.reduce((s, l) => s + lineAmount(l.qty, l.unitPrice), 0) - (p.discount ?? 0) - (p.amountPaid ?? 0)
+            : 0;
+          if (credit > 0 && p.customerId) await d.runAsync(
+            "UPDATE customers SET balance=MAX(0, COALESCE(balance,0)-?) WHERE id=? AND shop_id=(SELECT v FROM kv WHERE k='local.shop')",
+            [Math.round(credit), p.customerId]);
+        } catch { /* a malformed legacy payload must not block the verdict */ }
+      }
       const st = r.status === "applied" || r.status === "duplicate" ? "synced" : r.status;
       const next = st === "pending_approval" ? Date.now() + 60_000 : 0;
       await d.runAsync("UPDATE outbox SET status=?, message=?, deltas='{}', synced_at=?, next_attempt_at=? WHERE op_id=?", [st, r.message ?? null, new Date().toISOString(), next, r.opId]);
@@ -326,3 +340,29 @@ export const applyLocalCreditPayment = async (customerId: string, amount: number
   (await db()).runAsync(
     "UPDATE customers SET balance=MAX(0, COALESCE(balance,0)-?) WHERE id=? AND shop_id=(SELECT v FROM kv WHERE k='local.shop')",
     [Math.max(0, Math.round(amount)), customerId]);
+
+/**
+ * Apply a queued credit sale optimistically, so the next sale in the same session already sees the
+ * debt this one created and the limit check on the device is not working from a stale balance.
+ */
+export const applyLocalCreditSale = async (customerId: string, amount: number) =>
+  (await db()).runAsync(
+    "UPDATE customers SET balance=COALESCE(balance,0)+? WHERE id=? AND shop_id=(SELECT v FROM kv WHERE k='local.shop')",
+    [Math.max(0, Math.round(amount)), customerId]);
+
+/**
+ * Store a customer captured at the counter straight away: the credit sale that follows references
+ * this id, and the person must be visible in the picker and on the statement before it syncs.
+ */
+export async function upsertLocalCustomer(c: {
+  id: string; name: string; phone: string; address?: string | null; creditLimit?: number;
+}) {
+  const d = await db();
+  const shop = (await d.getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k='local.shop'"))?.v ?? null;
+  await d.runAsync(
+    `INSERT INTO customers(id,shop_id,name,phone,address,notes,credit_limit,status,updated_at,balance,overdue)
+     VALUES (?,?,?,?,?,NULL,?, 'active', ?, 0, 0)
+     ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone,
+       address=excluded.address, credit_limit=excluded.credit_limit, updated_at=excluded.updated_at`,
+    [c.id, shop, c.name, c.phone, c.address ?? null, Math.max(0, Math.round(c.creditLimit ?? 0)), new Date().toISOString()]);
+}

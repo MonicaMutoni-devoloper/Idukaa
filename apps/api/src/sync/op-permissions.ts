@@ -26,6 +26,9 @@ export const OP_ROLES: Record<OperationT["type"], Role[]> = {
   "expense.update": ["manager", "owner"],
   "product.upsert": ["manager", "owner"],
   "supplier.upsert": ["manager", "owner"],
+  // Registering the person taking goods on credit is part of selling, so both shop roles can do
+  // it; the credit line itself stays owner-controlled (the API stores 0 for a manager).
+  "customer.upsert": ["manager", "owner"],
 };
 
 /** Does this role have this operation? Unknown roles (e.g. `system_admin`) have none. */

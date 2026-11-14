@@ -114,6 +114,22 @@ export const SupplierOp = z.object({
   type: z.literal("supplier.upsert"),
   payload: z.object({ supplierId: id, name: z.string().min(1).max(120), phone: z.string().max(30).optional() }),
 });
+/**
+ * A customer registered at the counter, so a credit sale can name who took the goods even with no
+ * connection. The phone is what identifies the debtor, so it is required and normalised before it
+ * is stored; one phone per shop keeps a single credit account per person.
+ */
+export const CustomerOp = z.object({
+  type: z.literal("customer.upsert"),
+  payload: z.object({
+    customerId: id,
+    name: z.string().trim().min(2).max(120),
+    phone: z.string().trim().min(7).max(30),
+    address: z.string().trim().max(240).optional(),
+    /** Only an owner's value is stored: a manager cannot open a credit line. */
+    creditLimit: int.nonnegative().optional(),
+  }),
+});
 /** A repayment against a customer's credit account. One operation = one idempotent payment. */
 export const CreditPaymentOp = z.object({
   type: z.literal("credit.payment.create"),
@@ -123,7 +139,7 @@ export const CreditPaymentOp = z.object({
   }),
 });
 
-export const Operation = z.discriminatedUnion("type", [SaleOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp, CreditPaymentOp]).and(
+export const Operation = z.discriminatedUnion("type", [SaleOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp, CustomerOp, CreditPaymentOp]).and(
   z.object({ opId: id, deviceId: z.string().min(1).max(64), createdAt: iso }),
 );
 export type OperationT = z.infer<typeof Operation>;

@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Patch, Post, Query } from "@nestjs/common";
 import { z } from "zod";
+import { normalizeRwandaPhone } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { audit } from "../audits/audit";
@@ -116,13 +117,17 @@ export class CustomersController {
     const b = CustomerBody.safeParse(body);
     if (!b.success) throw new BadRequestException(b.error.issues[0]?.message);
     const v = b.data;
+    // The phone is the debtor's identity: stored in one canonical shape so the unique
+    // (shop, phone) index can actually stop a second account for the same person.
+    const phone = v.phone ? normalizeRwandaPhone(v.phone) : null;
+    if (v.phone && !phone) throw new BadRequestException("invalid_phone");
     // Only an owner controls a credit line. A manager may register a customer with zero credit.
     const limit = u.role === "owner" ? v.creditLimit ?? 0 : 0;
     try {
       const [row] = await this.db.query(
         `INSERT INTO customers(id,shop_id,name,phone,address,notes,credit_limit)
          VALUES (COALESCE($1::uuid, gen_random_uuid()),$2,$3,$4,$5,$6,$7)
-         RETURNING *`, [v.id ?? null, u.shopId, v.name, v.phone || null, v.address || null, v.notes || null, limit]);
+         RETURNING *`, [v.id ?? null, u.shopId, v.name, phone, v.address || null, v.notes || null, limit]);
       await audit(this.db.pool, { shopId: u.shopId, actorId: u.id, action: "customer.create", entity: "customer", entityId: row.id,
         newValue: { name: row.name, phone: row.phone, creditLimit: Number(row.credit_limit) } });
       return shape({ ...row, balance: 0 });
@@ -138,6 +143,8 @@ export class CustomersController {
     const b = CustomerPatch.safeParse(body);
     if (!b.success) throw new BadRequestException(b.error.issues[0]?.message);
     const v = b.data;
+    const phone = v.phone === undefined ? undefined : normalizeRwandaPhone(v.phone);
+    if (v.phone !== undefined && !phone) throw new BadRequestException("invalid_phone");
     return this.db.tx(async (c) => {
       const { rows: [old] } = await c.query("SELECT * FROM customers WHERE id=$1 AND shop_id=$2 FOR UPDATE", [id, u.shopId]);
       if (!old) throw new NotFoundException("customer_not_found");
@@ -145,7 +152,7 @@ export class CustomersController {
         `UPDATE customers SET name=COALESCE($2,name), phone=COALESCE($3,phone), address=COALESCE($4,address),
                 notes=COALESCE($5,notes), credit_limit=COALESCE($6,credit_limit), status=COALESCE($7,status), updated_at=now()
           WHERE id=$1 RETURNING *`,
-        [id, v.name ?? null, v.phone ?? null, v.address ?? null, v.notes ?? null, v.creditLimit ?? null, v.status ?? null]);
+        [id, v.name ?? null, phone ?? null, v.address ?? null, v.notes ?? null, v.creditLimit ?? null, v.status ?? null]);
       await audit(c, { shopId: u.shopId, actorId: u.id, action: "customer.update", entity: "customer", entityId: id,
         oldValue: { name: old.name, phone: old.phone, creditLimit: Number(old.credit_limit), status: old.status },
         newValue: { name: row.name, phone: row.phone, creditLimit: Number(row.credit_limit), status: row.status } });

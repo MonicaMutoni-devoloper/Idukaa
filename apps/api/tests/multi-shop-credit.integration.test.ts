@@ -88,6 +88,12 @@ async function insertSale(shopId: string, userId: string, at: string, gross: num
 
 before(async () => {
   if (skip) return;
+  // This file wipes the schema it runs in. Refuse any database that is not clearly a test one, so a
+  // mistyped TEST_DATABASE_URL cannot destroy a development or production database.
+  const dbName = new URL(url!).pathname.replace(/^\//, "");
+  if (!/test/i.test(dbName) && process.env.ALLOW_DESTRUCTIVE_TEST_DB !== "1") {
+    throw new Error(`Refusing to wipe schema public in database "${dbName}": point TEST_DATABASE_URL at a dedicated test database`);
+  }
   pool = new Pool({ connectionString: url });
   await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
   const dir = join(process.cwd(), "migrations");
@@ -466,4 +472,88 @@ test("anomaly rules detect all six categories, deduplicate, reopen and stay shop
   assert.equal(reopened.data.status, "open");
   assert.ok(reopened.data.events.some((ev: any) => ev.action === "reopened"));
   assert.ok(reopened.data.events.some((ev: any) => ev.action === "resolved" && ev.note === "Counted and explained"));
+});
+
+test("credit identity: the debtor is registered at the counter, once, with an owner-set line", { skip }, async () => {
+  const a = await auth("owner-a@multishop.test");
+  const ma = await auth("manager-a@multishop.test");
+  const mb = await auth("manager-b@multishop.test");
+  const digits = String(100000 + Math.floor(Math.random() * 899998));
+  const phone = `0788${digits}`;
+  const customerId = randomUUID();
+
+  // 1. Registered with a country-code spelling: stored in the one canonical local shape.
+  const registration = op("customer.upsert", {
+    customerId, name: "Jean Claude", phone: `+250 788 ${phone.slice(4, 7)} ${phone.slice(7)}`, creditLimit: 40000,
+  });
+  const registered = await push(a.token, registration);
+  const registered2 = () => registration;
+  assert.equal(registered.status, 201, JSON.stringify(registered.data));
+  assert.equal(registered.data.results[0].status, "applied", JSON.stringify(registered.data));
+  const mine = await call("GET", `/customers/${customerId}`, undefined, a.token);
+  assert.equal(mine.status, 200);
+  assert.equal(mine.data.phone, phone, "the same person must be stored once, canonically");
+  assert.equal(mine.data.creditLimit, 40000);
+  assert.equal(mine.data.balance, 0);
+
+  // 2. A second account for that phone is refused, whichever way the number is written.
+  for (const spelling of [phone, `+250${phone.slice(1)}`, `${phone.slice(0, 4)} ${phone.slice(4, 7)} ${phone.slice(7)}`]) {
+    const duplicate = await push(ma.token, op("customer.upsert", {
+      customerId: randomUUID(), name: "Jean C", phone: spelling, creditLimit: 1000,
+    }));
+    assert.equal(duplicate.data.results[0].status, "rejected", spelling);
+    assert.match(duplicate.data.results[0].message, /customer_phone_in_use/, spelling);
+  }
+
+  // 3. Junk phone numbers never become a debtor: too short is refused by the schema, a well-sized
+  //    non-Rwandan number by the handler.
+  for (const junkPhone of ["12345", "1234567", "0788 123"]) {
+    const junk = await push(ma.token, op("customer.upsert", { customerId: randomUUID(), name: "No Phone", phone: junkPhone }));
+    assert.equal(junk.data.results[0].status, "rejected", junkPhone);
+    assert.match(junk.data.results[0].message, /invalid_phone|invalid_operation/, junkPhone);
+  }
+
+  // 4. Re-sending the identical operation is a duplicate, not a second account.
+  const again = await push(a.token, registered2());
+  assert.equal(again.data.results[0].status, "duplicate");
+  const count = Number((await pool.query("SELECT count(*)::int n FROM customers WHERE shop_id=$1 AND phone=$2", [ids.shopA, phone])).rows[0].n);
+  assert.equal(count, 1);
+
+  // 5. A manager may register the person but cannot open a credit line.
+  const managerPhone = `0722${digits}`;
+  const managerCustomer = randomUUID();
+  const byManager = await push(ma.token, op("customer.upsert", {
+    customerId: managerCustomer, name: "Manager Customer", phone: managerPhone, creditLimit: 90000,
+  }));
+  assert.equal(byManager.data.results[0].status, "applied", JSON.stringify(byManager.data));
+  const managed = await call("GET", `/customers/${managerCustomer}`, undefined, ma.token);
+  assert.equal(managed.data.creditLimit, 0, "only the owner opens a credit line");
+
+  // 6. Another shop cannot read or sell to that customer.
+  assert.equal((await call("GET", `/customers/${customerId}`, undefined, mb.token)).status, 404);
+  // Manager B's own product, so the only thing wrong with the sale is the foreign customer.
+  const productB = await addProduct(ids.shopB, `B Credit ${digits}`, 100_000, 1000);
+  const crossSell = await push(mb.token, op("sale.create", {
+    saleId: randomUUID(), soldAt: new Date().toISOString(), discount: 0, amountPaid: 0, paymentMethod: "credit",
+    customerId, lines: [{ productId: productB, qty: 1000, unitPrice: 5000 }],
+  }));
+  assert.equal(crossSell.data.results[0].status, "rejected");
+  assert.match(crossSell.data.results[0].message, /unknown_customer/);
+
+  // 7. The registered debtor can take goods: partial payment leaves exactly the remainder owing,
+  //    and repeating that operation never charges the debt twice.
+  const productId = await addProduct(ids.shopA, `Credit ${digits}`, 100_000, 1000);
+  const saleOp = op("sale.create", {
+    saleId: randomUUID(), soldAt: new Date().toISOString(), discount: 0, amountPaid: 10000, paymentMethod: "credit",
+    customerId, lines: [{ productId, qty: 7000, unitPrice: 5000 }],
+  });
+  const sale = await push(ma.token, saleOp);
+  assert.equal(sale.data.results[0].status, "applied", JSON.stringify(sale.data));
+  assert.equal((await push(ma.token, saleOp)).data.results[0].status, "duplicate");
+  const after = await call("GET", `/customers/${customerId}`, undefined, ma.token);
+  assert.equal(after.data.balance, 25000, "35,000 sale less 10,000 paid now");
+  const statement = await call("GET", `/customers/${customerId}/statement`, undefined, a.token);
+  assert.equal(statement.data.sales.length, 1, "idempotent replay must not create a second sale");
+  assert.equal(statement.data.sales[0].amountPaid, 10000);
+  assert.equal(statement.data.sales[0].credit, 25000);
 });

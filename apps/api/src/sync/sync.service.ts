@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import type { PoolClient } from "pg";
-import { Operation, lineAmount, priceBelowCost, toBaseQty, type OperationT, type OpResult } from "@sms/shared";
+import { Operation, lineAmount, normalizeRwandaPhone, priceBelowCost, toBaseQty, type OperationT, type OpResult } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
 import { canRunOp } from "./op-permissions";
@@ -321,6 +321,36 @@ export class SyncService {
         if ((neg && p.qty > 0) || (p.reason === "sale_return" && p.qty < 0)) throw new BizError("rejected", "wrong_sign_for_reason");
         await c.query("INSERT INTO adjustments(id,shop_id,op_id,product_id,qty,reason,note,refund_amount,requested_by,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')", [p.adjustmentId, shopId, op.opId, p.productId, p.qty, p.reason, p.note, p.refundAmount ?? null, u.id]);
         return "pending_approval"; // owner must approve before any stock movement is posted
+      }
+      /**
+       * Register the person taking goods on credit. The phone is normalised first, because it is
+       * the identity of the debtor: two spellings of one number must not become two accounts.
+       * A manager may register the customer but cannot open a credit line (stored 0), matching
+       * `POST /customers`; the owner can. Re-registering the same customer id is an update.
+       */
+      case "customer.upsert": {
+        const p = op.payload;
+        const phone = normalizeRwandaPhone(p.phone);
+        if (!phone) throw new BizError("rejected", "invalid_phone");
+        const { rows: [dupe] } = await c.query(
+          "SELECT id FROM customers WHERE shop_id=$1 AND lower(phone)=lower($2) AND id<>$3",
+          [shopId, phone, p.customerId]);
+        if (dupe) throw new BizError("rejected", `customer_phone_in_use:${dupe.id}`);
+        const limit = u.role === "owner" ? Math.max(0, p.creditLimit ?? 0) : 0;
+        try {
+          await c.query(
+            `INSERT INTO customers(id,shop_id,name,phone,address,credit_limit) VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (shop_id,id) DO UPDATE SET name=EXCLUDED.name, phone=EXCLUDED.phone,
+               address=COALESCE(EXCLUDED.address,customers.address), updated_at=now()`,
+            [p.customerId, shopId, p.name, phone, p.address ?? null, limit]);
+        } catch (e: any) {
+          // The unique (shop, lower(phone)) index is the race-safe version of the check above.
+          if (e?.code === "23505") throw new BizError("rejected", "customer_phone_in_use");
+          throw e;
+        }
+        await audit(c, { shopId, actorId: u.id, action: "customer.create", entity: "customer", entityId: p.customerId,
+          newValue: { name: p.name, phone, creditLimit: limit } });
+        return;
       }
       case "credit.payment.create": {
         const p = op.payload;

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Keyboard, Platform, Pressable, Text, View } from "react-native";
-import { formatQty, formatRwf, lineAmount, toBaseQty, type PaymentMethod } from "@sms/shared";
-import { Badge, Banner, Button, Card, Empty, Field, Modal, Screen, Segmented, useToasts, useWide } from "../../src/components/ui";
+import { formatQty, formatRwf, formatRwandaPhone, lineAmount, normalizeRwandaPhone, toBaseQty, type PaymentMethod } from "@sms/shared";
+import { Badge, Banner, Button, Card, Empty, Field, KeyValue, Modal, Screen, Segmented, useToasts, useWide } from "../../src/components/ui";
 import { Appear, Disclosure, Dismiss, Shake } from "../../src/components/motion";
 import { Icon } from "../../src/components/icons";
 import { DayField } from "../../src/components/date-range-picker";
 import { cartSellingQty, maxSellingMilli, mergeCartQty, stepSellingQty, validateQuickAddQty } from "../../src/services/sell-quick-add";
-import { enqueue, listCustomers, listProducts, type LocalCustomer, type LocalProduct } from "../../src/database/local";
+import { applyLocalCreditSale, enqueue, listCustomers, listProducts, upsertLocalCustomer, type LocalCustomer, type LocalProduct } from "../../src/database/local";
+import { creditLimitState, creditTotals, validateNewCreditCustomer } from "../../src/services/credit-sale";
 import { useT } from "../../src/localization";
 import { request, useSession } from "../../src/services/api";
 import { fullResync, refreshCounts, syncNow, useSync } from "../../src/synchronization/engine";
@@ -48,6 +49,12 @@ export default function Sell() {
   const [customerId, setCustomerId] = useState<string | null>(null);
   const [dueDate, setDueDate] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
+  // Identifying the person taking goods on credit is part of the sale, not an optional extra.
+  const [custQuery, setCustQuery] = useState("");
+  const [newCust, setNewCust] = useState(false);
+  const [custName, setCustName] = useState(""); const [custPhone, setCustPhone] = useState("");
+  const [custLimit, setCustLimit] = useState("0"); const [custErr, setCustErr] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [maxDiscount, setMaxDiscount] = useState<number | null>(null);
   const [policyTime, setPolicyTime] = useState<string | null>(null);
   const [policyMissing, setPolicyMissing] = useState(false);
@@ -136,6 +143,17 @@ export default function Sell() {
   const balance = tendered === null ? 0 : Math.max(0, total - tendered);
   const customer = customers.find((x) => x.id === customerId) ?? null;
   const creditLimit = customer?.credit_limit ?? 0;
+  const custMatches = customers.filter((x) => {
+    const needle = custQuery.trim().toLowerCase();
+    return !needle || x.name.toLowerCase().includes(needle) || (x.phone ?? "").toLowerCase().includes(needle)
+      || normalizeRwandaPhone(x.phone) === normalizeRwandaPhone(custQuery);
+  }).slice(0, 8);
+  const typedPhone = normalizeRwandaPhone(custPhone);
+  // The same person must never get a second credit account: offer the existing one instead.
+  const duplicateCustomer = typedPhone ? customers.find((x) => normalizeRwandaPhone(x.phone) === typedPhone) ?? null : null;
+  const money = creditTotals({ total, paid: appliedPaid, previousBalance: customer?.balance ?? 0 });
+  const limitState = creditLimitState({ limit: creditLimit, newBalance: money.newBalance });
+  const identifying = method === "credit" || !!customer || balance > 0;
 
   const quickStock = quick ? eff(quick) : 0;
   const quickFactor = quick ? unitsSellingOf(quick) : 1;
@@ -196,6 +214,7 @@ export default function Sell() {
 
   async function save() {
     setSaveError(null);
+    setCustErr(null);
     const e: Record<string, string> = {};
     lines.forEach((l, i) => {
       const qn = qtyOrNull(l.qty);
@@ -207,7 +226,12 @@ export default function Sell() {
     else if (user.role !== "owner" && maxDiscount !== null && gross > 0 && disc > Math.floor((gross * maxDiscount) / 100))
       e.d = t("sell.discountLimit").replace("{pct}", String(maxDiscount));
     if (tendered === null) e.paid = t("v.invalid");
-    if (balance > 0 && !customerId) e.paid = t("credit.customerRequired");
+    // A credit sale cannot be saved against nobody: either a chosen account or a complete new one.
+    if (balance > 0 && newCust) {
+      const check = validateNewCreditCustomer({ name: custName, phone: custPhone }, customers);
+      if (!check.ok) setCustErr(check.reason === "duplicate" ? t("credit.phoneTaken") : check.reason === "phone" ? t("credit.phoneInvalid") : t("credit.nameRequired"));
+      if (!check.ok) e.cust = t("credit.customerRequired");
+    } else if (balance > 0 && !customerId) e.paid = t("credit.customerRequired");
     setErrs(e);
     if (Object.keys(e).length) {
       setErrCount((n) => n + 1);
@@ -216,24 +240,55 @@ export default function Sell() {
       if (cartOpen) setSaveError(t("sell.checkDetails"));
     }
     if (!lines.length || Object.keys(e).length) return;
+    // Nothing is saved until the cashier has seen who owes what: full and partial credit alike.
+    if (balance > 0) { setConfirmOpen(true); return; }
+    await commit();
+  }
 
-    const saleTotal = total, count = lines.length, saleId = uuid(), at = new Date().toISOString();
-    const payload = { saleId, soldAt: at, discount: disc, amountPaid: appliedPaid, paymentMethod: method,
-      customerId: balance > 0 ? customerId : customerId ?? undefined,
-      dueAt: balance > 0 && /^\d{4}-\d{2}-\d{2}$/.test(dueDate) && !Number.isNaN(new Date(`${dueDate}T12:00:00Z`).getTime())
-        ? new Date(`${dueDate}T12:00:00Z`).toISOString() : undefined,
-      creditOverrideReason: balance > 0 && overrideReason.trim().length >= 3 ? overrideReason.trim() : undefined,
-      lines: lines.map((l) => {
-        const natural = qtyOrNull(l.qty)!;                         // milli SELLING units as entered
-        return { productId: l.p.id, qty: toBaseQty(natural, unitsSellingOf(l.p)), unitPrice: parseRwf(l.price)!, sellingQty: natural };
-      }) };
-    const deltas: Record<string, number> = {}; payload.lines.forEach((l) => (deltas[l.productId] = (deltas[l.productId] ?? 0) - l.qty));
-    setBusy(true); setSaveError(null);
+  /**
+   * Write the sale (and the customer it names) to the durable outbox. The customer is queued first
+   * so the sale can never reference an account that does not exist yet, offline included.
+   */
+  async function commit() {
+    const at = new Date().toISOString();
+    const saleTotal = total, count = lines.length, saleId = uuid();
+    const credit = money.credit;
+    let saleCustomerId = customerId;
+    setBusy(true); setSaveError(null); setCustErr(null);
     try {
+      if (balance > 0 && newCust) {
+        const check = validateNewCreditCustomer({ name: custName, phone: custPhone }, customers);
+        if (!check.ok) {
+          setCustErr(check.reason === "duplicate" ? t("credit.phoneTaken") : check.reason === "phone" ? t("credit.phoneInvalid") : t("credit.nameRequired"));
+          setConfirmOpen(false); return;
+        }
+        const newId = uuid();
+        const limit = user.role === "owner" ? Math.max(0, parseRwf(custLimit) ?? 0) : 0;
+        await enqueue(user.id, uuid(), "customer.upsert",
+          { customerId: newId, name: check.name, phone: check.phone, creditLimit: limit },
+          {}, () => upsertLocalCustomer({ id: newId, name: check.name, phone: check.phone, creditLimit: limit }), at);
+        saleCustomerId = newId;
+      }
+      const payload = { saleId, soldAt: at, discount: disc, amountPaid: appliedPaid, paymentMethod: method,
+        customerId: saleCustomerId ?? undefined,
+        dueAt: balance > 0 && /^\d{4}-\d{2}-\d{2}$/.test(dueDate) && !Number.isNaN(new Date(`${dueDate}T12:00:00Z`).getTime())
+          ? new Date(`${dueDate}T12:00:00Z`).toISOString() : undefined,
+        creditOverrideReason: balance > 0 && overrideReason.trim().length >= 3 ? overrideReason.trim() : undefined,
+        lines: lines.map((l) => {
+          const natural = qtyOrNull(l.qty)!;                         // milli SELLING units as entered
+          return { productId: l.p.id, qty: toBaseQty(natural, unitsSellingOf(l.p)), unitPrice: parseRwf(l.price)!, sellingQty: natural };
+        }) };
+      const deltas: Record<string, number> = {}; payload.lines.forEach((l) => (deltas[l.productId] = (deltas[l.productId] ?? 0) - l.qty));
+      // Optimistic debt: the next sale on this device sees it, and the API either keeps it or the
+      // balance is restored when the operation comes back rejected.
+      const debt = credit > 0 && saleCustomerId ? () => applyLocalCreditSale(saleCustomerId!, credit) : undefined;
       // `at` is passed as the record timestamp so today's local figures place the sale on the
       // Kigali business day it was made, not on whichever day the sync later ran.
-      await enqueue(user.id, uuid(), "sale.create", payload, deltas, undefined, at); // durable BEFORE success is shown
-      setLines([]); setDiscount("0"); setPaid(null); setErrs({}); setCartOpen(false); setCustomerId(null); setDueDate(""); setOverrideReason(""); Keyboard.dismiss();
+      await enqueue(user.id, uuid(), "sale.create", payload, deltas, debt, at); // durable BEFORE success is shown
+      setLines([]); setDiscount("0"); setPaid(null); setErrs({}); setCartOpen(false); setConfirmOpen(false);
+      setCustomerId(null); setDueDate(""); setOverrideReason("");
+      setNewCust(false); setCustName(""); setCustPhone(""); setCustLimit("0"); setCustQuery(""); setCustErr(null);
+      Keyboard.dismiss();
       setSaved({ total: saleTotal, count, ref: `RC-${saleId.slice(0, 8).toUpperCase()}`, paid: appliedPaid, change, at, method });
       await refreshCounts(); void syncNow();
     } catch {
@@ -337,29 +392,91 @@ export default function Sell() {
 
           {lines.length ? (
             <Card style={{ gap: space.md }}>
-              <View style={{ gap: 5 }}>
-                <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("credit.select")}</Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                  {customers.slice(0, 8).map((cu) => (
-                    <Pressable key={cu.id} testID={`sell-customer-${cu.id}`} onPress={() => setCustomerId(customerId === cu.id ? null : cu.id)}
-                      style={({ pressed }: any) => ({ paddingVertical: 7, paddingHorizontal: space.md, borderRadius: 8, borderWidth: 1,
-                        borderColor: customerId === cu.id ? c.success : c.line, backgroundColor: customerId === cu.id ? c.surfaceMuted : pressed ? c.pressed : c.surface })}>
-                      <Text style={{ color: c.ink, fontSize: 12, fontWeight: customerId === cu.id ? "700" : "500" }}>{cu.name}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-                {!customers.length ? <Text style={{ color: c.muted, fontSize: 11 }}>{t("credit.noCustomers")}</Text> : null}
+              {identifying ? (
+              <View style={{ gap: space.sm }}>
+                <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("credit.identify")}</Text>
                 {customer ? (
-                  <View style={{ gap: space.sm }}>
-                    <Text style={{ color: c.muted, fontSize: 11 }}>{t("credit.limit")}: {formatRwf(creditLimit)} · {customer.phone ?? "—"}</Text>
-                    {balance > 0 ? <DayField testID="credit-due-date" label={t("credit.due")} value={dueDate} onChangeText={setDueDate} /> : null}
+                  <View style={{ gap: 2, padding: space.md, borderRadius: radius.sm, borderWidth: 1, borderColor: c.line, backgroundColor: c.surface }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+                      <View style={{ flex: 1 }}>
+                        <Text testID="sell-customer-selected" style={{ color: c.ink, fontWeight: "700", fontSize: 15 }}>{customer.name}</Text>
+                        <Text style={{ color: c.muted, fontSize: 12 }}>
+                          {customer.phone ? formatRwandaPhone(customer.phone) : t("credit.phoneMissing")}
+                          {" · "}{t("credit.limit")}: {creditLimit > 0 ? formatRwf(creditLimit) : t("credit.noLimit")}
+                        </Text>
+                      </View>
+                      <Button testID="sell-customer-change" size="sm" kind="secondary" label={t("credit.change")}
+                        onPress={() => { setCustomerId(null); setCustQuery(""); }} />
+                    </View>
                     {balance > 0 ? (
-                      <Field label={t("credit.overrideReason")} value={overrideReason} onChangeText={setOverrideReason}
-                        hint={t("credit.overrideHint")} />
+                      <View style={{ marginTop: space.sm }}>
+                        <KeyValue label={t("credit.previousBalance")} value={formatRwf(money.previousBalance)} />
+                        <KeyValue label={t("credit.thisSale")} value={formatRwf(money.credit)} />
+                        <KeyValue strong label={t("credit.newBalance")} value={<Text testID="credit-new-balance">{formatRwf(money.newBalance)}</Text>} />
+                      </View>
                     ) : null}
                   </View>
+                ) : (
+                  <>
+                    <Field testID="sell-customer-search" label={t("credit.searchExisting")} placeholder={t("credit.searchPlaceholder")}
+                      value={custQuery} onChangeText={setCustQuery} autoCorrect={false} />
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                      {custMatches.map((cu) => (
+                        <Pressable key={cu.id} testID={`sell-customer-${cu.id}`}
+                          accessibilityRole="button" accessibilityLabel={cu.name}
+                          onPress={() => { setCustomerId(cu.id); setNewCust(false); setCustErr(null); setErrs((x) => ({ ...x, cust: "", paid: "" })); }}
+                          style={({ pressed }: any) => ({ minWidth: 130, gap: 1, paddingVertical: 7, paddingHorizontal: space.md, borderRadius: 8, borderWidth: 1,
+                            borderColor: c.line, backgroundColor: pressed ? c.pressed : c.surface })}>
+                          <Text style={{ color: c.ink, fontSize: 12, fontWeight: "700" }}>{cu.name}</Text>
+                          <Text style={{ color: c.muted, fontSize: 11 }}>
+                            {cu.phone ? formatRwandaPhone(cu.phone) : t("credit.phoneMissing")} · {(cu.balance ?? 0) > 0 ? formatRwf(cu.balance ?? 0) : t("credit.noDebt")}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    {!custMatches.length ? <Text style={{ color: c.muted, fontSize: 11 }}>{t("credit.noCustomers")}</Text> : null}
+
+                    {newCust ? (
+                      <View style={{ gap: space.sm, padding: space.md, borderRadius: radius.sm, backgroundColor: c.surfaceMuted }}>
+                        <Field testID="sell-customer-name" label={t("credit.name")} required value={custName}
+                          onChangeText={(x) => { setCustName(x); setCustErr(null); }} placeholder={t("credit.namePlaceholder")} />
+                        <Field testID="sell-customer-phone" label={t("credit.phone")} required value={custPhone} keyboardType="phone-pad"
+                          onChangeText={(x) => { setCustPhone(x); setCustErr(null); }} placeholder="078X XXX XXX" hint={t("credit.phoneHint")} />
+                        {user.role === "owner" ? (
+                          <Field testID="sell-customer-limit" label={t("credit.limit")} value={custLimit} keyboardType="number-pad"
+                            onChangeText={setCustLimit} hint={t("credit.limitHint")} />
+                        ) : null}
+                        {duplicateCustomer ? (
+                          <Banner tone="warn" text={t("credit.phoneTaken").replace("{name}", duplicateCustomer.name)}
+                            action={<Button testID="sell-customer-use-existing" size="sm" kind="secondary" label={t("credit.useExisting")}
+                              onPress={() => { setCustomerId(duplicateCustomer.id); setNewCust(false); setCustPhone(""); setCustErr(null); }} />} />
+                        ) : null}
+                        {custErr ? <Text testID="sell-customer-error" style={{ color: c.danger, fontSize: 12 }}>{custErr}</Text> : null}
+                        <Button size="sm" kind="quiet" label={t("common.cancel")} onPress={() => { setNewCust(false); setCustErr(null); }} />
+                      </View>
+                    ) : (
+                      <Button testID="sell-customer-new" size="sm" kind="secondary" label={t("credit.newCustomer")} onPress={() => setNewCust(true)} />
+                    )}
+                    {!newCust && !custMatches.length && !customers.length ? (
+                      <Text style={{ color: c.muted, fontSize: 11 }}>{t("credit.firstCustomer")}</Text>
+                    ) : null}
+                  </>
+                )}
+
+                {customer && balance > 0 && limitState === "over" ? (
+                  <Banner tone="warn" text={t("credit.limitWarning").replace("{limit}", formatRwf(creditLimit)).replace("{balance}", formatRwf(money.newBalance))} />
+                ) : null}
+                {customer && balance > 0 && limitState === "none" ? (
+                  <Banner tone="warn" text={t("credit.noCreditLine")} />
+                ) : null}
+
+                {customer && balance > 0 ? <DayField testID="credit-due-date" label={t("credit.due")} value={dueDate} onChangeText={setDueDate} /> : null}
+                {customer && balance > 0 ? (
+                  <Field testID="credit-override-reason" label={t("credit.overrideReason")} value={overrideReason} onChangeText={setOverrideReason}
+                    hint={t("credit.overrideHint")} />
                 ) : null}
               </View>
+              ) : null}
               <View style={{ gap: 4 }}>
                 <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("sell.paymentMethod")}</Text>
                 <Segmented<PaymentMethod> label={t("sell.paymentMethod")} value={method} onChange={setMethod} options={[
@@ -530,6 +647,48 @@ export default function Sell() {
           <View style={{ flexDirection: "row", justifyContent: "space-between" }}><Text style={{ color: c.muted, fontSize: 13 }}>{t("sell.subtotal")}</Text><Text style={{ color: c.inkSoft, fontVariant: ["tabular-nums"] }}>{formatRwf(gross)}</Text></View>
           <View style={{ flexDirection: "row", justifyContent: "space-between" }}><Text style={{ color: c.ink, fontWeight: "700" }}>{t("common.total")}</Text><Text style={{ color: c.ink, ...type.money }}>{formatRwf(total)}</Text></View>
         </View>
+      </Modal>
+
+      {/* The cashier must see the debt they are creating before it is recorded. */}
+      <Modal open={confirmOpen} onClose={() => setConfirmOpen(false)} title={t("credit.confirmTitle")} description={t("credit.confirmLead")} width={520} scroll
+        footer={<>
+          <Button testID="credit-confirm-back" kind="secondary" label={t("common.close")} onPress={() => setConfirmOpen(false)} />
+          <Button testID="credit-confirm" label={t("credit.confirmSale")} loading={busy} onPress={() => void commit()} />
+        </>}>
+        <View style={{ gap: 4, padding: space.md, borderRadius: radius.sm, backgroundColor: c.surfaceMuted }}>
+          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("credit.select")}</Text>
+          <Text testID="credit-confirm-customer" style={{ color: c.ink, fontWeight: "700", fontSize: 16 }}>
+            {newCust ? custName.trim() : customer?.name ?? "—"}
+          </Text>
+          <Text testID="credit-confirm-phone" style={{ color: c.inkSoft, fontSize: 13 }}>
+            {newCust ? (formatRwandaPhone(custPhone) || custPhone) : customer?.phone ? formatRwandaPhone(customer.phone) : t("credit.phoneMissing")}
+          </Text>
+        </View>
+
+        <View style={{ gap: 2, paddingVertical: space.sm, borderTopWidth: 1, borderTopColor: c.line }}>
+          {lines.map((l) => (
+            <View key={l.p.id} style={{ flexDirection: "row", justifyContent: "space-between", gap: space.sm }}>
+              <Text style={{ flex: 1, color: c.inkSoft, fontSize: 13 }}>{l.p.name} × {formatQty(qtyOrNull(l.qty) ?? 0)} {sellingUnitOf(l.p)}</Text>
+              <Text style={{ color: c.ink, fontSize: 13, fontVariant: ["tabular-nums"] }}>{formatRwf(amount(l))}</Text>
+            </View>
+          ))}
+        </View>
+
+        <View>
+          <KeyValue label={t("common.total")} value={formatRwf(total)} />
+          <KeyValue label={t("credit.paidNow")} value={formatRwf(appliedPaid)} />
+          <KeyValue label={t("credit.thisSale")} value={<Text testID="credit-confirm-credit">{formatRwf(money.credit)}</Text>} />
+          <KeyValue label={t("credit.previousBalance")} value={formatRwf(money.previousBalance)} />
+          <KeyValue strong label={t("credit.newBalance")} value={<Text testID="credit-confirm-balance">{formatRwf(money.newBalance)}</Text>} />
+        </View>
+
+        {limitState === "over" ? (
+          <Banner tone="warn" text={t("credit.limitWarning").replace("{limit}", formatRwf(creditLimit)).replace("{balance}", formatRwf(money.newBalance))} />
+        ) : null}
+        {limitState === "none" ? <Banner tone="warn" text={t("credit.noCreditLine")} /> : null}
+        {user.role !== "owner" && (limitState === "over" || limitState === "none") ? (
+          <Text style={{ color: c.muted, fontSize: 12, lineHeight: 17 }}>{t("credit.approvalNote")}</Text>
+        ) : null}
       </Modal>
     </View>
   );

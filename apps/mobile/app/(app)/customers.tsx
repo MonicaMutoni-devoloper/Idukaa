@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Text, View } from "react-native";
-import { formatRwf } from "@sms/shared";
+import { formatRwf, normalizeRwandaPhone } from "@sms/shared";
 import { Badge, Banner, Button, Card, Empty, Field, Modal, Screen, Segmented, useToasts } from "../../src/components/ui";
 import { useT } from "../../src/localization";
-import { applyLocalCreditPayment, cacheCustomerBalances, enqueue, listCustomers, type LocalCustomer } from "../../src/database";
+import { applyLocalCreditPayment, cacheCustomerBalances, enqueue, listCustomers, upsertLocalCustomer, type LocalCustomer } from "../../src/database";
 import { useSession } from "../../src/services/api";
 import { syncNow } from "../../src/synchronization/engine";
 import {
-  createCustomer, getCreditSummary, getCustomerStatement, getCustomers, prepareReminder,
+  getCreditSummary, getCustomerStatement, getCustomers, prepareReminder,
   type CreditSummary, type Customer, type Statement,
 } from "../../src/services/business";
 import { uuid } from "../../src/services/util";
@@ -48,14 +48,30 @@ export default function Customers() {
   useEffect(() => { void load(); }, [load]);
 
   async function add() {
-    if (name.trim().length < 2) return;
-    setBusy(true); setError(null);
+    setError(null);
+    if (name.trim().length < 2) { setError(t("credit.nameRequired")); return; }
+    const typed = phone.trim();
+    const normalized = normalizeRwandaPhone(typed);
+    if (!typed) { setError(t("credit.phoneRequired")); return; }
+    if (!normalized) { setError(t("credit.phoneInvalid")); return; }
+    // One credit account per phone: offer the account that already exists instead of a duplicate.
+    const dupe = (await listCustomers("").catch(() => [] as LocalCustomer[]))
+      .find((x) => normalizeRwandaPhone(x.phone) === normalized);
+    if (dupe) { setError(t("credit.phoneTaken").replace("{name}", dupe.name)); return; }
+    setBusy(true);
+    const id = uuid(); const cleanName = name.trim();
+    const limitValue = Math.max(0, Number(limit) || 0);
     try {
-      await createCustomer({ id: uuid(), name: name.trim(), phone: phone.trim() || undefined, address: address.trim() || undefined, creditLimit: Math.max(0, Number(limit) || 0) });
+      // Queued and saved locally first, so registering a debtor is never lost to a dropped connection.
+      await enqueue(user.id, uuid(), "customer.upsert",
+        { customerId: id, name: cleanName, phone: normalized, address: address.trim() || undefined, creditLimit: limitValue },
+        {}, () => upsertLocalCustomer({ id, name: cleanName, phone: normalized, address: address.trim() || null, creditLimit: limitValue }),
+        new Date().toISOString());
       setAddOpen(false); setName(""); setPhone(""); setAddress(""); setLimit("0");
-      toast(t("credit.saved")); await syncNow(true); await load();
+      toast(t("credit.saved")); await load(); void syncNow();
     } catch (e: any) {
-      setError(e?.body?.message === "customer_phone_in_use" ? t("common.error") : t("common.error"));
+      const message = e?.body?.message ?? e?.message;
+      setError(typeof message === "string" && message === "customer_phone_in_use" ? t("credit.phoneExists") : t("common.error"));
     } finally { setBusy(false); }
   }
 
@@ -132,12 +148,13 @@ export default function Customers() {
       <Modal open={addOpen} onClose={() => setAddOpen(false)} title={t("credit.add")} footer={
         <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: space.sm }}>
           <Button kind="secondary" label={t("common.cancel")} onPress={() => setAddOpen(false)} />
-          <Button label={t("common.save")} loading={busy} disabled={name.trim().length < 2} onPress={() => void add()} />
+          <Button label={t("common.save")} loading={busy} disabled={name.trim().length < 2 || !phone.trim()} onPress={() => void add()} />
         </View>
       }>
         <View style={{ gap: space.md }}>
-          <Field label={t("credit.name")} value={name} onChangeText={setName} />
-          <Field label={t("credit.phone")} value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+          <Field label={t("credit.name")} required value={name} onChangeText={setName} placeholder={t("credit.namePlaceholder")} />
+          <Field label={t("credit.phone")} required value={phone} onChangeText={setPhone} keyboardType="phone-pad"
+            placeholder="078X XXX XXX" hint={t("credit.phoneHint")} />
           <Field label={t("credit.address")} value={address} onChangeText={setAddress} />
           <Field label={t("credit.limit")} value={limit} onChangeText={setLimit} keyboardType="number-pad"
             hint={user.role === "owner" ? undefined : t("offline.center.forbidden")} />

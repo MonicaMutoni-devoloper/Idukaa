@@ -10,6 +10,7 @@
 // Concurrency: writes are serialized with the Web Locks API when available and re-read the latest
 // state under the lock, so two tabs cannot clobber each other's queued operations. Other tabs are
 // notified through BroadcastChannel and drop their read cache.
+import { lineAmount } from "@sms/shared";
 import type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot } from "./local";
 
 export type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot };
@@ -333,6 +334,18 @@ export async function applyResults(results: { opId: string; status: string; mess
           if (cu && p.amount) cu.balance = Math.max(0, Number(cu.balance ?? 0)) + Math.max(0, Math.round(p.amount));
         } catch { /* malformed legacy payload must not block the verdict */ }
       }
+      // A refused credit sale never created a debt: take the optimistic balance back off once.
+      if ((r.status === "rejected" || r.status === "conflict") && row.type === "sale.create"
+        && row.status !== "rejected" && row.status !== "conflict") {
+        try {
+          const p = JSON.parse(row.payload) as { customerId?: string; amountPaid?: number; discount?: number; lines?: { qty: number; unitPrice: number }[] };
+          const credit = p.customerId && p.lines
+            ? p.lines.reduce((sum, l) => sum + lineAmount(l.qty, l.unitPrice), 0) - (p.discount ?? 0) - (p.amountPaid ?? 0)
+            : 0;
+          const cu = p.customerId ? s.customers.find((x) => x.id === p.customerId) : undefined;
+          if (cu && credit > 0) cu.balance = Math.max(0, Number(cu.balance ?? 0) - Math.round(credit));
+        } catch { /* malformed legacy payload must not block the verdict */ }
+      }
       row.status = (r.status === "applied" || r.status === "duplicate" ? "synced" : r.status) as OutboxStatus;
       row.message = r.message ?? null;
       row.deltas = "{}";
@@ -408,6 +421,32 @@ export async function applyLocalCreditPayment(customerId: string, amount: number
   await mutate((s) => {
     const cu = s.customers.find((x) => x.id === customerId && (x.shop_id ?? null) === shop);
     if (cu) cu.balance = Math.max(0, Number(cu.balance ?? 0) - Math.max(0, Math.round(amount)));
+  });
+}
+
+/** Apply a queued credit sale optimistically, so the next sale sees the debt this one created. */
+export async function applyLocalCreditSale(customerId: string, amount: number) {
+  const shop = (await readState()).kv["local.shop"] ?? null;
+  await mutate((s) => {
+    const cu = s.customers.find((x) => x.id === customerId && (x.shop_id ?? null) === shop);
+    if (cu) cu.balance = Math.max(0, Number(cu.balance ?? 0) + Math.max(0, Math.round(amount)));
+  });
+}
+
+/** Store a customer captured at the counter before the operation that creates it has synced. */
+export async function upsertLocalCustomer(c: {
+  id: string; name: string; phone: string; address?: string | null; creditLimit?: number;
+}) {
+  const shop = (await readState()).kv["local.shop"] ?? null;
+  await mutate((s) => {
+    const row: WebCustomer = {
+      id: c.id, shop_id: shop, name: c.name, phone: c.phone, address: c.address ?? null, notes: null,
+      credit_limit: Math.max(0, Math.round(c.creditLimit ?? 0)), status: "active",
+      updated_at: new Date().toISOString(), balance: 0, overdue: 0,
+    };
+    const ex = s.customers.find((x) => x.id === c.id);
+    if (ex) Object.assign(ex, { name: row.name, phone: row.phone, address: row.address, credit_limit: row.credit_limit, updated_at: row.updated_at });
+    else s.customers.push(row);
   });
 }
 
