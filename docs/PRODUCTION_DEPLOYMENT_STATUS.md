@@ -972,3 +972,21 @@ never sends it shows nothing rather than a false "ready".
 
 **Still unverified:** iOS Safari/WebKit — including whether it delivers the worker's progress messages
 during install; on WebKit the install may simply appear without the banner.
+
+## 16. Install no longer re-downloads the launch bundle (16 Nov 2026) — `f974888`
+
+§15's install fetched every file with `cache: "reload"`, so the ~1.6 MB `entry`/`__common` bundles were
+downloaded a second time immediately after the page had fetched them; only ~0.4 MB (35 screen chunks)
+is actually new work. v9 lets content-hashed files come from the browser's HTTP cache and keeps the
+forced network fetch for `index.html`, `sw-assets.json`, the manifest and the icons.
+
+| Check | Result |
+|---|---|
+| Local export with the same cache headers Vercel sends (`immutable` for hashed files, `must-revalidate` otherwise) | install completes with **61 entries in ~0.5–0.6 s** on both a 20 Mbps/150 ms and a 1.5 Mbps/60 ms profile — the bytes are no longer on the wire |
+| Same harness before this commit, but serving everything `no-cache` (i.e. a cold HTTP cache, which is what §15's 4.3 s / 13.4 s numbers measured) | 2.3 s / 12.2 s — kept for comparison, not a production figure |
+| Live origin, fresh profile, 150 ms / 20 Mbps | worker `idukaa-shell-v9`, 61 progress messages, banner *Saving the app for offline use* → *Ready offline*, 61 cached, Sell chunk served offline (**200**, 35,836 bytes) |
+| Tests | `tsc --noEmit` exit 0; `test:pwa` 4 pass (pins v9 and the hashed-vs-unhashed cache rule) |
+
+**Measured limitation:** the live span (12.3 s for v8, 14.9 s for v9) is dominated by the page's own
+boot competing for the main thread while it waits on the API, so it does not isolate the worker's
+install. The local figures above use production-equivalent cache headers and are the ones quoted.
