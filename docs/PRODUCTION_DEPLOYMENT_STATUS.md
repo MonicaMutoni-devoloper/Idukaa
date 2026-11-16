@@ -1012,3 +1012,26 @@ already complete sees nothing; a stalled install stops the banner instead of cou
 
 **Still unverified:** iOS Safari itself. The mechanism no longer depends on anything WebKit is known to
 drop, but the banner's appearance on a real iPhone is still unconfirmed from here.
+
+## 18. Interrupted installs resume (16 Nov 2026) — `4738d0d`
+
+Closing the app while it was saving the 59 files left the saved ones in the cache, but the next launch
+walked the whole list again. v11 skips a content-hashed file that is already in the shell cache, so a
+later launch carries on from where the last one stopped. Unhashed files (`/`, `/index.html`,
+`sw-assets.json`, the manifest, the icons) are still fetched every time, so a redeploy cannot leave a
+stale shell behind, and a redeploy's new hashes are new URLs and are not skipped.
+
+Verified locally with a real interruption — a minimal page registering only the worker, Chrome's whole
+process tree killed (`taskkill /F /T`) part-way through, then the same profile reopened:
+
+| Check | Result |
+|---|---|
+| First launch | 27 hashed files fetched, 28 entries in `idukaa-shell-v11` when the browser was killed |
+| Second launch, same profile, HTTP cache cleared and disabled for the page | install completed all 59 files with **8 network fetches**; banner and "Ready offline" shown; the rest of the set was already saved by the interrupted pass |
+| Live origin, fresh profile | worker `idukaa-shell-v11`, manifest naming the same cache, 61 entries, banner *Saving the app for offline use* → *Ready offline*, Sell chunk served offline (**200**, 35,836 bytes) |
+| Tests | `tsc --noEmit` exit 0; `test:pwa` 4 pass (pins the skip rule: a saved hashed file is not downloaded twice) |
+
+**Measurement caveat:** a worker's own fetches may still be answered by Chrome's HTTP cache even when
+the page's cache is disabled, so the network count is a lower bound on the work avoided; the
+authoritative evidence is that the second launch finished the set from a partial cache with a
+single-digit number of downloads.
