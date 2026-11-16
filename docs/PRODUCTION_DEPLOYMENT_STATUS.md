@@ -990,3 +990,25 @@ forced network fetch for `index.html`, `sw-assets.json`, the manifest and the ic
 **Measured limitation:** the live span (12.3 s for v8, 14.9 s for v9) is dominated by the page's own
 boot competing for the main thread while it waits on the API, so it does not isolate the worker's
 install. The local figures above use production-equivalent cache headers and are the ones quoted.
+
+## 17. Install progress without worker messages (16 Nov 2026) — `d503df4`
+
+§15's banner was driven by the worker posting `idukaa-precache` progress. Chromium delivers that;
+WebKit does not reliably deliver a message from an installing worker to the page, so an iPhone could
+still show nothing while it saved the app. v10 removes that dependency: the build writes the shell
+cache name into `/sw-assets.json`, and the app counts that cache's entries against the file list
+(`src/services/precache-status.ts` + `precache-progress.ts`). The worker no longer posts anything.
+
+The count is honest by construction: no manifest → no banner; a returning visitor whose cache is
+already complete sees nothing; a stalled install stops the banner instead of counting for ever
+(30 s to wait for a first registration, then it gives up quietly).
+
+| Check | Result |
+|---|---|
+| Local export (production cache headers), fresh profile | banner at **2.5 s**, counter observed as **27 / 59**, then **Ready offline**; 61 entries cached; Sell chunk served offline (**200**, 35,836 bytes) |
+| Live origin, fresh profile | worker `idukaa-shell-v10`, `sw-assets.json` names `idukaa-shell-v10`, banner at **7.2 s**, then **Ready offline**; 60 entries cached; Sell chunk served offline (**200**, 35,836 bytes) |
+| Worker messages | none — `tests/pwa.test.mts` asserts the worker sends no `postMessage`, so progress cannot silently regress to a Chromium-only path |
+| Tests | `tsc --noEmit` exit 0; `test:pwa` 4 pass (pins v10, the cache-aware fetch rule and the manifest/progress parsers) |
+
+**Still unverified:** iOS Safari itself. The mechanism no longer depends on anything WebKit is known to
+drop, but the banner's appearance on a real iPhone is still unconfirmed from here.
