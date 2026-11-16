@@ -80,10 +80,17 @@ Reports read this device first and the API second.
   enough for the installed app to cold-start with the network off. That list matters because the web build emits one script per screen: a worker that saved only
   the launch bundles could open the start screen and nothing else, so Sell or Reports stayed blank
   on a phone that had never opened them online. Saving held response bodies concurrently stalls
-  Chromium's install event indefinitely, which is why the downloads are sequential, and why
+  Chromium's install event indefinitely, which is why the downloads are stored as they arrive and why
   `tests/pwa.test.mts` pins that shape. Asset lookups ignore `Vary` so a proxy header difference (for
   example Safari's `Accept-Encoding`) cannot miss the saved copy, and a failed asset request falls
   back to the shell cache instead of failing the launch.
+- **Install progress:** the worker posts `{ type: "idukaa-precache", done, total }` while it saves the
+  files, and the app root shows *Saving the app for offline use — 12 / 59* until every file is stored,
+  then a brief *Ready offline*. Only the worker drives that banner: a browser that never sends the
+  message shows nothing rather than a guessed "ready". Fetching six files at a time instead of one
+  measured 4.3 s → 2.3 s at 150 ms latency; on a bandwidth-bound link the bytes dominate and the gain
+  is small. Copying unchanged files out of the previous cache was tried and rejected — 12.1 s against
+  a 2.6 s download.
 - **Install:** Settings shows an install card. When Chrome fires `beforeinstallprompt` the button
   opens the native prompt; otherwise the card explains the real Chrome/Edge menu path and the iOS
   Share → Add to Home Screen path. The `beforeinstallprompt` listener starts at the app root, so an
