@@ -334,7 +334,16 @@ export function Loading({ label }: { label?: string }) {
 
 export function ErrorState({ onRetry, text }: { onRetry?: () => void; text?: string }) {
   const t = useT(); const c = useTheme();
-  return <Card tone="danger" style={{ gap: space.md }}><Text style={{ color: c.danger, fontSize: 14 }}>{text ?? t("common.error")}</Text>{onRetry ? <Button kind="secondary" label={t("common.retry")} onPress={onRetry} /> : null}</Card>;
+  // A screen that failed because the phone has no network is not an error the user can "try again"
+  // into; saying "Something went wrong" there (on every screen) is what made an offline app look
+  // broken. Offline gets its own wording, and the retry button stays for when the network returns.
+  const online = useSync((s) => s.online);
+  return <Card tone={online ? "danger" : "warn"} style={{ gap: space.md }}>
+    <Text style={{ color: online ? c.danger : c.inkSoft, fontSize: 14 }}>
+      {text ?? (online ? t("common.error") : t("offline.offlineNotice"))}
+    </Text>
+    {onRetry ? <Button kind="secondary" label={t("common.retry")} onPress={onRetry} /> : null}
+  </Card>;
 }
 
 /* ------------------------------------------------------------------ toast + dialog */

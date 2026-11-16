@@ -415,6 +415,7 @@ export const en = {
   "offline.title": "Offline data",
   "offline.help": "Save this month, this year and older months back to when your shop started on this device. Products and stock also sync automatically.",
   "offline.ready": "Ready offline", "offline.partialBadge": "Partial",
+  "offline.offlineNotice": "You are offline. This page needs a connection the first time; anything saved on this device still works.",
   "shell.savingTitle": "Saving the app for offline use",
   "shell.savingHint": "keep this open until it finishes — every screen then opens without internet.",
   "shell.readyText": "Every screen now opens without internet.",

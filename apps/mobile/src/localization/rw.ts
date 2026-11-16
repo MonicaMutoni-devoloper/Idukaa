@@ -425,6 +425,7 @@ export const rw: Record<Key, string> = {
   "offline.title": "Amakuru yo gukoresha nta nterineti",
   "offline.help": "Bika incamake, ububiko, ibicuruzwa, ibyaguzwe, amafaranga yakoreshejwe na raporo z'uku kwezi, uyu mwaka n'amezi ashaje kuva iduka ryawe ryafunguwe kuri iki gikoresho. Ibicuruzwa n'ububiko bihuzwa byonyine.",
   "offline.ready": "Byiteguye nta nterineti", "offline.partialBadge": "Igice",
+  "offline.offlineNotice": "Nta nterineti ufite. Iyi paji isaba interineti bwa mbere; ibyabitswe kuri iki gikoresho bikomeza gukora.",
   "shell.savingTitle": "Turabika porogaramu kugira ngo ikoreshe nta nterineti",
   "shell.savingHint": "gumana iyi paji ifunguye kugeza birangiye — amapaji yose azahita afunguka nta nterineti.",
   "shell.readyText": "Amapaji yose ashobora gufunguka nta nterineti.",
