@@ -9,7 +9,12 @@
 // because WebKit can repeat a request with different headers and miss its own shell. Bumping the
 // cache removes the old shell on activate, so an installed app cannot keep opening an outdated name,
 // theme or set of screens.
-const CACHE = "idukaa-shell-v7";
+// v8: every ~60 files used to be downloaded one after another, so the first visit took the whole
+// round-trip time of each file before the app was offline-ready. A few are fetched at once now, each
+// body stored as soon as it arrives, and the worker posts its progress so the app can show how much
+// of the app is saved — the visit can be ended early otherwise, and an interrupted install leaves
+// screens unsaved.
+const CACHE = "idukaa-shell-v8";
 const SHELL = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png"];
 // Written next to the export by scripts/write-sw-manifest.mjs: every file, not only the launch ones.
 const MANIFEST = "/sw-assets.json";
@@ -17,6 +22,11 @@ const MANIFEST = "/sw-assets.json";
 // Wi-Fi is connected but has no internet keeps the request open until the platform gives up, which
 // made an installed app sit on a blank screen for many seconds before the cached shell appeared.
 const NAV_TIMEOUT_MS = 3000;
+// Files fetched at the same time during install. Enough to hide the round-trip latency without
+// opening the dozens of parallel requests that made the install event stall.
+const PRECACHE_CONCURRENCY = 6;
+// The window tells the app how much is saved: { type: "idukaa-precache", done, total }.
+const PROGRESS_TYPE = "idukaa-precache";
 
 // Every REST prefix used by the API. A response from any of these is always fetched live.
 const API_PREFIXES = ["/auth", "/sync", "/reports", "/notifications", "/audit", "/sales", "/purchases", "/shop", "/admin", "/health"];
@@ -50,9 +60,11 @@ async function launchAssets(html) {
 }
 
 /**
- * Download one asset and store it immediately. Deliberately sequential: holding several unread
- * response bodies at once stalls the install event in Chromium, which left the worker stuck in
- * "installing" for ever — and an app that never finishes installing has no shell offline.
+ * Download one asset and store it immediately. The body is consumed by `put` before the next slot is
+ * taken: holding several unread response bodies at once stalls the install event in Chromium, which
+ * left the worker stuck in "installing" for ever — and an app that never finishes installing has no
+ * shell offline. (Copying unchanged files out of the previous cache instead of downloading them was
+ * measured here at 12.1 s against a 2.6 s download, so a plain fetch is what this does.)
  */
 async function fetchAndSave(c, key) {
   try {
@@ -64,9 +76,29 @@ async function fetchAndSave(c, key) {
   }
 }
 
+/** Run `work` over `items` with at most `limit` in flight; each call is awaited before its slot is reused. */
+async function pool(items, limit, work) {
+  let next = 0;
+  const run = async () => {
+    while (next < items.length) {
+      const index = next++;
+      await work(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+}
+
+/** Tell any open window how much of the app is saved, so the visit can be ended when it is done. */
+async function reportProgress(done, total) {
+  try {
+    const windows = await self.clients.matchAll({ includeUncontrolled: true, type: "window" });
+    for (const client of windows) client.postMessage({ type: PROGRESS_TYPE, done, total });
+  } catch { /* a tab that cannot be reached must not fail the install */ }
+}
+
 /**
- * Every file the export produced, in the order the build listed them. Sequential for the same reason
- * as `fetchAndSave`: concurrent downloads holding unread bodies stall the install event.
+ * Every file the export produced, in the order the build listed them, a few at a time. The count is
+ * posted as it goes: this is the pass that makes screens that were never opened usable offline.
  */
 async function precacheManifest(c) {
   try {
@@ -74,10 +106,16 @@ async function precacheManifest(c) {
     if (!res.ok) return;
     const body = await res.json();
     const list = Array.isArray(body?.assets) ? body.assets : [];
-    for (const url of list) {
-      if (typeof url !== "string" || !url.startsWith("/")) continue;
-      await fetchAndSave(c, cacheKeyOf(url));
-    }
+    const urls = [...new Set(list.filter((url) => typeof url === "string" && url.startsWith("/")).map(cacheKeyOf))];
+    if (!urls.length) return;
+    let done = 0;
+    await reportProgress(0, urls.length);
+    await pool(urls, PRECACHE_CONCURRENCY, async (url) => {
+      await fetchAndSave(c, url);
+      done += 1;
+      await reportProgress(done, urls.length);
+    });
+    await reportProgress(urls.length, urls.length);
   } catch { /* a missing manifest must not make the installation unusable */ }
 }
 

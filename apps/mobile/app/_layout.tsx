@@ -6,6 +6,7 @@ import * as Crypto from "expo-crypto";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useSession } from "../src/services/api";
 import { usePwaInstall } from "../src/services/pwa-install";
+import { usePrecacheProgress } from "../src/services/precache-progress";
 import { initDb, kvGet, kvSet } from "../src/database";
 import { refreshCounts, startSyncEngine, syncNow } from "../src/synchronization/engine";
 import { Banner, Button, Toaster } from "../src/components/ui";
@@ -31,6 +32,10 @@ export default function Root() {
   const introPreview = useRef(false);
   // Listen from the first paint: Chrome can offer installation before Settings is ever opened.
   useEffect(() => { usePwaInstall.getState().start(); }, []);
+  // The worker reports how much of the app it has saved; a first visit can then say when the app is
+  // safe to close and open without internet.
+  useEffect(() => { usePrecacheProgress.getState().start(); }, []);
+  const precache = usePrecacheProgress((s) => s.progress);
   const [updateReady, setUpdateReady] = useState(false);
   const token = useSession((s) => s.token);
   const c = useTheme();
@@ -111,13 +116,23 @@ export default function Root() {
           <ActivityIndicator size="large" color={c.primary} />
         </View>
       )}
-      {updateReady ? (
-        /* Never reloads on its own: mid-entry work (a sale, a form) must not be interrupted. */
+      {precache || updateReady ? (
         <View pointerEvents="box-none" style={{ position: "absolute", top: insets.top + space.md, left: 0, right: 0, alignItems: "center", paddingHorizontal: space.lg }}>
-          <View style={{ width: "100%", maxWidth: 520 }}>
-            <Banner tone="ok" title={t("update.title")} text={t("update.text")}
-              action={<Button size="sm" kind="secondary" label={t("update.action")}
-                onPress={() => { const l = (globalThis as any).location; if (l?.reload) l.reload(); }} />} />
+          <View style={{ width: "100%", maxWidth: 520, gap: space.sm }}>
+            {precache ? (
+              /* Only the worker can report this, so it never claims "ready" on a guess. */
+              <Banner tone="ok"
+                title={precache.done >= precache.total ? t("offline.ready") : t("shell.savingTitle")}
+                text={precache.done >= precache.total
+                  ? t("shell.readyText")
+                  : `${precache.done} / ${precache.total} · ${t("shell.savingHint")}`} />
+            ) : null}
+            {updateReady ? (
+              /* Never reloads on its own: mid-entry work (a sale, a form) must not be interrupted. */
+              <Banner tone="ok" title={t("update.title")} text={t("update.text")}
+                action={<Button size="sm" kind="secondary" label={t("update.action")}
+                  onPress={() => { const l = (globalThis as any).location; if (l?.reload) l.reload(); }} />} />
+            ) : null}
           </View>
         </View>
       ) : null}
