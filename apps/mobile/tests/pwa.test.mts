@@ -35,7 +35,7 @@ test("Idukaa manifest is installable and correctly branded", () => {
 
 test("the service worker caches only the shell and never API responses", () => {
   const sw = read("public/sw.js");
-  assert.match(sw, /const CACHE = "idukaa-shell-v10"/);
+  assert.match(sw, /const CACHE = "idukaa-shell-v11"/);
   assert.match(sw, /"\/manifest\.json"/);
   assert.match(sw, /"\/icon-maskable-512\.png"/);
   // One online visit must be enough: install saves the bundle the exported launch page names, and
@@ -54,8 +54,11 @@ test("the service worker caches only the shell and never API responses", () => {
   // Bodies must be stored as they arrive, never held unread, or Chromium's install never finishes.
   assert.match(sw, /if \(res\.ok\) await c\.put\(cacheKeyOf\(key\), res\)/, "each body is stored immediately");
   // The launch bundle was being downloaded a second time; a hashed name cannot be stale.
-  assert.match(sw, /IMMUTABLE_ASSET\.test\(cacheKeyOf\(key\)\) \? "default" : "reload"/,
+  assert.match(sw, /cache: hashed \? "default" : "reload"/,
     "hashed assets may come from the HTTP cache, unhashed ones may not");
+  // An install cut short must resume, not start the whole list again.
+  assert.match(sw, /if \(hashed && \(await saved\(key\)\)\) return true;/,
+    "a saved hashed file must not be downloaded a second time");
   assert.match(sw, /ignoreVary: true/, "a saved asset must be found again even if Vary differs");
   assert.match(sw, /const fallback = await saved\(url\.pathname\)/, "a failed asset fetch must fall back to the saved copy");
   for (const prefix of ["/auth", "/sync", "/reports", "/sales", "/purchases"]) {

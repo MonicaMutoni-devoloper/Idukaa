@@ -19,7 +19,11 @@
 // those are allowed to come from the browser's cache and only the unhashed files force a re-fetch.
 // v10: the app reads `cache` from /sw-assets.json and counts saved entries itself, instead of relying
 // on this worker's progress messages, which WebKit does not reliably deliver during install.
-const CACHE = "idukaa-shell-v10";
+// v11: an install cut short (app closed, phone locked) left its saved files behind but started the
+// whole list again next launch. A hash-named file already in the cache is skipped, so the next launch
+// resumes where the last one stopped; unhashed files are always re-fetched so a redeploy cannot leave
+// a stale index.html or manifest behind.
+const CACHE = "idukaa-shell-v11";
 const SHELL = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png"];
 // Written next to the export by scripts/write-sw-manifest.mjs: every file, not only the launch ones.
 const MANIFEST = "/sw-assets.json";
@@ -75,10 +79,14 @@ async function launchAssets(html) {
  */
 async function fetchAndSave(c, key) {
   try {
+    const hashed = IMMUTABLE_ASSET.test(cacheKeyOf(key));
+    // A hashed file already saved by an earlier, interrupted pass of this same install is finished
+    // work: skipping it is what makes the next launch resume instead of starting a full pass again.
+    if (hashed && (await saved(key))) return true;
     // Hashed assets may be served from the HTTP cache: the browser already has the launch bundle by
     // the time install runs, so this avoids downloading it twice. Unhashed files (index.html,
     // sw-assets.json, the manifest, the icons) always come from the network.
-    const res = await fetch(key, { cache: IMMUTABLE_ASSET.test(cacheKeyOf(key)) ? "default" : "reload" });
+    const res = await fetch(key, { cache: hashed ? "default" : "reload" });
     if (res.ok) await c.put(cacheKeyOf(key), res);
     return res.ok;
   } catch {
