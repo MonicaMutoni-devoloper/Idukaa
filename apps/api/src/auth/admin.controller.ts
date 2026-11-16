@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { audit } from "../audits/audit";
+import { EmailVerificationService } from "./email-verification.service";
 
 const NewUser = z.object({ email: z.string().email(), fullName: z.string().min(1).max(120), role: z.enum(["owner", "manager"]), shopId: z.string().uuid(), password: z.string().min(10).max(200) });
 /** Every admin list is bounded and searchable: no endpoint ever returns an unbounded table. */
@@ -21,7 +22,7 @@ const Reason = z.object({ reason: z.string().trim().min(3).max(500) });
  */
 @Controller("admin") @Roles("system_admin")
 export class AdminController {
-  constructor(private db: Db) {}
+  constructor(private db: Db, private verification: EmailVerificationService) {}
 
   /* ------------------------------------------------------------------ accounts */
 
@@ -41,7 +42,10 @@ export class AdminController {
   @Post("users") async create(@Me() u: AuthUser, @Body() b: unknown) {
     const n = NewUser.parse(b); const hash = await bcrypt.hash(n.password, 12);
     const [r] = await this.db.query("INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,$3,$4,$5) RETURNING id", [n.shopId, n.email, n.fullName, hash, n.role]);
-    await audit(this.db.pool, { shopId: n.shopId, actorId: u.id, action: "admin.user.create", entity: "user", entityId: r.id, newValue: { email: n.email, role: n.role } }); return r;
+    await audit(this.db.pool, { shopId: n.shopId, actorId: u.id, action: "admin.user.create", entity: "user", entityId: r.id, newValue: { email: n.email, role: n.role } });
+    // Same rule as every other account: the address proves itself before it can sign in.
+    void this.verification.issue(r.id, n.email, n.fullName).catch(() => undefined);
+    return r;
   }
 
   /** Revocation (lost/stolen device or leaver): bumps token_version so every issued token dies on its next request. */

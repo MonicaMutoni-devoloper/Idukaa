@@ -99,7 +99,7 @@ before(async () => {
 
   // The system administrator exists before onboarding (platform staff, no shop).
   await pool.query(
-    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES (NULL,$1,'Platform Admin',$2,'system_admin')",
+    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), NULL,$1,'Platform Admin',$2,'system_admin')",
     [ADMIN_EMAIL, await bcrypt.hash(PASSWORD, 4)],
   );
 
@@ -264,6 +264,11 @@ test("activation: token-gated, server-side password policy, single use, then sig
     "SELECT u.password_hash FROM owner_applications a JOIN users u ON u.id=a.user_id WHERE a.id=$1", [app1])).rows[0].password_hash),
     true, "the placeholder hash is replaced by the applicant's own password");
 
+  // Activation also posts the confirmation link, so the address is unproven until it is clicked.
+  // This suite marks it confirmed rather than spending one of its throttled sign-in slots on the
+  // refusal; email-verification.integration.test.ts asserts that refusal over real HTTP.
+  await pool.query("UPDATE users SET email_verified_at=now() WHERE lower(email)=lower($1)", [OWNER_EMAIL]);
+
   // And the new owner can actually sign in.
   const owner = await auth(OWNER_EMAIL);
   assert.equal(owner.user.role, "owner");
@@ -369,6 +374,9 @@ test("manager invitation: invite, preview, accept, sign in — all token-gated",
 
   // Single use: the link cannot be accepted twice.
   assert.equal((await call("POST", "/staff-invitations/accept", { token, password: PASSWORD })).status, 400);
+
+  // The invited manager's address is confirmed by clicking its link (see the note at activation).
+  await pool.query("UPDATE users SET email_verified_at=now() WHERE lower(email)=lower($1)", [MGR_EMAIL]);
 
   const mgr = await auth(MGR_EMAIL);
   assert.equal(mgr.user.role, "manager");

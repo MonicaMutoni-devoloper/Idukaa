@@ -6,6 +6,9 @@ import { randomUUID } from "node:crypto";
 import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
 import { NotificationService } from "../notifications/notifications.service";
+import { MailService } from "../mail/mail.service";
+import { passwordResetEmail } from "../mail/templates";
+import { appWebBase, EmailVerificationService } from "./email-verification.service";
 import {
   decryptSecret, encryptSecret, generateRecoveryCodes, hashRecoveryCode, hashToken, isEncryptionConfigured,
   looksLikeRecoveryCode, newChallengeToken, newOpaqueToken, newTotpSecret, otpauthUri, passwordSchema,
@@ -47,7 +50,7 @@ const refreshGraceSeconds = () => {
   return Number.isFinite(n) && n >= 0 && n <= 300 ? n : 120;
 };
 const resetUrl = (token: string) => {
-  const base = (process.env.PASSWORD_RESET_URL ?? "http://localhost:8081/reset-password").split("?")[0]!;
+  const base = (process.env.PASSWORD_RESET_URL ?? `${appWebBase()}/reset-password`).split("?")[0]!;
   return `${base}?token=${encodeURIComponent(token)}`;
 };
 
@@ -59,7 +62,13 @@ const sessionUser = (u: any): SessionUser => ({ id: u.id, name: u.full_name, rol
  */
 @Injectable()
 export class AuthService {
-  constructor(private db: Db, private jwt: JwtService, private notifications: NotificationService) {}
+  constructor(
+    private db: Db,
+    private jwt: JwtService,
+    private notifications: NotificationService,
+    private verification: EmailVerificationService,
+    private mail: MailService,
+  ) {}
 
   /* ------------------------------------------------------------------ sessions */
 
@@ -138,6 +147,18 @@ export class AuthService {
         await audit(this.db.pool, { shopId: u.shop_id, actorId: u.id, action: "auth.login.blocked", entity: "user", entityId: u.id, newValue: { reason: "shop_suspended" } });
         throw new ForbiddenException("shop_suspended");
       }
+    }
+
+    // The address has to have been proven before the account may be used, and this is checked after
+    // the suspension states so a suspended shop is not sent to look in an inbox it no longer uses.
+    // EMAIL_VERIFICATION_REQUIRED=false turns the gate off for an operator whose mailbox broke.
+    // The column is absent only when this build runs against a database whose migration has not been
+    // applied yet. Then nobody is refused: a schema that lags the code must never lock every shop
+    // out, and the boot sequence migrates before the port opens anyway.
+    const unverified = Object.prototype.hasOwnProperty.call(u, "email_verified_at") && !u.email_verified_at;
+    if (this.verification.required() && unverified) {
+      await audit(this.db.pool, { shopId: u.shop_id, actorId: u.id, action: "auth.login.blocked", entity: "user", entityId: u.id, newValue: { reason: "email_unverified" } });
+      throw new ForbiddenException("email_not_verified");
     }
 
     if (u.totp_enabled_at) {
@@ -313,9 +334,18 @@ export class AuthService {
   /* ------------------------------------------------------------------ password reset */
 
   async requestPasswordReset(email: string, ip: string | null) {
-    const [u] = await this.db.query("SELECT id, shop_id, full_name FROM users WHERE lower(email)=lower($1) AND active=true", [email]);
+    const [u] = await this.db.query(
+      "SELECT id, shop_id, full_name, email, email_verified_at FROM users WHERE lower(email)=lower($1) AND active=true", [email]);
     // Always the same answer: a request never reveals whether an account exists.
     if (!u) return { ok: true as const };
+
+    // An unverified address cannot reset a password: nobody has shown it can receive mail yet, and
+    // sending a reset link would be exactly the proof the gate exists to require. It gets the link
+    // that matters instead, and asking for a reset after confirming works normally.
+    if (this.verification.required() && !u.email_verified_at) {
+      await this.verification.issue(u.id, u.email, u.full_name, ip);
+      return { ok: true as const };
+    }
 
     const token = newOpaqueToken();
     const expiresAt = new Date(Date.now() + resetTtlMinutes() * 60_000);
@@ -330,6 +360,14 @@ export class AuthService {
     await audit(this.db.pool, { shopId: u.shop_id, actorId: u.id, action: "auth.password.reset.request", entity: "user", entityId: u.id });
     await this.notifications.security(u.id, u.shop_id, "password_reset_requested");
 
+    // Delivered to the address on the account, never to anything the caller supplied: the form is
+    // public, so the recipient has to come from the row that was matched.
+    const delivered = await this.mail.send({
+      to: u.email, ...passwordResetEmail({ name: u.full_name, url: resetUrl(token), minutes: resetTtlMinutes() }),
+    });
+    await audit(this.db.pool, { shopId: u.shop_id, actorId: u.id, action: "auth.password.reset.sent", entity: "user", entityId: u.id,
+      newValue: { delivered: delivered.sent, reason: delivered.error ?? null } });
+
     if (devResetEnabled()) {
       // Development/test only: the token is returned so the flow is usable without an e-mail provider.
       console.info(`[dev] password reset link for ${email}: ${resetUrl(token)}`);
@@ -337,6 +375,12 @@ export class AuthService {
     }
     return { ok: true as const };
   }
+
+  /* ------------------------------------------------------------------ e-mail verification */
+
+  verifyEmail(token: string, ip: string | null) { return this.verification.verify(token, ip); }
+
+  resendVerification(email: string, ip: string | null) { return this.verification.resend(email, ip); }
 
   async verifyResetToken(token: string) {
     if (!token) return { valid: false };
@@ -361,8 +405,9 @@ export class AuthService {
       if (!claim.rowCount) throw new BadRequestException("reset_token_invalid");
       userId = claim.rows[0].user_id;
       const upd = await c.query(
-        "UPDATE users SET password_hash=$2, token_version=token_version+1 WHERE id=$1 AND active=true RETURNING shop_id",
-        [userId, hash],
+        `UPDATE users SET password_hash=$2, token_version=token_version+1,
+           email_verified_at=coalesce(email_verified_at, now())
+         WHERE id=$1 AND active=true RETURNING shop_id`, [userId, hash],
       );
       if (!upd.rowCount) throw new BadRequestException("reset_token_invalid");
       shopId = upd.rows[0].shop_id;

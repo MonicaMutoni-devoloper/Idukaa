@@ -100,12 +100,12 @@ before(async () => {
 
   // The system administrator (decides) and a shop manager (must not) exist before onboarding.
   await pool.query(
-    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES (NULL,$1,'Platform Admin',$2,'system_admin')",
+    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), NULL,$1,'Platform Admin',$2,'system_admin')",
     [ADMIN_EMAIL, await bcrypt.hash(PASSWORD, 4)],
   );
   const { rows: [shop] } = await pool.query("INSERT INTO shops(name) VALUES ('Existing Shop') RETURNING id");
   await pool.query(
-    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,'Tina Manager',$3,'manager')",
+    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,'Tina Manager',$3,'manager')",
     [shop.id, MGR_EMAIL, await bcrypt.hash(PASSWORD, 4)],
   );
 
@@ -200,6 +200,11 @@ test("approval activates the owner account and the proposed shop", { skip }, asy
 
   // The decision is terminal: a second approval is refused.
   assert.equal((await call("POST", `/admin/applications/${pendingAppId}/approve`, {}, admin.token)).status, 409);
+
+  // Approval creates a usable account, but the address is unproven until its confirmation link is
+  // clicked. The refusal itself is asserted in email-verification.integration.test.ts (this suite's
+  // sign-in budget is already spent); here the click is simulated so the rest of the flow runs.
+  await pool.query("UPDATE users SET email_verified_at=now() WHERE lower(email)=lower($1)", [PENDING_EMAIL]);
 
   // The approved owner signs in with the registration password and reaches their own shop.
   const owner = await auth(PENDING_EMAIL);

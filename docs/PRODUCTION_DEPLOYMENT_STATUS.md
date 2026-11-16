@@ -1089,3 +1089,76 @@ Two distinct causes:
 **Unverified:** the signed-in screens themselves (no production credentials here). The merge logic is
 covered by tests; whether the phone has picked up the new bundle is visible on-device as the
 "Saving the app for offline use" banner followed by "Ready offline".
+
+---
+
+## 21. Real e-mail: confirmation before sign-in, delivered password resets (16 Nov 2026)
+
+Asked for: sign in with a real e-mail address, recover a forgotten password by e-mail, and only allow
+an address that really exists. The reset flow (token, expiry, single use, `reset-password` screen) was
+already built; **nothing was ever sent** — `requestPasswordReset` logged the link and returned it in
+dev mode only. "The address exists" was never checked at all.
+
+### What decides "it really exists"
+
+Only the ability to read mail sent to that address. Syntax checks accept dead mailboxes and MX lookups
+accept catch-all domains, so neither is used. An account is allowed to sign in once a random,
+expiring, single-use link has been clicked:
+
+| Piece | Detail |
+|---|---|
+| Column | `users.email_verified_at` (migration `010_email_verification.sql`) |
+| Tokens | `email_verification_tokens`: SHA-256 hash only, one live link per user, 48 h default, single use, bound to the address it was issued for |
+| Gate | `AuthService.login` → `403 email_not_verified` (audited as `email_unverified`), checked after suspension states so a suspended shop is not sent to an inbox |
+| Resend | `POST /auth/email/resend`, 5/min, same `{ ok: true }` for unknown, confirmed and unconfirmed addresses |
+| Confirm | `POST /auth/email/verify` → `{ ok, email }`; a second click, an expired link and a link for a changed address are all `verification_token_invalid` |
+| Reset proves control | Completing a password reset sets `email_verified_at` — receiving that mail is the same proof |
+| Unverified + forgot password | The verification link is sent instead of a reset link (a reset cannot be completed from an address nobody has proven) |
+| Escape hatch | `EMAIL_VERIFICATION_REQUIRED=false` — an operator response to a broken mailbox, not a permanent setting |
+
+Accounts that already existed are backfilled as verified at their creation time, so this deploy
+cannot lock out a shop that is already trading. Every account created from now on must confirm.
+
+### Delivery
+
+`MAIL_SMTP_*` (Gmail app password by default) through `nodemailer`. Gmail-to-Gmail passes SPF/DKIM
+without owning a domain, which is the point: the alternative needs a domain and DNS records.
+Sending is best-effort by design — with no credentials, or with Gmail rejecting, the API still approves
+shops and still answers reset requests: the failure is logged (`MailService`, plus the boot warning
+`mail.not_configured`) and recorded in the audit log (`auth.email.verification.sent` and
+`auth.password.reset.sent` carry `delivered` and the reason) instead of throwing. Both templates (`src/mail/templates.ts`)
+carry the full link in the text part, so the message is usable with images and buttons stripped.
+
+### Setup on the server (exact)
+
+1. Google Account for the sending mailbox → Security → 2-Step Verification → **App passwords** →
+   create one for "Mail". The 16 characters are `MAIL_SMTP_PASS`; `MAIL_SMTP_USER` is the full address.
+2. Render → the API service → Environment:
+   `MAIL_SMTP_HOST=smtp.gmail.com`, `MAIL_SMTP_PORT=465`, `MAIL_SMTP_USER=<mailbox>`,
+   `MAIL_SMTP_PASS=<app password>`, `MAIL_FROM_NAME=Idukaa`,
+   `APP_WEB_URL=https://idukaa-api.vercel.app`, `EMAIL_VERIFICATION_REQUIRED=true`.
+3. `APP_WEB_URL` is not optional: without it, links point at `http://localhost:8081`. The API warns at
+   boot (`mail.link_base_missing`) instead of failing silently.
+4. Gmail allows roughly 500 recipients/day. That is far above onboarding volume; if it is ever
+   exceeded, move to a transactional provider by changing only `MAIL_SMTP_HOST`/credentials.
+
+### Client
+
+`app/verify-email.tsx` (new) handles the link and the resend form; the sign-in screen maps
+`email_not_verified` to a named message plus a "Send the confirmation link again" button that routes
+there with the address prefilled. Registration and staff-invitation success texts now say the address
+must be confirmed first. Keys exist in English and Kinyarwanda (`verify.*`, `login.emailUnverified`,
+`login.confirmEmail`).
+
+| Check | Result |
+|---|---|
+| API typecheck | `tsc --noEmit` exit 0 |
+| API tests (no DB here) | 32 pass, 0 fail, 103 skipped — every PostgreSQL suite skips without `TEST_DATABASE_URL` |
+| New integration suite | `tests/email-verification.integration.test.ts`: gate refuses and audits, resend has no account oracle, link confirms once and then signs in, expired/changed-address links refused, escape hatch honoured |
+| Fixtures | The 18 `INSERT INTO users(...)` rows in the API suites now set `email_verified_at=now()`; the two flows that create accounts (registration approval, activation, invitation accept) mark the address confirmed in-test and say why |
+| Mobile | `tsc --noEmit` exit 0; `test:i18n` 5 pass |
+
+**Unverified:** an actual Gmail delivery — no app password exists here, and no message can be sent
+from this machine. The integration suite runs in CI (`.github/workflows/ci.yml` provides PostgreSQL)
+but not locally; it was not executed during this change. The first real message should be checked on a
+phone before inviting shops: register a shop, approve it, and confirm the link arrives and signs in.

@@ -86,7 +86,7 @@ before(async () => {
 
   shopId = (await pool.query("INSERT INTO shops(name,status) VALUES ('Daily Credit Shop','active') RETURNING id")).rows[0].id;
   ownerId = (await pool.query(
-    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,'Owner',$3,'owner') RETURNING id",
+    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,'Owner',$3,'owner') RETURNING id",
     [shopId, OWNER, await bcrypt.hash(PASSWORD, 4)])).rows[0].id;
 
   // 1 kg loaf bought for 25,000 and sold for 35,000: gross profit must be exactly 10,000.

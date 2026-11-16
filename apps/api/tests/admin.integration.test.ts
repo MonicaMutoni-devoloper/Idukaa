@@ -66,16 +66,16 @@ before(async () => {
   for (const f of readdirSync(dir).filter((n) => n.endsWith(".sql")).sort()) await pool.query(readFileSync(join(dir, f), "utf8"));
 
   const hash = await bcrypt.hash(PASSWORD, 4);
-  await pool.query("INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES (NULL,$1,'Platform Admin',$2,'system_admin')", [ADMIN, hash]);
+  await pool.query("INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), NULL,$1,'Platform Admin',$2,'system_admin')", [ADMIN, hash]);
 
   const mkShop = async (name: string, ownerEmail: string, mgrEmail: string | null) => {
     const s = (await pool.query("INSERT INTO shops(name) VALUES ($1) RETURNING id", [name])).rows[0].id;
     const o = (await pool.query(
-      "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,'Shop Owner',$3,'owner') RETURNING id",
+      "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,'Shop Owner',$3,'owner') RETURNING id",
       [s, ownerEmail, hash])).rows[0].id;
     let m = "";
     if (mgrEmail) m = (await pool.query(
-      "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,'Shop Manager',$3,'manager') RETURNING id",
+      "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,'Shop Manager',$3,'manager') RETURNING id",
       [s, mgrEmail, hash])).rows[0].id;
     return { s, o, m };
   };

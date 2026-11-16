@@ -54,5 +54,16 @@ async function bootstrap() {
     log: (evt, data) => console.log(JSON.stringify({ t: new Date().toISOString(), evt, ...data })),
   });
   await app.listen(Number(process.env.PORT ?? 3000), "0.0.0.0");
+  // Two misconfigurations that are invisible until a real user is stuck: links that point at a
+  // developer's laptop, and a confirmation e-mail that was never sent. Both are warnings, not
+  // refusals — the API is still able to serve every other route.
+  if (!process.env.APP_WEB_URL && !process.env.PASSWORD_RESET_URL) {
+    console.warn(JSON.stringify({ t: new Date().toISOString(), evt: "mail.link_base_missing",
+      message: "APP_WEB_URL is unset: confirmation and reset links point at http://localhost:8081" }));
+  }
+  if (!process.env.MAIL_SMTP_USER || !process.env.MAIL_SMTP_PASS) {
+    console.warn(JSON.stringify({ t: new Date().toISOString(), evt: "mail.not_configured",
+      message: "MAIL_SMTP_USER/MAIL_SMTP_PASS are unset: no confirmation or reset e-mail will be sent" }));
+  }
 }
 bootstrap();

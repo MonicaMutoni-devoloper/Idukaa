@@ -40,7 +40,7 @@ const WIDE = { from: "2000-01-01T00:00:00.000Z", to: "2100-01-01T00:00:00.000Z" 
 
 const makeUser = async (shop: string | null, role: string, email: string) => {
   const r = await pool.query(
-    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,$3,$4,$5) RETURNING id",
+    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,$3,$4,$5) RETURNING id",
     [shop, email, `Fin ${role}`, "$2a$04$" + "0".repeat(53), role],
   );
   return { id: r.rows[0].id, role, shopId: shop } as any;

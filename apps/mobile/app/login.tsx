@@ -27,6 +27,9 @@ export default function Login() {
   // Bumped on every failed attempt so the form can shake once per real error, not on every render.
   const [errCount, setErrCount] = useState(0);
   const [step, setStep] = useState<"password" | "code">("password");
+  // Set when the API refuses the sign-in because the address was never confirmed: the screen then
+  // offers the way to fix it instead of only naming the problem.
+  const [unverified, setUnverified] = useState(false);
   const [code, setCode] = useState("");
   if (token) return <Redirect href="/" />;
 
@@ -41,8 +44,10 @@ export default function Login() {
       setErrCount((n) => n + 1);
       // Only a caller who proved the registration password is told the state of their file.
       const code = e instanceof ApiError && typeof e.body?.message === "string" ? e.body.message : null;
+      setUnverified(code === "email_not_verified");
       setErr(
         e instanceof NetworkError ? t("login.network")
+        : code === "email_not_verified" ? t("login.emailUnverified")
         :        code === "application_info_required" ? t("login.infoRequired")
         : code === "application_pending_review" ? t("login.pendingReview")
         : code === "application_rejected" ? t("login.rejected")
@@ -85,11 +90,15 @@ export default function Login() {
       <Card style={{ gap: space.lg }}>
         {step === "password" ? (
           <>
-            <Field testID="login-email" label={t("login.email")} hint={t("login.emailHint")} value={email} onChangeText={(v) => { setErr(null); setEmail(v); }}
+            <Field testID="login-email" label={t("login.email")} hint={t("login.emailHint")} value={email} onChangeText={(v) => { setErr(null); setUnverified(false); setEmail(v); }}
               autoCapitalize="none" autoCorrect={false} keyboardType="email-address" autoComplete="email" textContentType="emailAddress" returnKeyType="next" />
             <PasswordField testID="login-password" label={t("login.password")} value={pw} onChangeText={(v) => { setErr(null); setPw(v); }}
               autoComplete="current-password" textContentType="password" returnKeyType="go" onSubmitEditing={() => void go()} />
             {err ? <Banner tone="danger" text={err} /> : null}
+            {unverified ? (
+              <Button testID="login-verify-email" kind="secondary" full label={t("login.confirmEmail")}
+                onPress={() => router.push({ pathname: "/verify-email", params: { email: email.trim().toLowerCase() } })} />
+            ) : null}
             <Button testID="login-submit" full label={busy ? t("login.signingIn") : t("login.submit")} loading={busy} disabled={!email.trim() || !pw} onPress={() => void go()} />
             <Button testID="login-create-shop" kind="secondary" full label={t("login.createShop")}
               onPress={() => { cancelTwoFactor(); setErr(null); router.push("/register"); }} />

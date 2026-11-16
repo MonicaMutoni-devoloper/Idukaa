@@ -27,7 +27,7 @@ const now = () => new Date().toISOString();
 const meta = (deviceId = "test-device") => ({ deviceId, userAgent: "node-test", ip: "127.0.0.1" });
 const makeUser = async (shop: string | null, role: string, email: string, password = PASSWORD) => {
   const r = await pool.query(
-    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,$3,$4,$5) RETURNING id, email, full_name, role, shop_id, token_version",
+    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,$3,$4,$5) RETURNING id, email, full_name, role, shop_id, token_version",
     [shop, email, `Test ${role}`, await bcrypt.hash(password, 4), role],
   );
   return { ...r.rows[0], shopId: r.rows[0].shop_id };

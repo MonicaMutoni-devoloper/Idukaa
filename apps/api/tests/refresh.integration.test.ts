@@ -56,8 +56,8 @@ before(async () => {
 
   shop = (await pool.query("INSERT INTO shops(name) VALUES ('Refresh shop') RETURNING id")).rows[0].id;
   const r = await pool.query(
-    `INSERT INTO users(shop_id,email,full_name,password_hash,role,account_status,active)
-     VALUES ($1,$2,$3,$4,'owner','active',true) RETURNING id, email, full_name, role, shop_id, token_version`,
+    `INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role,account_status,active)
+     VALUES (now(), $1,$2,$3,$4,'owner','active',true) RETURNING id, email, full_name, role, shop_id, token_version`,
     [shop, "owner@refresh.test", "Refresh owner", await bcrypt.hash(PASSWORD, 4)],
   );
   owner = r.rows[0];
@@ -140,8 +140,8 @@ test("a credential reused outside the grace window is treated as theft", { skip 
 test("a refresh never crosses into another user's session", { skip }, async () => {
   const otherEmail = `other-${uuid().slice(0, 8)}@refresh.test`;
   await pool.query(
-    `INSERT INTO users(shop_id,email,full_name,password_hash,role,account_status,active)
-     VALUES ($1,$2,'Other owner',$3,'owner','active',true)`,
+    `INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role,account_status,active)
+     VALUES (now(), $1,$2,'Other owner',$3,'owner','active',true)`,
     [shop, otherEmail, await bcrypt.hash(PASSWORD, 4)],
   );
   const other = await auth.login(otherEmail, PASSWORD, meta("other-device"));

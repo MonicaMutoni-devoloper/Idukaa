@@ -31,7 +31,7 @@ before(async () => {
   db = new Db(); svc = new SyncService(db);
   shopA = (await pool.query("INSERT INTO shops(name) VALUES ('A (test fixture)') RETURNING id")).rows[0].id;
   shopB = (await pool.query("INSERT INTO shops(name) VALUES ('B (test fixture)') RETURNING id")).rows[0].id;
-  const mk = async (shop: string, role: string, email: string) => ({ id: (await pool.query("INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,'t','x',$3) RETURNING id", [shop, email, role])).rows[0].id, role, shopId: shop });
+  const mk = async (shop: string, role: string, email: string) => ({ id: (await pool.query("INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,'t','x',$3) RETURNING id", [shop, email, role])).rows[0].id, role, shopId: shop });
   mgr = await mk(shopA, "manager", "m@a.test"); owner = await mk(shopA, "owner", "o@a.test"); mgrB = await mk(shopB, "manager", "m@b.test");
   pid = uuid();
   const r = await svc.push(mgr, "d", [op("product.upsert", { productId: pid, code: "SUG", name: "Sugar 1kg", unit: "pcs", sellingPrice: 1500, lowStockThreshold: 5000, initialQty: 50_000, initialUnitCost: 1000 })]);
@@ -623,7 +623,7 @@ test("a user can rename themselves and change their password; the old password s
   const auth = new AuthController(new AuthService(db, jwt, new NotificationService(db)));
   const email = `pw-${Date.now()}@a.test`;
   const userId = (await pool.query(
-    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,'Old Name',$3,'manager') RETURNING id",
+    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,'Old Name',$3,'manager') RETURNING id",
     [shopA, email, await bcrypt.hash("old-password-123", 4)])).rows[0].id;
   const u = { id: userId, role: "manager" as const, shopId: shopA };
 

@@ -44,6 +44,24 @@ export class AuthController {
     return result;
   }
 
+  /* ------------------------------------------------------------------ e-mail verification */
+
+  /** Clicked link from the confirmation e-mail. Single use; the answer names the address for the UI. */
+  @Public() @Throttle({ default: { limit: 20, ttl: 60_000 } }) @Post("email/verify")
+  verifyEmail(@Body() body: unknown, @Req() req: Request) {
+    const b = TokenBody.safeParse(body);
+    if (!b.success) throw new BadRequestException("verification_token_invalid");
+    return this.auth.verifyEmail(b.data.token, req.ip ?? null);
+  }
+
+  /** Same answer whether the address is unknown, already verified or unverified — no account oracle. */
+  @Public() @Throttle({ default: { limit: 5, ttl: 60_000 } }) @Post("email/resend")
+  resendVerification(@Body() body: unknown, @Req() req: Request) {
+    const b = Forgot.safeParse(body);
+    if (!b.success) return { ok: true };
+    return this.auth.resendVerification(b.data.email, req.ip ?? null);
+  }
+
   /**
    * Rotates the refresh token. The old one keeps working for a short grace window (so a racing tab or
    * a lost cookie cannot lock the user out), then stops working entirely.

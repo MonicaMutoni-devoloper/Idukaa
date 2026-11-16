@@ -47,7 +47,7 @@ const op = (type: string, payload: unknown) => ({ opId: randomUUID(), deviceId: 
 
 async function addUser(email: string, name: string, role: "owner" | "manager" | "system_admin", shopId: string | null) {
   const r = await pool.query(
-    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,$2,$3,$4,$5) RETURNING id",
+    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,$3,$4,$5) RETURNING id",
     [shopId, email, name, await bcrypt.hash(PASSWORD, 4), role]);
   return r.rows[0].id as string;
 }

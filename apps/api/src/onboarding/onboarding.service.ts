@@ -5,6 +5,7 @@ import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
 import type { AuthUser } from "../common/auth";
 import { hashToken, newOpaqueToken, passwordSchema } from "../auth/security";
+import { EmailVerificationService } from "../auth/email-verification.service";
 
 /**
  * The complete onboarding state machine. Every transition is validated by the server, inside a
@@ -52,7 +53,7 @@ export interface InvitationPreview {
 
 @Injectable()
 export class OnboardingService {
-  constructor(private db: Db) {}
+  constructor(private db: Db, private verification: EmailVerificationService) {}
 
   /* ================================================================ Stage 1 — owner applies */
 
@@ -152,8 +153,11 @@ export class OnboardingService {
     if (!parsed.success) throw new BadRequestException(parsed.error.issues[0]?.message);
     if (!creds.token && !creds.statusToken) throw new BadRequestException("activation_token_invalid");
     const hash = await bcrypt.hash(password, 12);
+    // Activation is the first moment this owner has a password they chose, so it is also the moment
+    // their address is asked to confirm itself.
+    let activated: { userId: string; email: string; name: string } | null = null;
 
-    return this.db.tx(async (c) => {
+    const result = await this.db.tx(async (c) => {
       let applicationId: string;
       if (creds.token) {
         const { rows: [claim] } = await c.query(
@@ -181,7 +185,7 @@ export class OnboardingService {
       if (!app || app.status !== "APPROVED") throw new BadRequestException("activation_not_available");
       if (!app.user_id) throw new BadRequestException("activation_not_available");
 
-      const { rows: [u] } = await c.query("SELECT id, account_status, active FROM users WHERE id=$1 FOR UPDATE", [app.user_id]);
+      const { rows: [u] } = await c.query("SELECT id, account_status, active, full_name FROM users WHERE id=$1 FOR UPDATE", [app.user_id]);
       if (!u) throw new BadRequestException("activation_not_available");
       if (u.account_status === "active" && u.active) throw new BadRequestException("activation_already_completed");
 
@@ -190,8 +194,12 @@ export class OnboardingService {
         [u.id, hash]);
       await audit(c, { shopId: null, actorId: u.id, action: "application.activate", entity: "owner_application", entityId: app.id, newValue: { email: app.email } });
       await audit(c, { shopId: null, actorId: u.id, action: "auth.account.activated", entity: "user", entityId: u.id });
+      activated = { userId: u.id, email: app.email, name: u.full_name ?? app.email };
       return { ok: true as const, email: app.email };
     });
+    const account = activated as { userId: string; email: string; name: string } | null;
+    if (account) void this.verification.issue(account.userId, account.email, account.name).catch(() => undefined);
+    return result;
   }
 
   /* ================================================================ Stage 2 — administrator review */
@@ -219,7 +227,10 @@ export class OnboardingService {
     if (!app) throw new NotFoundException("application_not_found");
     return app;
   }  async approve(adminId: string, id: string, note?: string) {
-    return this.db.tx(async (c) => {
+    // Filled inside the transaction, used after it commits: the account only exists once the
+    // approval is durable, and an undeliverable mail must never roll a decision back.
+    let created: { userId: string; email: string; name: string } | null = null;
+    const result = await this.db.tx(async (c) => {
       const { rows: [app] } = await c.query("SELECT * FROM owner_applications WHERE id=$1 FOR UPDATE", [id]);
       if (!app) throw new NotFoundException("application_not_found");
       if (app.status !== "PENDING_REVIEW" && app.status !== "ADDITIONAL_INFORMATION_REQUIRED")
@@ -244,6 +255,7 @@ export class OnboardingService {
            VALUES ($1,$2,$3,$4,'owner', true, 'active') RETURNING id`,
           [newShopId, app.email, app.contact_name, app.password_hash]);
         userId = userRows[0].id;
+        created = { userId, email: app.email, name: app.contact_name };
 
         await c.query(
           `UPDATE owner_applications SET status='APPROVED', user_id=$2, shop_id=$3, reviewed_by=$4, reviewed_at=now(), updated_at=now(),
@@ -282,6 +294,11 @@ export class OnboardingService {
         newValue: { email: app.email, status: "APPROVED", userId } });
       return { id, status: "APPROVED" as const };
     });
+    // The five-field flow creates a usable password at approval, so this is where that address is
+    // asked to prove itself. The legacy flow proves it at activation instead, below.
+    const account = created as { userId: string; email: string; name: string } | null;
+    if (account) void this.verification.issue(account.userId, account.email, account.name).catch(() => undefined);
+    return result;
   }
 
   async reject(adminId: string, id: string, reason: string) {
@@ -500,8 +517,9 @@ export class OnboardingService {
     const [check] = await this.db.query("SELECT id FROM staff_invitations WHERE token_hash=$1 AND status='invited'", [hashToken(token)]);
     if (!check) throw new BadRequestException("invitation_invalid");
     const hash = await bcrypt.hash(password, 12);
+    let created: { userId: string; email: string; name: string } | null = null;
 
-    return this.db.tx(async (c) => {
+    const result = await this.db.tx(async (c) => {
       const { rows: [inv] } = await c.query("SELECT * FROM staff_invitations WHERE token_hash=$1 FOR UPDATE", [hashToken(token)]);
       if (!inv) throw new BadRequestException("invitation_invalid");
       if (inv.status !== "invited") throw new BadRequestException(inv.status === "expired" ? "invitation_expired" : `invitation_${inv.status}`);
@@ -523,8 +541,12 @@ export class OnboardingService {
       await audit(c, { shopId: inv.shop_id, actorId: u.id, action: "staff.invitation.accepted", entity: "staff_invitation",
         entityId: inv.id, newValue: { email: inv.email, role: "manager" } });
       await audit(c, { shopId: inv.shop_id, actorId: u.id, action: "user.create", entity: "user", entityId: u.id, newValue: { email: inv.email, role: "manager" } });
+      created = { userId: u.id, email: inv.email, name: inv.full_name };
       return { ok: true as const, email: inv.email, shopName: shop?.name ?? "" };
     });
+    const account = created as { userId: string; email: string; name: string } | null;
+    if (account) void this.verification.issue(account.userId, account.email, account.name).catch(() => undefined);
+    return result;
   }
 
   /**
