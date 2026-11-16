@@ -887,3 +887,25 @@ real shop account.
 `APP_LATEST_VERSION_CODE=6` and a reachable `APP_UPDATE_URL` must be set on Render (and the APK
 published) before the update banner can offer it. Do not raise the manifest to a version with no
 download URL.
+
+## 13. Offline phone fixes deployed (16 Nov 2026) — `467949c`
+
+Pushed to `main`, so Vercel rebuilt project `idukaa-api` from `467949c`.
+
+| Check | Result |
+|---|---|
+| `GET /sw.js` | **200**, `application/javascript`, `cache-control: public, max-age=0, must-revalidate` (so an installed client re-checks the worker on its next launch), body contains `idukaa-shell-v6` and the install-time `launchAssets` precache |
+| `GET /` | **200**, entry bundle `entry-012e3cc3026829ae99b7b67555035935.js` — identical to the locally exported `apps/mobile/dist/index.html`, so the live site is the current tree, not a stale build |
+| Shell install on the live origin (headless Chrome, fresh profile) | worker reached `activated` and controlled the page; `caches` → `["idukaa-shell-v6"]` with **10 assets and all 3 launch bundles** |
+| Cold launch with the network off (`Network.emulateNetworkConditions offline`, then navigate to `/`) | `navigator.onLine === false`, the app rendered the sign-in screen, `#root` populated, **0 script loads failed** |
+| `apps/mobile` test suite | typecheck clean; i18n, dashboard, reports, realtime, policy, sections, roles, sync, update, catalogue, pwa, intro, sell, period, offline and credit-repayments-offline all exit 0 |
+
+**Before this commit** the deployed worker was `idukaa-shell-v5`, which cached the page, manifest and
+icons but never the hashed bundle, and the live entry bundle was `entry-1d5ae362…` — the deployed web
+app was an older build than the Android 1.1.2 APK, which is why the web app looked like it was missing
+features the phone had.
+
+**Still unverified:** signed-in flows against production (no production credentials here), and iOS
+Safari itself — the shell install and offline launch above were exercised in Chrome, so an iPhone must
+confirm the installed app opens with the network off. On first launch after this deploy each device
+needs one online visit; the app then keeps a refresh token for later offline relaunches.
