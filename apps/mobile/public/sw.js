@@ -14,10 +14,14 @@
 // body stored as soon as it arrives, and the worker posts its progress so the app can show how much
 // of the app is saved — the visit can be ended early otherwise, and an interrupted install leaves
 // screens unsaved.
-const CACHE = "idukaa-shell-v8";
+// v9: the install used to bypass the HTTP cache for every file, so it downloaded the ~1.6 MB launch
+// bundle a second time — the page had just fetched it. Content-hashed names can never go stale, so
+// those are allowed to come from the browser's cache and only the unhashed files force a re-fetch.
+const CACHE = "idukaa-shell-v9";
 const SHELL = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png"];
 // Written next to the export by scripts/write-sw-manifest.mjs: every file, not only the launch ones.
 const MANIFEST = "/sw-assets.json";
+
 // How long a launch may wait for the network before the saved shell is used instead. A phone whose
 // Wi-Fi is connected but has no internet keeps the request open until the platform gives up, which
 // made an installed app sit on a blank screen for many seconds before the cached shell appeared.
@@ -35,6 +39,9 @@ const isStaticAsset = (path) =>
   path.startsWith("/_expo/") || path.startsWith("/assets/") || /\.(js|mjs|css|png|jpe?g|gif|svg|webp|ico|woff2?|json)$/i.test(path);
 /** One key per asset path: a query string or a differing request header must not hide a saved copy. */
 const cacheKeyOf = (path) => path.split("?")[0].split("#")[0];
+
+// A hashed file name (entry-4b8eea5c….js, icon-192.png is NOT) cannot be stale for a given URL.
+const IMMUTABLE_ASSET = /[-.][0-9a-f]{16,}\.(?:js|mjs|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf)$/i;
 
 const openCache = () => caches.open(CACHE);
 const saved = async (key) => {
@@ -68,7 +75,10 @@ async function launchAssets(html) {
  */
 async function fetchAndSave(c, key) {
   try {
-    const res = await fetch(key, { cache: "reload" });
+    // Hashed assets may be served from the HTTP cache: the browser already has the launch bundle by
+    // the time install runs, so this avoids downloading it twice. Unhashed files (index.html,
+    // sw-assets.json, the manifest, the icons) always come from the network.
+    const res = await fetch(key, { cache: IMMUTABLE_ASSET.test(cacheKeyOf(key)) ? "default" : "reload" });
     if (res.ok) await c.put(cacheKeyOf(key), res);
     return res.ok;
   } catch {
