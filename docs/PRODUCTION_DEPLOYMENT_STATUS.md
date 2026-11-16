@@ -1035,3 +1035,28 @@ process tree killed (`taskkill /F /T`) part-way through, then the same profile r
 the page's cache is disabled, so the network count is a lower bound on the work avoided; the
 authoritative evidence is that the second launch finished the set from a partial cache with a
 single-digit number of downloads.
+
+## 19. App-shell status in the Offline Center, cache stamped per build (16 Nov 2026) — `7d518ac`
+
+The install banner only exists during the first visit, so a half-finished install was invisible
+afterwards: the offline *data* could look current while a screen that had never been saved would still
+be blank. Offline Center → Availability now reads the same count on open
+(`src/services/shell-status.ts`, same manifest + cache measurement as the banner) and shows
+**App screens 59 / 59** with a green badge, or an amber count and *"Not every screen is saved yet…"*.
+Where the Cache API or build manifest is unavailable it shows *"Not available on this platform"*
+instead of a guess.
+
+The same commit stamps the worker's cache name with a fingerprint of the build's asset list
+(`scripts/write-sw-manifest.mjs`). Without it, a deploy that changes screen chunks but not `sw.js`
+never re-runs the install — installed phones would keep the previous chunk names and the screens that
+were never opened would go blank again, which is exactly the bug fixed in §14.
+
+| Check | Result |
+|---|---|
+| Build | `dist/sw.js` → `const CACHE = "idukaa-shell-2bb9bd99"`, `sw-assets.json` reports the same name; docs-only rebuilds keep the name and re-install nothing |
+| Live origin | worker and manifest agree on **`idukaa-shell-3ed156d2`** (Vercel's build), so the changed chunks do trigger a reinstall |
+| Live origin, fresh profile | cache `idukaa-shell-3ed156d2` populated with **62 entries** for 59 manifest files, the app rendered, and the Sell chunk the page never requested was served offline (**200**, 35,836 bytes) |
+| Tests | `tsc --noEmit` exit 0; `test:pwa` 4 pass (cache-name stamping and the manifest reporting the stamped name are pinned); `test:i18n` 5 pass (en/rw key parity for the new strings) |
+
+**Unverified:** the Offline Center row as rendered for a signed-in user — no production credentials
+here, so it was checked by type, tests and the underlying measurement, not by opening that screen.
