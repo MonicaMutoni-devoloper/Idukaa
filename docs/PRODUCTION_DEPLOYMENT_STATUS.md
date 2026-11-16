@@ -1060,3 +1060,32 @@ were never opened would go blank again, which is exactly the bug fixed in §14.
 
 **Unverified:** the Offline Center row as rendered for a signed-in user — no production credentials
 here, so it was checked by type, tests and the underlying measurement, not by opening that screen.
+
+## 20. Offline expenses on the Overview, honest offline wording (16 Nov 2026) — `d8b88a3`, `b05d636`
+
+Reported after §19: every screen opens offline now, but screens show *"Something went wrong / Try
+again"*, and a sale or expense saved with no network does not change the Overview until it syncs.
+
+Two distinct causes:
+
+1. **Expenses were not in the pending merge.** `pendingFigures` covered sales, credit and purchases
+   only, so a queued `expense.create` was invisible: operating expenses, expenses paid, outstanding
+   expenses, operating profit, the day's chart bar and the by-category panel all stayed at the server
+   snapshot until sync. They are now folded in (`src/services/pending-dashboard.ts`) and never touch
+   revenue. Test: `tests/pending-dashboard.test.mts` — "a queued expense counts as money spent".
+2. **A saved record could be reported as failed.** `sell.tsx` and `expense.tsx` awaited the counter
+   refresh and the sync attempt *inside* the save's try block, so an offline failure after the record
+   was already durable showed *"The sale could not be saved"* / *"Something went wrong"*. Those
+   follow-ups are now fire-and-forget with a swallowed rejection.
+3. **The error card itself.** Screens that fail their first load offline use the shared `ErrorState`,
+   which always said *"Something went wrong"* with a Try again button. Offline now shows an amber
+   "You are offline…" message and keeps the retry button for when the network returns.
+
+| Check | Result |
+|---|---|
+| Tests | `tsc --noEmit` exit 0; `test:dashboard` **8 pass** including the new expense case (expenses add to operating expenses/paid/outstanding and the day bar, revenue unchanged); `test:pwa` 4 pass; `test:i18n` 5 pass |
+| Live worker | worker and manifest agree on **`idukaa-shell-5b4a3968`** (previous build was `3ed156d2`), and `index.html` names a new entry bundle — so installed phones re-run the install and receive this code |
+
+**Unverified:** the signed-in screens themselves (no production credentials here). The merge logic is
+covered by tests; whether the phone has picked up the new bundle is visible on-device as the
+"Saving the app for offline use" banner followed by "Ready offline".
