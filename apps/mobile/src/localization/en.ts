@@ -418,6 +418,8 @@ export const en = {
   "shell.savingTitle": "Saving the app for offline use",
   "shell.savingHint": "keep this open until it finishes — every screen then opens without internet.",
   "shell.readyText": "Every screen now opens without internet.",
+  "shell.title": "App screens",
+  "shell.incomplete": "Not every screen is saved yet. Open the app with internet and leave it open until saving finishes.",
   "offline.lastDownload": "Last saved for offline",
   "offline.scope": "Overview, inventory, stock movements, sales and financial reports for the current month and year, plus a rolling archive of every earlier month.",
   "offline.failedModules": "Could not be saved: {list}. Try again when the connection is stable.",

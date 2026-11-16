@@ -35,7 +35,14 @@ test("Idukaa manifest is installable and correctly branded", () => {
 
 test("the service worker caches only the shell and never API responses", () => {
   const sw = read("public/sw.js");
-  assert.match(sw, /const CACHE = "idukaa-shell-v11"/);
+  // The build stamps this name with a fingerprint of the asset list (scripts/write-sw-manifest.mjs), so
+  // a deploy that changes any screen script updates the worker and re-runs the install.
+  assert.match(sw, /const CACHE = "idukaa-shell-[^"]+"/);
+  const stamping = read("scripts/write-sw-manifest.mjs");
+  assert.match(stamping, /createHash\("sha1"\)/, "the cache name must be content-addressed per build");
+  assert.ok(stamping.includes('const CACHE = "idukaa-shell-${stamp}";'),
+    "the build must rewrite the worker's CACHE line");
+  assert.match(stamping, /sw = rewritten;/, "the manifest must report the stamped name, not the source one");
   assert.match(sw, /"\/manifest\.json"/);
   assert.match(sw, /"\/icon-maskable-512\.png"/);
   // One online visit must be enough: install saves the bundle the exported launch page names, and

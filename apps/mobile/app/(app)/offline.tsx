@@ -18,6 +18,7 @@ import {
 import {
   clearArchiveFloor, measureOfflineStorage, readRetention, runCacheCleanup, saveRetention, type StorageOverview,
 } from "../../src/services/offline-storage";
+import { readShellStatus } from "../../src/services/shell-status";
 import { syncNow, useSync } from "../../src/synchronization/engine";
 import { space, type, useTheme } from "../../src/theme/tokens";
 
@@ -58,6 +59,8 @@ export default function OfflineCenter() {
   const loadStatus = useOfflineData((s) => s.load);
 
   const [overview, setOverview] = useState<StorageOverview | null>(null);
+  // The app's own files (one script per screen): saved once, but worth confirming later.
+  const [shell, setShell] = useState<{ done: number; total: number } | null>(null);
   const [settings, setSettings] = useState<RetentionSettings | null>(null);
   const [draft, setDraft] = useState<RetentionSettings | null>(null);
   const [createdAt, setCreatedAt] = useState<string | null>(null);
@@ -79,6 +82,7 @@ export default function OfflineCenter() {
         readRetention(user.shopId),
       ]);
       setOverview(measured); setSettings(savedSettings); setDraft(savedSettings);
+      setShell(await readShellStatus());
       await loadStatus();
     } catch {
       setNote({ tone: "danger", text: t("common.error") });
@@ -234,6 +238,18 @@ export default function OfflineCenter() {
           <KeyValue label={t("offline.center.pendingOps")} value={`${pending + awaitingApproval}`} />
           <KeyValue label={t("offline.center.lastSync")} value={lastSync ? new Date(lastSync).toLocaleString() : t("common.never")} />
           <KeyValue label={t("offline.center.lastPreparation")} value={status ? new Date(status.savedAt).toLocaleString() : t("common.never")} />
+          {/* The screens themselves, not the data: a half-saved install blanks a screen that was
+              never opened, and nothing else here would show that. */}
+          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+            <Text style={{ flex: 1, color: c.muted, fontSize: 12 }}>{t("shell.title")}</Text>
+            {shell ? (
+              <Badge tone={shell.done >= shell.total ? "ok" : "warn"}
+                label={`${shell.done} / ${shell.total}`} />
+            ) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.center.unavailable")}</Text>}
+          </View>
+          <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>
+            {shell ? (shell.done >= shell.total ? t("shell.readyText") : t("shell.incomplete")) : null}
+          </Text>
           <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.forbidden")}</Text>
         </Card>
         <Card style={{ flex: wide ? 1.4 : 1, gap: 5 }}>

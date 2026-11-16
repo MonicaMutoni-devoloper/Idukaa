@@ -11,6 +11,7 @@
  * next to the files it describes. Same hashing as the export: the names change with the code.
  */
 import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,15 +49,36 @@ function walk(dir) {
 
 const assets = walk(dist).sort();
 /**
- * The dashboard reads this file to show install progress by counting the saved entries, which works
- * in every browser — WebKit does not reliably deliver the worker's own progress messages while it
- * installs. The cache name is taken from the worker so the two can never disagree.
+ * Stamp the worker's cache name with a fingerprint of this build's asset list.
+ *
+ * Why: the browser only re-runs a service worker's install when the worker script's bytes change. A
+ * deploy that changes the app (new screen chunk hashes) but not sw.js would leave every installed
+ * phone holding the previous names — the new screens unbundled and offline screens blank again. A
+ * content-addressed cache name makes every asset change an update; a deploy that changes no assets
+ * keeps the same name and re-installs nothing.
+ *
+ * The dashboard also reads `cache` from this file to show install progress by counting saved
+ * entries, which works in every browser — WebKit does not reliably deliver the worker's own progress
+ * messages while it installs.
  */
-const sw = readFileSync(join(root, "public", "sw.js"), "utf8");
+const stamp = createHash("sha1").update(assets.join("\n")).digest("hex").slice(0, 8);
+const swPath = join(dist, "sw.js");
+let sw = "";
+try {
+  sw = readFileSync(swPath, "utf8");
+} catch {
+  sw = "";
+}
+const stamped = `const CACHE = "idukaa-shell-${stamp}";`;
+if (sw) {
+  const rewritten = sw.replace(/const CACHE = "[^"]+";/, stamped);
+  if (rewritten === sw && !sw.includes(stamped)) console.warn("sw-assets.json: no CACHE line found in dist/sw.js");
+  sw = rewritten;
+  writeFileSync(swPath, sw);
+}
 const cache = /const CACHE = "([^"]+)"/.exec(sw)?.[1] ?? null;
-if (!cache) console.warn("sw-assets.json: no cache name found in public/sw.js");
 writeFileSync(join(dist, SELF), JSON.stringify({ generatedAt: new Date().toISOString(), cache, assets }, null, 0) + "\n");
 
 const chunks = assets.filter((a) => a.endsWith(".js")).length;
-console.log(`sw-assets.json: ${assets.length} files (${chunks} scripts) listed for offline use`);
+console.log(`sw-assets.json: ${assets.length} files (${chunks} scripts) listed for offline use; cache idukaa-shell-${stamp}`);
 if (!assets.length) console.warn("sw-assets.json: dist is empty — run this after `expo export --platform web`");

@@ -428,6 +428,8 @@ export const rw: Record<Key, string> = {
   "shell.savingTitle": "Turabika porogaramu kugira ngo ikoreshe nta nterineti",
   "shell.savingHint": "gumana iyi paji ifunguye kugeza birangiye — amapaji yose azahita afunguka nta nterineti.",
   "shell.readyText": "Amapaji yose ashobora gufunguka nta nterineti.",
+  "shell.title": "Amapaji ya porogaramu",
+  "shell.incomplete": "Ntabwo amapaji yose yabitswe. Fungura porogaramu uri kuri interineti kandi uyigume ifunguye kugeza kubika birangiye.",
   "offline.lastDownload": "Byabitswe bwa nyuma kubera nta nterineti",
   "offline.scope": "Incamake, ububiko, ibikorwa by'ububiko, igurisha na raporo y'amafaranga y'uku kwezi n'uyu mwaka, hamwe n'ububiko bw'amezi yose yabanje.",
   "offline.failedModules": "Ntibishoboye kubikwa: {list}. Ongera ugerageze interineti ituze.",
