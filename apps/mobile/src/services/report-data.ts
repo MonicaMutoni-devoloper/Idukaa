@@ -1,5 +1,5 @@
 import { listProducts, listRecords, kvGet, kvSet } from "../database";
-import { ApiError, request } from "./api";
+import { ApiError, request, sessionRejected } from "./api";
 import { isUnsynced, mergePendingRows, readReportCache, reportCacheKey } from "./local-reports";
 import { cacheWriteMeta, touchCacheAccess } from "./cache-meta";
 import type {
@@ -132,8 +132,11 @@ async function allMovements(ctx: LoadContext): Promise<ApiMovements> {
   return { items, truncated: false, financials };
 }
 
+// A 401 only means "sign in again" when the server actually refused the refresh credential. A 401
+// on a request that went out before the rotation finished (or while the refresh was deferred offline)
+// is a reconnect problem, and telling the shop its session expired sends it to a login it does not need.
 const failMeta = (e: unknown): Partial<LoadMeta> => ({
-  authIssue: e instanceof ApiError && e.status === 401,
+  authIssue: e instanceof ApiError && e.status === 401 && sessionRejected(),
   forbidden: e instanceof ApiError && e.status === 403,
   failed: true,
 });

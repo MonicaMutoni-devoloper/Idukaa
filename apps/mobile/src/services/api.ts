@@ -57,6 +57,15 @@ let challengeToken: string | null = null;
 let refreshInFlight: Promise<boolean> | null = null;
 /** Definitive rejection from the server: stop automatic refresh until the user signs in again. */
 let refreshBlocked = false;
+/**
+ * When the last successful rotation finished. A reconnect makes many requests 401 at once (dashboard,
+ * profitability, reports, sync, realtime), and each 401 used to force its own rotation as it drained.
+ * Every extra rotation is another token the phone must persist before the connection drops again — a
+ * rotation whose response is lost is what makes the next attempt look like token theft. A token that
+ * was rotated seconds ago is still fresh, so the retry reuses it instead.
+ */
+let refreshedAt = 0;
+const FRESH_TOKEN_MS = 5_000;
 /** Transport/offline failure: wait a moment before the next automatic attempt (never a loop). */
 let refreshRetryAt = 0;
 
@@ -154,6 +163,7 @@ async function adopt(session: SessionResponse) {
   accessToken = session.token;
   refreshBlocked = false;
   refreshRetryAt = 0;
+  refreshedAt = Date.now();
   if (!WEB) await storage.set(ACCESS_KEY, session.token);
   if (session.refreshToken) await storage.set(REFRESH_KEY, session.refreshToken);
   await storage.set(USER_KEY, JSON.stringify(session.user));
@@ -207,6 +217,9 @@ function refreshSession(force = false): Promise<boolean> {
   // `force` is used by the sync pass: one attempt per pass, not per request, so the backoff must not
   // swallow it (an offline reload leaves no access token and the queue would wait for nothing).
   if (!force && Date.now() < refreshRetryAt) return Promise.resolve(false);
+  // Forced refresh for a 401 that a rotation we just completed cannot explain: the request carried the
+  // old token. Hand the caller the fresh one instead of rotating again.
+  if (force && accessToken && Date.now() - refreshedAt < FRESH_TOKEN_MS) return Promise.resolve(true);
   refreshInFlight = (async () => {
     try {
       let body: Record<string, unknown> = {};

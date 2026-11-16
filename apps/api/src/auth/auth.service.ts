@@ -32,11 +32,19 @@ const resetTtlMinutes = () => {
 const devResetEnabled = () => process.env.NODE_ENV !== "production" && process.env.PASSWORD_RESET_DEV_MODE === "true";
 /**
  * How long a just-rotated refresh token may still be presented by the same browser without being
- * treated as theft (REFRESH_REUSE_GRACE_SECONDS, default 30s, 0 disables it). See refresh().
+ * treated as theft (REFRESH_REUSE_GRACE_SECONDS, default 120s, 0 disables it). See refresh().
+ *
+ * 120s rather than the original 30s because the case this protects against is exactly the slow one:
+ * a rotation sent from a phone whose connection dropped as it answered (airplane mode, Wi-Fi to mobile
+ * data, a sleeping free-tier API). The client never received the successor, keeps presenting the old
+ * token, and on coming back online — often minutes later, while opening a report — was told its whole
+ * session family had been revoked. The successor is still unused during this window, so accepting the
+ * predecessor cannot help an attacker who already has it: racing them to a rotation they cannot see
+ * gains nothing they did not already have.
  */
 const refreshGraceSeconds = () => {
-  const n = Number(process.env.REFRESH_REUSE_GRACE_SECONDS ?? 30);
-  return Number.isFinite(n) && n >= 0 && n <= 300 ? n : 30;
+  const n = Number(process.env.REFRESH_REUSE_GRACE_SECONDS ?? 120);
+  return Number.isFinite(n) && n >= 0 && n <= 300 ? n : 120;
 };
 const resetUrl = (token: string) => {
   const base = (process.env.PASSWORD_RESET_URL ?? "http://localhost:8081/reset-password").split("?")[0]!;

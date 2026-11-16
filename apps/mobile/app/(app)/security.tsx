@@ -3,7 +3,7 @@ import { Image, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { Badge, Banner, Button, Card, ConfirmDialog, Field, Loading, PasswordField, Screen } from "../../src/components/ui";
 import { useT } from "../../src/localization";
-import { ApiError, NetworkError, request, useSession } from "../../src/services/api";
+import { ApiError, NetworkError, request, sessionRejected, useSession } from "../../src/services/api";
 import { useSync } from "../../src/synchronization/engine";
 import { radius, space, useTheme } from "../../src/theme/tokens";
 
@@ -20,7 +20,9 @@ function reasonText(e: unknown, t: ReturnType<typeof useT>): string {
   if (reason === "two_factor_already_enabled") return t("security.alreadyEnabled");
   if (reason === "two_factor_not_enabled") return t("security.notEnabled");
   if (reason === "two_factor_setup_required") return t("security.setupExpired");
-  if (e instanceof ApiError && e.status === 401) return t("security.sessionExpired");
+  // Only a rejected refresh credential ends a session; a 401 from a request that raced the rotation
+  // is a retry, not an expiry.
+  if (e instanceof ApiError && e.status === 401 && sessionRejected()) return t("security.sessionExpired");
   return t("common.error");
 }
 
