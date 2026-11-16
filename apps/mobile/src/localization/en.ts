@@ -314,7 +314,7 @@ export const en = {
   "dash.src.cached": "Last saved copy",
   "dash.localFigures": "Calculated from {n} records saved on this device at {time}.",
   "dash.localCoverage": "Records on this device start on {date}; earlier history needs a connection.",
-  "dash.pendingNote": "{n} records are waiting to sync, so they are not on the server yet.",
+  "dash.pendingNote": "{n} record(s) are waiting to sync. They are already counted in these figures.",
   "dash.failedNote": "{n} records could not be synchronized. Open Sync for details.",
   "dash.conflictNote": "{n} records conflict with the server and need review.",
   "dash.degraded": "This report is incomplete: the server could not calculate {list}. Those figures are missing, not zero.",

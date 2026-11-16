@@ -8,12 +8,13 @@ import { OfflineReadinessStrip } from "../../src/components/offline-download";
 import { BarList, CompareBars, ProductRanking, StockHealthBar, TrendBars } from "../../src/components/charts";
 import { Appear, Disclosure, useCountUp } from "../../src/components/motion";
 import { useT, type Key } from "../../src/localization";
-import { kvGet, kvSet } from "../../src/database";
+import { kvGet, kvSet, listRecords } from "../../src/database";
 import { ApiError, request, sessionRejected, useSession } from "../../src/services/api";
 import { degradedList, sectionKey, sectionLabel } from "../../src/services/report-sections";
 import { businessRevisionKey, dashboardCacheIsCurrent, dashboardCacheKey, dashboardScope } from "../../src/services/dashboard-cache";
 import { cacheWriteMeta, touchCacheAccess } from "../../src/services/cache-meta";
 import { buildLocalDashboard } from "../../src/services/local-dashboard-data";
+import { applyPendingDashboard, pendingFigures } from "../../src/services/pending-dashboard";
 import type { Dashboard as DashboardPayload, FigureSource, FigureStatus, LocalDashboardResult } from "../../src/services/local-dashboard";
 import {
   OVERVIEW_PRESET_LABEL, defaultSelection, formatSelectionRange, selectionRange,
@@ -170,6 +171,10 @@ export default function Home() {
   const localSeq = useRef(0);
   const sourceRef = useRef<FigureSource | null>(null);
   const viewRef = useRef<{ key: string; data: Dashboard } | null>(null);
+  // The payload exactly as the server (or the saved copy) reported it, BEFORE any queued work was
+  // folded in. Merging must always start from this copy: merging onto an already-merged payload
+  // would add every queued sale again on each recalculation.
+  const baseRef = useRef<{ key: string; data: Dashboard; source: FigureSource; savedAt: string | null } | null>(null);
   const scopeRef = useRef("");
   const inFlight = useRef<{ key: string; version: number; promise: Promise<Dashboard> } | null>(null);
   const seenRecords = useRef(recordsVersion);
@@ -194,10 +199,12 @@ export default function Home() {
   const staleAt = activeView?.staleAt ?? null;
   const localInfo = localInfoState?.key === scopeKey ? localInfoState.info : null;
 
-  const showData = useCallback((next: Dashboard | null, from: FigureSource | null, savedAt: string | null, key = scopeKey) => {
+  const showData = useCallback((next: Dashboard | null, from: FigureSource | null, savedAt: string | null, key = scopeKey, keepBase = false) => {
     if (key !== scopeRef.current) return;
     viewRef.current = next && from ? { key, data: next } : null;
     sourceRef.current = from;
+    // A server answer or a saved copy is the shop-wide basis; this device's local calculation is not.
+    if (next && !keepBase && (from === "server" || from === "cached")) baseRef.current = { key, data: next, source: from, savedAt };
     setView(next && from ? { key, data: next, source: from, staleAt: savedAt } : null);
   }, [scopeKey]);
 
@@ -222,16 +229,29 @@ export default function Home() {
       // Adopt local figures only when this device holds a record INSIDE the range. A fresh install,
       // or a period whose history lives only on the server, must never replace good figures with
       // zeros just because the local ledger happens to be empty for that period.
-      if (localInRange(local, rangeAtStart.to) || (adoptWithoutRecords && local.counts.total > 0)) {
+      const base = baseRef.current;
+      if (base?.key === keyAtStart) {
         // A server answer and a saved copy are both snapshots of the SHOP; this device only holds the
-        // operations it made itself. Replacing the snapshot with those rows is what made an offline
-        // phone show its own sales as the whole period. The snapshot stays on screen and the pending
-        // count in `figureNote` says which queued work it does not include yet (Reports itemises it).
-        const trustedSnapshot = sourceRef.current === "server" || sourceRef.current === "cached";
-        if (!trustedSnapshot) {
-          showData(local.data, "local", null, keyAtStart);
-          setLoading(false);
-        }
+        // operations it made itself, so the snapshot must never be replaced by those rows — that is
+        // what made an offline phone show its own sales as the whole period.
+        // The opposite failure is a snapshot that never moves: a sale rung up with no network is on
+        // neither the server nor the saved copy, so it is folded ON TOP of the pristine snapshot
+        // here. It appears in today's figures as soon as it is queued, and the merge always starts
+        // from `baseRef`, so no sale is ever counted twice.
+        try {
+          const figures = pendingFigures({
+            records: await listRecords(), from: rangeAtStart.from, to: rangeAtStart.to,
+            withCosts: !!base.data.financials,
+          });
+          if (seq !== localSeq.current || scopeRef.current !== keyAtStart) return;
+          showData(applyPendingDashboard(base.data, figures), base.source, base.savedAt, keyAtStart, true);
+        } catch { /* keep the snapshot on screen, unfoldable work stays in the outbox */ }
+        return;
+      }
+      if (localInRange(local, rangeAtStart.to) || (adoptWithoutRecords && local.counts.total > 0)) {
+        // No snapshot for this period at all: the device's own records are the only figures available.
+        showData(local.data, "local", null, keyAtStart, true);
+        setLoading(false);
       }
     } catch { /* local calculation failed: keep what is on screen, never blank it */ }
   }, [range, scopeKey, user?.id, user?.role, showData]);
@@ -260,6 +280,9 @@ export default function Home() {
       const now = new Date().toISOString();
       void kvSet(cacheKey, JSON.stringify({ version: 3, savedAt: now, data: res, revision: revisionBefore, ...cacheWriteMeta(now) })).catch(() => {});
       void kvSet(`dash.perms:${user?.id ?? "none"}`, res.permissions?.financials ? "1" : "0").catch(() => {});
+      // A fresh server answer is the new basis: fold back whatever is still queued (a pull can land
+      // before the outbox has drained) so the figures never dip while unsynced work exists.
+      void refreshLocal();
     } catch (e) {
       if (seq !== loadSeq.current || scopeRef.current !== keyAtStart) return;
       // A 401 means "sign in again" only when the refresh credential was actually rejected. A token

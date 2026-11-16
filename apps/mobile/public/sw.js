@@ -1,14 +1,18 @@
 // App-shell cache only. Business data lives in the local database, NOT in this cache.
 // Authentication and business API responses are never cached, even when the API is deployed on the
 // same origin as the web app: their paths are excluded explicitly and authorized requests are skipped.
-// v6: install saves the launch page AND the hashed bundle it names, so one online visit is enough for
-// an installed app to open offline (the first page load is not controlled by this worker yet, so the
-// bundle would otherwise never be saved). Saved assets are also matched by URL, ignoring Vary
-// headers, because WebKit can repeat a request with different headers and miss its own shell.
-// Bumping the cache removes the old shell on activate, so an installed app cannot keep opening an
-// outdated name or theme.
-const CACHE = "idukaa-shell-v6";
+// v7: install saves the launch page, the hashed bundles it names, AND every other file the export
+// produced (listed in /sw-assets.json at build time). One online visit is enough for the whole app to
+// open offline — the web build is split into one script per screen, so v6 could open the start screen
+// and nothing else: a screen that had never been opened online (Sell, Reports…) fetched a chunk that
+// was never saved and stayed blank. Saved assets are also matched by URL, ignoring Vary headers,
+// because WebKit can repeat a request with different headers and miss its own shell. Bumping the
+// cache removes the old shell on activate, so an installed app cannot keep opening an outdated name,
+// theme or set of screens.
+const CACHE = "idukaa-shell-v7";
 const SHELL = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png"];
+// Written next to the export by scripts/write-sw-manifest.mjs: every file, not only the launch ones.
+const MANIFEST = "/sw-assets.json";
 // How long a launch may wait for the network before the saved shell is used instead. A phone whose
 // Wi-Fi is connected but has no internet keeps the request open until the platform gives up, which
 // made an installed app sit on a blank screen for many seconds before the cached shell appeared.
@@ -60,6 +64,23 @@ async function fetchAndSave(c, key) {
   }
 }
 
+/**
+ * Every file the export produced, in the order the build listed them. Sequential for the same reason
+ * as `fetchAndSave`: concurrent downloads holding unread bodies stall the install event.
+ */
+async function precacheManifest(c) {
+  try {
+    const res = await fetch(MANIFEST, { cache: "reload" });
+    if (!res.ok) return;
+    const body = await res.json();
+    const list = Array.isArray(body?.assets) ? body.assets : [];
+    for (const url of list) {
+      if (typeof url !== "string" || !url.startsWith("/")) continue;
+      await fetchAndSave(c, cacheKeyOf(url));
+    }
+  } catch { /* a missing manifest must not make the installation unusable */ }
+}
+
 self.addEventListener("install", (e) => {
   self.skipWaiting();
   e.waitUntil((async () => {
@@ -74,6 +95,9 @@ self.addEventListener("install", (e) => {
       try { html = await hit.text(); break; } catch { /* try the next copy */ }
     }
     if (html) for (const url of await launchAssets(html)) await fetchAndSave(c, url);
+    // Then the screens themselves: a route is a separate script, and one that was never opened
+    // online has no copy unless this pass saved it.
+    await precacheManifest(c);
   })().catch(() => undefined));
 });
 

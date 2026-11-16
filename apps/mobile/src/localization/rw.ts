@@ -320,7 +320,7 @@ export const rw: Record<Key, string> = {
   "dash.src.cached": "Ibyabitswe bya nyuma",
   "dash.localFigures": "Byabalijwe bivuye mu byabitswe {n} kuri iyi telefoni saa {time}.",
   "dash.localCoverage": "Ibyabitswe kuri iyi telefoni bitangira {date}; amateka ya mbere asaba interineti.",
-  "dash.pendingNote": "Inyandiko {n} zitegereje guhuza, nticyari kuri seriveri.",
+  "dash.pendingNote": "Inyandiko {n} zitegereje guhuza, ariko zibarizwa muri iyi mibare.",
   "dash.failedNote": "Inyandiko {n} ntizashoboye guhuza. Fungura Guhuza urebe.",
   "dash.conflictNote": "Inyandiko {n} zihabanye na seriveri zigomba gusuzumwa.",
   "dash.degraded": "Iyi raporo ntiyuzuye: seriveri ntiyashoboye kubara {list}. Iyo mibare iraboze, ntabwo ari zeru.",

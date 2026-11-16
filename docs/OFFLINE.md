@@ -37,9 +37,15 @@ Reports read this device first and the API second.
   worked offline shows the shop's history as well as its own new work. Only when the device has no
   saved copy at all are its own records shown, labelled as device-only. An empty substitution is
   never made: if a saved copy exists, it is part of every offline figure.
-- The dashboard follows the same rule: a queued operation never replaces the saved server snapshot
-  with device-only totals. It keeps the snapshot, adds the pending rows once, and the existing
-  pending badge/counters announce what is not on the server yet.
+- The dashboard follows the same rule in both directions: a queued operation never replaces the
+  saved server snapshot with device-only totals, and the snapshot never freezes either. The
+  snapshot stays the basis (the whole shop) and the operations still in the outbox are folded on top
+  of it (`src/services/pending-dashboard.ts`), always starting from the pristine payload, so a sale
+  rung up with no network moves today's net sales, transactions, cash, credit and the day's trend bar
+  immediately and can never be counted twice. Cost is added only when this device's own stock
+  history can price the sale (moving average from openings, receipts and the queued sales); when it
+  cannot, revenue is still shown and profit is flagged provisional instead of guessed. The pending
+  note now says the queued records ARE counted in these figures.
 - A failed request never replaces a cached report with an empty one; the previous rows stay visible.
 - Reconciliation: server rows are authoritative, and unsynchronized local rows (pending / retry /
   pending_approval) are merged **by operation id**, so a sale that pushes successfully can never be
@@ -65,11 +71,15 @@ Reports read this device first and the API second.
 
 ## PC / PWA
 - The manifest identifies the app as **Idukaa** with 192/512/maskable icons, `standalone` display,
-  `/` start URL and scope, and the `#0F5C4D` theme colour. The shell cache is `idukaa-shell-v6`;
+  `/` start URL and scope, and the `#0F5C4D` theme colour. The shell cache is `idukaa-shell-v7`;
   bumping the name removes the previous branded shell on activation.
-- **Installing the shell:** during `install` the worker saves the shell files and the hashed launch
-  bundle named by `index.html`, one asset at a time, so a single online visit is enough for the
-  installed app to cold-start with the network off. Saving held response bodies concurrently stalls
+- **Installing the shell:** during `install` the worker saves the shell files, the hashed launch
+  bundle named by `index.html`, and then every other file the export produced — listed in
+  `/sw-assets.json`, which `scripts/write-sw-manifest.mjs` generates after `expo export` — one asset
+  at a time, so a single online visit is enough for the installed app to cold-start with the network
+  off. That list matters because the web build emits one script per screen: a worker that saved only
+  the launch bundles could open the start screen and nothing else, so Sell or Reports stayed blank
+  on a phone that had never opened them online. Saving held response bodies concurrently stalls
   Chromium's install event indefinitely, which is why the downloads are sequential, and why
   `tests/pwa.test.mts` pins that shape. Asset lookups ignore `Vary` so a proxy header difference (for
   example Safari's `Accept-Encoding`) cannot miss the saved copy, and a failed asset request falls
@@ -84,7 +94,7 @@ Reports read this device first and the API second.
   report. Each payload is written with the same shop/user/period/permission cache key the screens
   use, and the durable `offline.data:<shop>` status is written only after the modules finish. Partial
   downloads are labelled partial; repeat taps share one in-flight download.
-- Service worker caches only the app shell (page, manifest, icons and the launch bundle). Business data lives in the local database, never in the HTTP cache. API calls are never cached.
+- Service worker caches only the app shell (page, manifest, icons, launch bundle and every exported screen chunk). Business data lives in the local database, never in the HTTP cache. API calls are never cached.
 - **Web storage is IndexedDB** (`sms-local`), not SQLite. The web build has no SQLite backend, so `src/database/local.web.ts` implements the same interface over IndexedDB. One record holds the whole local state, so an outbox row and its optimistic stock delta are committed together.
 - The first web load imports any state left by the older `localStorage` adapter (`sms.localdb.v1`) and keeps that key as a recovery copy.
 - Writes are serialized with the Web Locks API where available and re-read the latest state under the lock, so two tabs cannot silently lose each other's queued operations. Other tabs are notified through `BroadcastChannel` and drop their read cache.

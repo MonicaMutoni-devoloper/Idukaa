@@ -34,11 +34,14 @@ test("Idukaa manifest is installable and correctly branded", () => {
 
 test("the service worker caches only the shell and never API responses", () => {
   const sw = read("public/sw.js");
-  assert.match(sw, /const CACHE = "idukaa-shell-v6"/);
+  assert.match(sw, /const CACHE = "idukaa-shell-v7"/);
   assert.match(sw, /"\/manifest\.json"/);
   assert.match(sw, /"\/icon-maskable-512\.png"/);
-  // One online visit must be enough: install saves the bundle the exported launch page names.
+  // One online visit must be enough: install saves the bundle the exported launch page names, and
+  // then every other file the export produced (the web build splits one script per screen).
   assert.match(sw, /launchAssets\(html\)/, "install must precache the scripts/styles the shell needs");
+  assert.match(sw, /const MANIFEST = "\/sw-assets\.json"/, "the build-time asset list must be precached");
+  assert.match(sw, /await precacheManifest\(c\)/, "install must save the per-screen chunks, not only the launch bundle");
   assert.match(sw, /ignoreVary: true/, "a saved asset must be found again even if Vary differs");
   assert.match(sw, /const fallback = await saved\(url\.pathname\)/, "a failed asset fetch must fall back to the saved copy");
   for (const prefix of ["/auth", "/sync", "/reports", "/sales", "/purchases"]) {
