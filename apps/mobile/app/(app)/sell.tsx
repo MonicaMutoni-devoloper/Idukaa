@@ -128,7 +128,8 @@ export default function Sell() {
       });
       setRetProduct(null); setRetQuery(""); setRetQty("1"); setRetAmount("0"); setRetReceipt(""); setRetNote("");
       setRetSaved(true);
-      await refreshCounts(); void syncNow();
+      void refreshCounts().catch(() => undefined);
+      void syncNow();
     } catch { setRetErr(t("common.error")); } finally { setRetBusy(false); }
   }
 
@@ -290,7 +291,10 @@ export default function Sell() {
       setNewCust(false); setCustName(""); setCustPhone(""); setCustLimit("0"); setCustQuery(""); setCustErr(null);
       Keyboard.dismiss();
       setSaved({ total: saleTotal, count, ref: `RC-${saleId.slice(0, 8).toUpperCase()}`, paid: appliedPaid, change, at, method });
-      await refreshCounts(); void syncNow();
+      // Saved and durable already: a counter refresh or a sync attempt failing offline must not claim
+      // the sale was not recorded.
+      void refreshCounts().catch(() => undefined);
+      void syncNow();
     } catch {
       setSaveError(t("sell.saveFailed"));
     } finally { setBusy(false); }

@@ -33,6 +33,14 @@ export interface PendingSaleFigure {
 export interface PendingFigures {
   /** Queued sales inside the range. */
   count: number;
+  /** Queued expenses inside the range: money the shop has spent but the server has not recorded. */
+  expenseCount: number;
+  expenses: number;
+  expensesPaid: number;
+  outstandingExpenses: number;
+  expensesByCategory: { category: string; amount: number; unpaid: number }[];
+  /** Each queued expense, so the chart can put it on its own day. */
+  expenseRows: { at: string; amount: number }[];
   grossSales: number;
   discounts: number;
   netSales: number;
@@ -53,6 +61,7 @@ const EMPTY: PendingFigures = {
   count: 0, grossSales: 0, discounts: 0, netSales: 0, paid: 0, receivable: 0, unitsSold: 0,
   cogs: 0, costComplete: true, sales: [], repayments: [],
   repaymentsByMethod: { cash: 0, momo: 0, bank: 0, other: 0 }, creditDelta: 0,
+  expenseCount: 0, expenses: 0, expensesPaid: 0, outstandingExpenses: 0, expensesByCategory: [], expenseRows: [],
 };
 
 const inRange = (iso: string, from: string, to: string) => iso >= from && iso < to;
@@ -103,7 +112,8 @@ export function pendingFigures(input: { records: LocalRecord[]; from: string; to
   const queued = parseRecords(records.filter((r) => isUnsynced(r.status)));
   const sales = queued.sales.filter((s) => inRange(s.at, from, to));
   const repayments = queued.repayments.filter((p) => inRange(p.at, from, to));
-  if (!sales.length && !repayments.length) return EMPTY;
+  const expenses = queued.expenses.filter((e) => inRange(e.at, from, to));
+  if (!sales.length && !repayments.length && !expenses.length) return EMPTY;
 
   const priced = withCosts ? costBySale(records) : { cost: new Map<string, number>(), complete: true };
   const out: PendingFigures = {
@@ -137,6 +147,23 @@ export function pendingFigures(input: { records: LocalRecord[]; from: string; to
     else out.repaymentsByMethod.other += p.amount;
     creditDelta -= p.amount;
   }
+  // Expenses saved with no network are the same kind of queued work as a sale: they are on neither the
+  // server nor the saved copy, so a shop that records rent offline would still see an unchanged
+  // "expenses" figure until it found a connection.
+  const byCategory = new Map<string, { amount: number; unpaid: number }>();
+  for (const e of expenses) {
+    out.expenseCount += 1;
+    out.expenses += e.amount;
+    out.expenseRows.push({ at: e.at, amount: e.amount });
+    if (e.paid) out.expensesPaid += e.amount;
+    else out.outstandingExpenses += e.amount;
+    const row = byCategory.get(e.category) ?? { amount: 0, unpaid: 0 };
+    row.amount += e.amount;
+    if (!e.paid) row.unpaid += e.amount;
+    byCategory.set(e.category, row);
+  }
+  out.expensesByCategory = [...byCategory.entries()].map(([category, v]) => ({ category, ...v }))
+    .sort((a, b) => b.amount - a.amount);
   out.creditDelta = creditDelta;
   return out;
 }
@@ -157,7 +184,7 @@ function bucketOf(trend: { date: string }[], at: string): number {
  * same saved snapshot can be re-merged after every sale without accumulating the previous merge.
  */
 export function applyPendingDashboard(base: Dashboard, f: PendingFigures): Dashboard {
-  if (!f.count && !f.repayments.length) return base;
+  if (!f.count && !f.repayments.length && !f.expenseCount) return base;
   const ops = base.operations;
   const netSales = ops.netSales + f.netSales;
   const transactions = ops.transactions + f.count;
@@ -172,7 +199,7 @@ export function applyPendingDashboard(base: Dashboard, f: PendingFigures): Dashb
         const finNet = fin.netSales + f.netSales;
         const cogs = fin.cogs + f.cogs;
         const grossProfit = finNet - cogs;
-        const operatingExpenses = fin.operatingExpenses;
+        const operatingExpenses = fin.operatingExpenses + f.expenses;
         const stockLosses = fin.stockLosses ?? fin.stockLossValue ?? 0;
         const operatingProfit = grossProfit - operatingExpenses;
         return {
@@ -183,6 +210,9 @@ export function applyPendingDashboard(base: Dashboard, f: PendingFigures): Dashb
           cogs,
           grossProfit,
           grossMarginBps: grossMarginBps(finNet, grossProfit),
+          operatingExpenses,
+          expensesPaid: fin.expensesPaid + f.expensesPaid,
+          outstandingExpenses: fin.outstandingExpenses + f.outstandingExpenses,
           operatingProfit,
           operatingResultAfterStockLosses: operatingProfit - stockLosses,
           costBasisIncomplete: !!fin.costBasisIncomplete || !f.costComplete,
@@ -190,7 +220,24 @@ export function applyPendingDashboard(base: Dashboard, f: PendingFigures): Dashb
       })()
     : null;
 
+  // Category bars are a panel of their own: an expense in a category the shop has not used this
+  // period adds a bar rather than being dropped.
+  const categories = new Map(base.expensesByCategory.map((e) => [e.category, { ...e }]));
+  for (const e of f.expensesByCategory) {
+    const row = categories.get(e.category) ?? { category: e.category, amount: 0, unpaid: 0 };
+    row.amount += e.amount;
+    row.unpaid += e.unpaid;
+    categories.set(e.category, row);
+  }
+
   const trend = base.trend.map((p) => ({ ...p }));
+  for (const e of f.expenseRows) {
+    const i = bucketOf(trend, e.at);
+    // A null bucket means the server could not price costs for that day; leaving it null keeps the
+    // chart honest instead of turning it into a zero.
+    if (i < 0 || trend[i]!.operatingExpenses === null) continue;
+    trend[i]!.operatingExpenses += e.amount;
+  }
   for (const s of f.sales) {
     const i = bucketOf(trend, s.at);
     if (i < 0) continue;
@@ -207,6 +254,7 @@ export function applyPendingDashboard(base: Dashboard, f: PendingFigures): Dashb
   return {
     ...base,
     financials,
+    expensesByCategory: [...categories.values()].sort((a, b) => b.amount - a.amount),
     operations: {
       ...ops,
       netSales,

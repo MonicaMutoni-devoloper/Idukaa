@@ -31,7 +31,10 @@ export default function Expense() {
     try {
       await enqueue(user.id, uuid(), "expense.create", { expenseId: uuid(), category: cat, amount: a, paid, incurredAt, note: note.trim() || undefined }, {}, undefined, incurredAt);
       setAmount(""); setNote(""); setSaved(true); setDay(today());
-      await refreshCounts(); void syncNow();
+      // The expense is durable at this point. Refreshing counters or trying to sync must never turn a
+      // saved expense into "Something went wrong" — offline is a normal way to use this screen.
+      void refreshCounts().catch(() => undefined);
+      void syncNow();
     } catch { setErr(t("common.error")); } finally { setBusy(false); }
   }
 

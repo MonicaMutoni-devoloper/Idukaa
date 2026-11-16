@@ -138,3 +138,37 @@ test("a queued credit sale raises what customers owe, and a queued repayment low
   assert.equal(after.operations.repaymentsByMethod?.momo, 200);
   assert.equal(after.operations.totalReceived, after.operations.cashCollected + 200);
 });
+
+test("a queued expense counts as money spent, offline, without touching revenue", () => {
+  const records = [
+    purchase("op1", "2026-11-02T08:00:00.000Z"),
+    sale("op2", "2026-11-03T09:00:00.000Z", {}, "synced"),
+    rec("op7", "expense.create", "2026-11-03T12:00:00.000Z",
+      { expenseId: "e1", category: "rent", amount: 3000, paid: true, incurredAt: "2026-11-03T12:00:00.000Z" }),
+    rec("op8", "expense.create", "2026-11-03T13:00:00.000Z",
+      { expenseId: "e2", category: "electricity", amount: 1000, paid: false, incurredAt: "2026-11-03T13:00:00.000Z" }),
+  ];
+  const figures = pendingFigures({ records, from: DAY.from, to: DAY.to, withCosts: true });
+  assert.equal(figures.expenseCount, 2);
+  assert.equal(figures.expenses, 4000);
+  assert.equal(figures.expensesPaid, 3000);
+  assert.equal(figures.outstandingExpenses, 1000);
+
+  const before = base();
+  const after = applyPendingDashboard(before, figures);
+  // An expense is not revenue: the sales figures must be exactly as they were.
+  assert.equal(after.operations.netSales, before.operations.netSales);
+  assert.equal(after.operations.transactions, before.operations.transactions);
+  assert.equal(after.financials!.operatingExpenses, before.financials!.operatingExpenses + 4000);
+  assert.equal(after.financials!.expensesPaid, before.financials!.expensesPaid + 3000);
+  assert.equal(after.financials!.outstandingExpenses, before.financials!.outstandingExpenses + 1000);
+  assert.equal(after.financials!.operatingProfit, before.financials!.operatingProfit - 4000);
+
+  const dayAfter = after.trend.find((p) => p.date === "2026-11-03")!;
+  const dayBefore = before.trend.find((p) => p.date === "2026-11-03")!;
+  assert.equal((dayAfter.operatingExpenses ?? 0) - (dayBefore.operatingExpenses ?? 0), 4000,
+    "both expenses are booked on the day they were incurred");
+
+  assert.equal(after.expensesByCategory.find((e) => e.category === "rent")?.amount, 3000);
+  assert.equal(after.expensesByCategory.find((e) => e.category === "electricity")?.unpaid, 1000);
+});
