@@ -71,13 +71,13 @@ Reports read this device first and the API second.
 
 ## PC / PWA
 - The manifest identifies the app as **Idukaa** with 192/512/maskable icons, `standalone` display,
-  `/` start URL and scope, and the `#0F5C4D` theme colour. The shell cache is `idukaa-shell-v7`;
+  `/` start URL and scope, and the `#0F5C4D` theme colour. The shell cache is `idukaa-shell-v8`;
   bumping the name removes the previous branded shell on activation.
 - **Installing the shell:** during `install` the worker saves the shell files, the hashed launch
   bundle named by `index.html`, and then every other file the export produced — listed in
   `/sw-assets.json`, which `scripts/write-sw-manifest.mjs` generates after `expo export` — one asset
-  at a time, so a single online visit is enough for the installed app to cold-start with the network
-  off. That list matters because the web build emits one script per screen: a worker that saved only
+  at a time (six in flight, each body stored as soon as it arrives), so a single online visit is
+  enough for the installed app to cold-start with the network off. That list matters because the web build emits one script per screen: a worker that saved only
   the launch bundles could open the start screen and nothing else, so Sell or Reports stayed blank
   on a phone that had never opened them online. Saving held response bodies concurrently stalls
   Chromium's install event indefinitely, which is why the downloads are sequential, and why

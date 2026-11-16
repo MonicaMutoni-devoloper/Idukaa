@@ -946,3 +946,29 @@ observed) before the app is fully offline-capable; leave the app open once until
 
 **Still unverified:** iOS Safari/WebKit itself (all proof above is Chromium), and the signed-in flows on
 production.
+
+## 15. Faster, visible first-visit install (16 Nov 2026) — `6b5aeac`
+
+The v7 deployment fixed blank offline screens but made the first visit download all 59 exported files
+one at a time, and gave no sign of when it was safe to close the app. §14 measured ~49 s for that
+install on the live origin.
+
+The v8 worker fetches six files at a time (each body stored as soon as it arrives, which is what keeps
+Chromium's install from stalling on unread bodies) and posts `{ type: "idukaa-precache", done, total }`.
+The app root (`_layout.tsx`) shows *Saving the app for offline use — 12 / 59* and a short *Ready offline*
+when the set is complete; `src/services/precache-message.ts` validates the message, so a browser that
+never sends it shows nothing rather than a false "ready".
+
+| Check | Result |
+|---|---|
+| Local export, 150 ms latency / 20 Mbps, fresh profile | sequential v7 **4.3 s** → v8 **2.3 s**, 61 entries cached |
+| Local export, 100 ms / 4 Mbps | **8.1 s → 6.9 s** |
+| Local export, 1.5 Mbps (bandwidth-bound) | **13.4 s → 12.2 s** — bytes, not round trips, dominate here |
+| Copying unchanged files from the previous cache instead of downloading | **rejected**: 12.1 s vs 2.6 s, so a plain fetch is kept |
+| Live origin, fresh profile, 150 ms / 20 Mbps | worker `idukaa-shell-v8`, **61 progress messages** (`0/59` → `59/59`), install span **12.3 s**, cache 61 entries |
+| Banner during that live install | seen as *Saving the app for offline use*, then *Ready offline* |
+| Offline fetch of the Sell chunk the page never requested | `navigator.onLine === false`, **200**, 35,836 bytes |
+| Tests | `tsc --noEmit` exit 0; `test:pwa` 4 pass (pins v8, the pool, `reportProgress`, and the message parser's rejection list); `test:i18n` pass |
+
+**Still unverified:** iOS Safari/WebKit — including whether it delivers the worker's progress messages
+during install; on WebKit the install may simply appear without the banner.
