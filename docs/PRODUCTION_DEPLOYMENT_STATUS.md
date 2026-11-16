@@ -364,6 +364,16 @@ API log), and a second refresh `201` as well.
 `api.<yourdomain>`. Same-site cookies are first-party, so they are immune to Chrome's third-party
 cookie phase-out; the cross-site path above works today but is the one browsers are restricting.
 
+**iOS update (16 Nov 2026).** `SameSite=None` is not enough on iPhone: Safari/iOS blocks *every*
+third-party cookie, so the cross-site refresh cookie is never sent and each reload or PWA relaunch
+started from `401 refresh_missing_credential`, leaving the outbox and pulls stalled until the user
+signed in again (`runPass` returns silently when no token can be obtained). The web client now keeps
+the refresh token it receives in the response body and presents it in `/auth/refresh` **only** after
+that exact answer, then persists the rotation; if neither cookie nor stored copy exists it reports the
+session as ended instead of silently idling. Verified in Chrome by signing in, deleting `sms_rt` via
+DevTools (the iOS condition), reloading: `POST /auth/refresh` `401` → `201`, `GET /sync/pull` `200`.
+The proxy/DNS fix above is still the durable answer.
+
 ---
 
 ## 7.1 Authentication diagnostics (3 Nov 2026)

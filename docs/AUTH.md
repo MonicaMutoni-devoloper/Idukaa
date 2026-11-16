@@ -23,10 +23,17 @@ Clients: `apps/mobile/src/services/api.ts`, `app/login.tsx`, `app/forgot-passwor
 **Where tokens live**
 
 - Android/iOS: access **and** refresh token in `expo-secure-store` (Android Keystore / iOS Keychain).
-- Web: the refresh token never reaches JavaScript. It is set as `sms_rt` — `HttpOnly`, `SameSite=Strict`,
-  `Secure` when HTTPS, `Path=/auth`, `Max-Age` = refresh lifetime. The access token is kept in memory
-  only; after a reload the browser exchanges the cookie for a new short-lived access token. The user
-  record (id, name, role, shop) is kept in `localStorage` for instant rendering; it is not a credential.
+- Web: the refresh token is delivered as `sms_rt` — `HttpOnly`, `SameSite=Strict`, `Secure` when
+  HTTPS, `Path=/auth`, `Max-Age` = refresh lifetime. The access token is kept in memory only; after a
+  reload the browser exchanges the cookie for a new short-lived access token. The user record (id,
+  name, role, shop) is kept in `localStorage` for instant rendering; it is not a credential.
+- Web **fallback credential:** the sign-in/refresh response also carries the rotated refresh token in
+  its JSON body, and the web client keeps that copy under `refresh_token` in origin storage. It is only
+  presented when the API answers `401 refresh_missing_credential` — i.e. the browser sent no cookie at
+  all. That is the normal case on iOS Safari, which blocks third-party cookies outright, so on the
+  cross-site deployment (site ≠ API domain) a reload would otherwise never authenticate again and the
+  outbox would stay queued. The copy is deleted on sign-out, on sign-out everywhere, on password reset
+  and whenever the server refuses the credential family.
 - No token is ever placed in a URL, a log line or a cached HTTP response. The service worker skips
   `/auth`, `/sync`, `/reports`, `/notifications` and every other API prefix.
 
@@ -36,7 +43,8 @@ is rejected with `403 csrf_failed` otherwise. Native clients send the refresh to
 
 > The cookie is `SameSite=Strict`. Serve the API and the web app on the **same site** (same registrable
 > domain, e.g. `app.example.rw` + `api.example.rw`). An API on an unrelated domain cannot use the cookie
-> flow, because browsers will not send a strict cross-site cookie.
+> flow, because browsers will not send a strict cross-site cookie — and on iOS Safari a cross-site cookie
+> is blocked even with `SameSite=None`, which is what the body-token fallback above exists for.
 
 ## 2. Endpoints
 

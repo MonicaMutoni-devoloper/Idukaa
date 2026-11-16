@@ -3,7 +3,7 @@ import Constants from "expo-constants";
 import * as SecureStore from "expo-secure-store";
 import { create } from "zustand";
 import { bindShop, kvGet } from "../database";
-import { refreshVerdict } from "./session-policy";
+import { noCredentialReceived, refreshVerdict } from "./session-policy";
 
 /**
  * Web talks to localhost. A phone in Expo Go cannot: `localhost` is the phone itself,
@@ -25,10 +25,16 @@ export interface TwoFactorRequired { twoFactorRequired: true; challengeToken: st
 
 /**
  * Token storage:
- *  - Native (Android/iOS): access token AND refresh token in SecureStore (Android Keystore).
- *  - Web: the refresh token never reaches JavaScript. The server sets it as an HttpOnly, SameSite=Strict
- *    cookie; the browser keeps only the short-lived access token in memory and re-exchanges the cookie
- *    after a reload. Nothing long-lived is written to localStorage.
+ *  - Native (Android/iOS app): access token AND refresh token in SecureStore (Android Keystore).
+ *  - Web: the server sets the refresh token as an HttpOnly cookie and the access token stays in
+ *    memory only. The browser also keeps a copy of the refresh token it was handed at sign-in
+ *    (`refresh_token`, same origin storage): on phones the cookie is a *third-party* cookie — the
+ *    static site and the API are on different domains — and iOS Safari blocks those outright, so
+ *    without that copy a reload could never authenticate again (the queue and every synced row
+ *    would sit there behind a credential the browser refuses to send). The cookie is still
+ *    presented first wherever the browser allows it; the stored token is only used after the API
+ *    answers `refresh_missing_credential`, i.e. "no credential reached me". Nothing else
+ *    long-lived is written to storage, and signing out or a refused token deletes the copy.
  */
 const WEB = Platform.OS === "web";
 const ACCESS_KEY = "token";
@@ -148,10 +154,8 @@ async function adopt(session: SessionResponse) {
   accessToken = session.token;
   refreshBlocked = false;
   refreshRetryAt = 0;
-  if (!WEB) {
-    await storage.set(ACCESS_KEY, session.token);
-    if (session.refreshToken) await storage.set(REFRESH_KEY, session.refreshToken);
-  }
+  if (!WEB) await storage.set(ACCESS_KEY, session.token);
+  if (session.refreshToken) await storage.set(REFRESH_KEY, session.refreshToken);
   await storage.set(USER_KEY, JSON.stringify(session.user));
   // Before the UI can render: scope the local cache to this user's shop, so no leftovers from a
   // previously signed-in account are ever shown (and a switch triggers a clean re-pull).
@@ -173,6 +177,9 @@ function blockSession(status: number, reason: string) {
   refreshRetryAt = 0;
   // Safe diagnostic: never a token, only the verdict and HTTP status (categories match the API logs).
   console.warn("[auth] refresh rejected", { status, reason });
+  // The server refused this credential family: the stored fallback is dead too, and keeping it
+  // would only replay a revoked token on the next reload.
+  if (WEB) void storage.del(REFRESH_KEY);
   useSession.getState().expire();
 }
 
@@ -212,11 +219,24 @@ function refreshSession(force = false): Promise<boolean> {
       try {
         session = await refreshOnce(body);
       } catch (e) {
-        if (e instanceof ApiError && rejected(e)) { blockSession(e.status, String(e.message)); return false; }
+        // Web: the browser did not present the HttpOnly refresh cookie at all. This is the normal
+        // path on iOS Safari (third-party cookies are blocked, and the site and the API are on
+        // different domains) and it also covers a browser that cleared the cookie. Present the copy
+        // of the refresh token this browser stored at sign-in, so a reload — or the app being
+        // reopened — does not strand the outbox behind a credential that will never be sent.
+        if (e instanceof ApiError && WEB && noCredentialReceived(e.status, e.body)) {
+          const stored = await storage.get(REFRESH_KEY);
+          // No cookie, no stored token: nothing can authenticate this session, so ask for a sign-in
+          // (the same rule native follows) instead of silently doing nothing on every pass.
+          if (!stored) { blockSession(401, "missing_refresh_credential"); return false; }
+          session = await refreshOnce({ refreshToken: stored });
+        } else if (e instanceof ApiError && rejected(e)) { blockSession(e.status, String(e.message)); return false; }
         // A transient answer (502/503/429/500) or a dropped connection: one immediate retry, then
         // back off for a while. The refresh credential was never declared invalid, so the session stays.
-        await new Promise((r) => setTimeout(r, 400));
-        session = await refreshOnce(body);
+        else {
+          await new Promise((r) => setTimeout(r, 400));
+          session = await refreshOnce(body);
+        }
       }
       await adopt(session);
       return true;
@@ -239,7 +259,10 @@ export const sessionRejected = () => refreshBlocked;
 async function clearLocalSession() {
   accessToken = null;
   challengeToken = null;
-  if (!WEB) { await storage.del(ACCESS_KEY); await storage.del(REFRESH_KEY); }
+  // Native keeps the access token in SecureStore; leaving it there would restore a signed-out
+  // token on the next launch. The web never writes this key, so deleting it is simply a no-op there.
+  await storage.del(ACCESS_KEY);
+  await storage.del(REFRESH_KEY);
   await storage.del(USER_KEY);
 }
 
@@ -267,7 +290,8 @@ export const useSession = create<{
     accessToken = WEB ? null : await storage.get(ACCESS_KEY);
     if (user) await bindShop(user.shopId); // restore scoped to this account's shop before screens read
     set({ user, token: accessToken, ready: true });
-    // On the web the cookie is the credential, so a reload needs one refresh to get an access token.
+    // On the web the cookie is the first credential, so a reload needs one refresh to get an access
+    // token (falling back to the stored copy when the browser blocks that cookie — see `adopt`).
     // It must NOT be awaited before `ready`: on a phone whose Wi-Fi has no internet the request hangs
     // until its timeout (two 30-second attempts), and the whole app stays on a spinner — measured at
     // 61.6 s to the Overview. Starting it here keeps that work off the first paint; screens render
@@ -299,7 +323,7 @@ export const useSession = create<{
   // after that user signs in again.
   logout: async () => {
     try {
-      const stored = WEB ? undefined : (await storage.get(REFRESH_KEY)) ?? undefined;
+      const stored = (await storage.get(REFRESH_KEY)) ?? undefined;
       await fetchJson("/auth/logout", { method: "POST", body: stored ? { refreshToken: stored } : {}, auth: false }, 6_000);
     } catch { /* the local sign-out still happens */ }
     await clearLocalSession();
@@ -322,7 +346,7 @@ export const useSession = create<{
   // Persist a changed profile or a rotated session without touching the outbox.
   apply: async (p) => {
     if (p.token) { accessToken = p.token; if (!WEB) await storage.set(ACCESS_KEY, p.token); }
-    if (p.refreshToken && !WEB) await storage.set(REFRESH_KEY, p.refreshToken);
+    if (p.refreshToken) await storage.set(REFRESH_KEY, p.refreshToken);
     if (p.user) await storage.set(USER_KEY, JSON.stringify(p.user));
     set((s) => ({ token: p.token ?? s.token, user: p.user ?? s.user, expired: false }));
   },

@@ -18,12 +18,21 @@ export type RefreshVerdict = "rejected" | "deferred";
  * sit in `message`; a custom object response puts it in `error`. Both are checked.
  */
 const NO_CREDENTIAL_RECEIVED = new Set(["refresh_missing_credential"]);
+// Note: on iOS Safari the web app's refresh cookie is a third-party cookie (the static site and the
+// API live on different domains) and is blocked outright, so a web reload always gets this code.
+// The client answers it with the token it stored at sign-in (see `api.ts`), not with a sign-out.
+
+/** True when the request carried no refresh credential at all (`refresh_missing_credential`). */
+export function noCredentialReceived(status: number, body: unknown): boolean {
+  if (status !== 401) return false;
+  const b = body as { error?: unknown; message?: unknown; code?: unknown } | null | undefined;
+  const codes = [b?.code, b?.error, b?.message].filter((v): v is string => typeof v === "string");
+  return codes.some((c) => NO_CREDENTIAL_RECEIVED.has(c));
+}
 
 export function refreshVerdict(status: number, body: unknown): RefreshVerdict {
   if (status !== 401 && status !== 403) return "deferred";
-  const b = body as { error?: unknown; message?: unknown; code?: unknown } | null | undefined;
-  const codes = [b?.code, b?.error, b?.message].filter((v): v is string => typeof v === "string");
-  if (codes.some((c) => NO_CREDENTIAL_RECEIVED.has(c))) return "deferred";
+  if (noCredentialReceived(status, body)) return "deferred";
   // Any other 401/403 came from a credential the server actually examined and refused:
   // refresh_invalid / refresh_expired / refresh_reused / session_revoked / csrf_failed.
   return "rejected";

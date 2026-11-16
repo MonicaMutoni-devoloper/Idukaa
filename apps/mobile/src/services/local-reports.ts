@@ -27,7 +27,7 @@ import { buildLedger, isFailedSync, ledgerIsComplete, parseRecords } from "./loc
  * columns render as "—" and the screen says the figures are local.
  */
 
-export type ReportView = "sales" | "items" | "purchases" | "expenses" | "adjustments";
+export type ReportView = "sales" | "items" | "purchases" | "expenses" | "adjustments" | "repayments";
 
 /** Sync verdict of the record a row was calculated from (undefined for server rows). */
 export type RowSyncStatus = "pending" | "retry" | "synced" | "conflict" | "rejected" | "pending_approval";
@@ -67,7 +67,16 @@ export interface ReportAdjustmentRow {
   unit_cost: number | null; status: string; requested_by: string | null; note: string | null;
   local?: boolean; syncStatus?: RowSyncStatus;
 }
-export type ReportRow = ReportSaleRow | ReportItemRow | ReportPurchaseRow | ReportExpenseRow | ReportAdjustmentRow;
+/**
+ * A repayment of an existing credit. Money received on `paid_at`, never a sale: it carries no
+ * revenue, cost or profit, and it may only reduce a customer's balance.
+ */
+export interface ReportRepaymentRow {
+  id: string; at: string; customer: string | null; phone: string | null;
+  amount: number; method: string; reference: string | null; by: string | null;
+  local?: boolean; syncStatus?: RowSyncStatus;
+}
+export type ReportRow = ReportSaleRow | ReportItemRow | ReportPurchaseRow | ReportExpenseRow | ReportAdjustmentRow | ReportRepaymentRow;
 
 export interface ReportItemsTotals { units: number; gross: number; products: number; sales: number; net: number; discounts: number }
 
@@ -258,6 +267,28 @@ export function computeLocalReport(input: LocalReportInput): LocalReportResult {
     }
     const rows = [...map.values()].filter((e) => inRange(e.at, from, to)).sort((a, b) => b.at.localeCompare(a.at));
     return { ...base, totals: null, rows };
+  }
+
+  if (view === "repayments") {
+    const rows: ReportRepaymentRow[] = [];
+    for (const r of usable) {
+      if (r.type !== "credit.payment.create") continue;
+      const p = json(r.data);
+      if (!p) continue;
+      // Dated by paidAt, the day the money changed hands. The credit sale's own date is irrelevant.
+      const at = toIso(p.paidAt ?? r.at, r.at);
+      if (!inRange(at, from, to)) continue;
+      rows.push({
+        id: String(p.paymentId ?? r.op_id), at,
+        // Customer names are only on the server; the screen prints "—" instead of inventing one.
+        customer: p.customerName ?? null, phone: p.customerPhone ?? null,
+        amount: Math.max(0, num(p.amount)),
+        method: String(p.method ?? "cash"), reference: p.reference ?? null,
+        by: r.actor ?? null,
+        local: r.status !== "synced", syncStatus: r.status as RowSyncStatus,
+      });
+    }
+    return { ...base, totals: null, rows: rows.sort((a, b) => b.at.localeCompare(a.at)) };
   }
 
   const rows: ReportAdjustmentRow[] = [];

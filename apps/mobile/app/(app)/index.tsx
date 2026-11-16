@@ -223,12 +223,12 @@ export default function Home() {
       // or a period whose history lives only on the server, must never replace good figures with
       // zeros just because the local ledger happens to be empty for that period.
       if (localInRange(local, rangeAtStart.to) || (adoptWithoutRecords && local.counts.total > 0)) {
-        const hasUnconfirmed = local.counts.pending > 0 || local.counts.awaitingApproval > 0 || local.counts.failed > 0;
-        // A server response and a revision-validated saved copy are both authoritative snapshots.
-        // Keep them on screen unless this device has work the server cannot have counted yet; a
-        // verdict change alone must not swap the whole dashboard back to device-only records.
+        // A server answer and a saved copy are both snapshots of the SHOP; this device only holds the
+        // operations it made itself. Replacing the snapshot with those rows is what made an offline
+        // phone show its own sales as the whole period. The snapshot stays on screen and the pending
+        // count in `figureNote` says which queued work it does not include yet (Reports itemises it).
         const trustedSnapshot = sourceRef.current === "server" || sourceRef.current === "cached";
-        if (!trustedSnapshot || hasUnconfirmed) {
+        if (!trustedSnapshot) {
           showData(local.data, "local", null, keyAtStart);
           setLoading(false);
         }

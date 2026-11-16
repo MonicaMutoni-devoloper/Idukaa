@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { dayRange } from "@sms/shared";
-import { computeLocalSummary } from "../src/services/local-reports.ts";
+import { computeLocalReport, computeLocalSummary, type ReportRepaymentRow } from "../src/services/local-reports.ts";
 import { computeLocalDashboard } from "../src/services/local-dashboard.ts";
 import type { LocalProduct, LocalRecord } from "../src/database/local.ts";
 
@@ -93,6 +93,33 @@ test("a rejected repayment never reaches the figures, while a pending one does",
   const wed = sum([opening, sale, rejected, pending], WED).current;
   assert.equal(wed.creditRepayments, 5_000, "only the repayment the shop actually made");
   assert.equal(wed.outstandingCredit, 30_000);
+});
+
+test("the repayments tab lists each payment once, dated by the day it was paid", () => {
+  const rows = (records: LocalRecord[], range: { from: string; to: string }) =>
+    computeLocalReport({ records, products: [product()], view: "repayments", from: range.from, to: range.to })
+      .rows as ReportRepaymentRow[];
+
+  const wed = repay("op2", "pay-wed", "2026-01-07T09:00:00.000Z", 20_000, "cash");
+  const thu = repay("op3", "pay-thu", "2026-01-08T11:00:00.000Z", 15_000, "momo");
+  const rejected = repay("op4", "pay-bad", "2026-01-07T12:00:00.000Z", 9_000, "cash", "rejected");
+  const all = [opening, sale, wed, thu, rejected];
+
+  const wedRows = rows(all, WED);
+  assert.equal(wedRows.length, 1, "one payment on Wednesday; a rejected one never appears");
+  assert.equal(wedRows[0].id, "pay-wed");
+  assert.equal(wedRows[0].amount, 20_000);
+  assert.equal(wedRows[0].method, "cash");
+  assert.equal(wedRows[0].reference, "PAY-pay-wed");
+  assert.equal(wedRows[0].customer, null, "a customer name is never invented offline");
+  assert.equal(
+    wedRows.reduce((s, r) => s + r.amount, 0),
+    sum(all, WED).current.creditRepayments,
+    "the listed rows add up to the money the summary reports",
+  );
+
+  assert.deepEqual(rows(all, THU).map((r) => r.id), ["pay-thu"], "yesterday's payment is not listed today");
+  assert.deepEqual(rows(all, JAN).map((r) => r.id), ["pay-thu", "pay-wed"], "newest first, each payment once");
 });
 
 test("the offline dashboard shows collections, repayments, total received and the balance", () => {

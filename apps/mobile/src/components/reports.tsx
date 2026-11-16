@@ -654,7 +654,7 @@ export function SalesReport({ data, meta, online, lastSync, from, to, view, setV
 
 /* ------------------------------------------------------------------ financial */
 
-type FinancialView = "pnl" | "revenue" | "cogs" | "gross" | "expenses" | "net" | "breakdown" | "trends";
+type FinancialView = "pnl" | "revenue" | "cogs" | "gross" | "expenses" | "net" | "repayments" | "breakdown" | "trends";
 /** The two deliberately separate financial bases. They are never added together in one figure. */
 type FinancialBasis = "server" | "local";
 
@@ -706,6 +706,31 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
   );
 
   const margin = cur?.grossMarginBps != null ? `${(cur.grossMarginBps / 100).toFixed(2)}%` : t("fin.marginUnavailable");
+  // Repayments collect money for goods already sold on credit: their rows carry no revenue, cost
+  // or profit, and they are dated by the day the money was actually paid.
+  const repayments = usingLocal ? (data?.localRepayments ?? []) : (data?.repayments ?? []);
+  const methodLabel = (m: string) => t(`fin.method.${["cash", "momo", "bank", "other"].includes(m) ? m : "other"}` as any);
+  const repaymentCols: Col<any>[] = [
+    { key: "at", title: t("common.date"), width: 1.3, render: (r) => <Text style={{ color: c.inkSoft, fontSize: 12 }}>{instantText(r.at)}</Text> },
+    { key: "customer", title: t("ana.customer"), width: 1.7, render: (r) => (
+      <View style={{ gap: 1 }}>
+        <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{r.customer ?? "—"}</Text>
+        {r.phone ? <Text style={{ color: c.muted, fontSize: 11 }}>{r.phone}</Text> : null}
+        {r.local ? <Text style={{ color: c.muted, fontSize: 10 }}>{t("reports.pending")}</Text> : null}
+      </View>
+    ) },
+    { key: "method", title: t("sell.paymentMethod"), render: (r) => <Badge tone="neutral" label={methodLabel(r.method)} /> },
+    { key: "amount", title: t("common.amount"), align: "right", render: (r) => <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{money(r.amount)}</Text> },
+    { key: "reference", title: t("ana.reference"), width: 1.2, render: (r) => <Text style={{ color: c.muted, fontSize: 12 }}>{r.reference ?? "—"}</Text> },
+    { key: "by", title: t("ana.by"), render: (r) => <Text style={{ color: c.muted, fontSize: 12 }}>{r.by ?? "—"}</Text> },
+  ];
+  const filteredRepayments = repayments.filter((r) => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return true;
+    return `${r.customer ?? ""} ${r.phone ?? ""} ${r.reference ?? ""} ${r.by ?? ""}`.toLowerCase().includes(needle);
+  });
+  const repaymentsTotal = cur?.creditRepayments ?? repayments.reduce((s, r) => s + r.amount, 0);
+  const repaymentsByMethod = cur?.repaymentsByMethod ?? { cash: 0, momo: 0, bank: 0, other: 0 };
   const pnlRows: [string, string][] = cur ? [
     [t("reports.grossSales"), money(cur.grossSales)],
     [t("dash.discounts"), money(cur.discounts)],
@@ -767,6 +792,15 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
     rows: filteredExpenses.map((r) => [instantText(r.at), r.category, r.note ?? "", r.amount, r.paid ? t("expense.paid") : t("common.unpaid")]),
     metrics: [{ label: t("ana.metric.expenses"), value: money(eTotals.total) }, { label: t("common.unpaid"), value: money(eTotals.unpaid) }],
     notes: [usingLocal ? t("ana.localPendingNote") : t("ana.serverBasisNote")],
+  } : view === "repayments" ? {
+    title: `${t("ana.cat.financial" as any)} · ${t("ana.sub.financial.repayments")} · ${basisLabel}`,
+    header: [t("common.date"), t("ana.customer"), t("ana.phone"), t("sell.paymentMethod"), t("common.amount"), t("ana.reference"), t("ana.by")],
+    rows: filteredRepayments.map((r) => [instantText(r.at), r.customer ?? "", r.phone ?? "", methodLabel(r.method), r.amount, r.reference ?? "", r.by ?? ""]),
+    metrics: [
+      { label: t("fin.creditRepayments"), value: money(repaymentsTotal) },
+      { label: t("dash.transactions"), value: String(filteredRepayments.length) },
+    ],
+    notes: [t("ana.repay.note"), usingLocal ? t("ana.localPendingNote") : t("ana.serverBasisNote")],
   } : view === "breakdown" ? {
     title: `${t("ana.cat.financial" as any)} · ${t("ana.sub.financial.breakdown")} · ${basisLabel}`,
     header: [t("common.category"), t("ana.metric.expenses"), t("common.unpaid"), t("dash.transactions")],
@@ -803,6 +837,7 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
         { value: "pnl", label: t("ana.sub.financial.pnl") }, { value: "revenue", label: t("ana.sub.financial.revenue") },
         { value: "cogs", label: t("ana.sub.financial.cogs") }, { value: "gross", label: t("ana.sub.financial.gross") },
         { value: "expenses", label: t("ana.sub.financial.expenses") }, { value: "net", label: t("ana.sub.financial.net") },
+        { value: "repayments", label: t("ana.sub.financial.repayments") },
         { value: "breakdown", label: t("ana.sub.financial.breakdown") }, { value: "trends", label: t("ana.sub.financial.trends") },
       ]} />
       {!data || !summary || !cur || !prev ? <Loading /> : (
@@ -947,6 +982,23 @@ export function FinancialReport({ data, meta, online, lastSync, from, to, view, 
               </View>
               <FilterField value={query} onChange={setQuery} />
               <TableBlock cols={expenseCols} rows={filteredExpenses} />
+            </>
+          ) : null}
+
+          {view === "repayments" ? (
+            <>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md }}>
+                <Stat emphasis label={t("fin.creditRepayments")} value={money(repaymentsTotal)}
+                  footnote={`${filteredRepayments.length} ${t("ana.metric.transactions").toLowerCase()}`} />
+                {(["cash", "momo", "bank", "other"] as const)
+                  .filter((k) => repaymentsByMethod[k] > 0)
+                  .map((k) => <Stat key={k} label={t(`fin.method.${k}` as any)} value={money(repaymentsByMethod[k])} />)}
+                <Stat label={t("fin.totalReceived")} value={money(cur.totalReceived ?? cur.cashCollected)} footnote={t("fin.totalReceivedHint")} />
+              </View>
+              <Banner tone="ok" text={t("ana.repay.note")} />
+              <FilterField value={query} onChange={setQuery} placeholder={t("ana.repay.search")} />
+              <TableBlock cols={repaymentCols} rows={filteredRepayments} empty={t("ana.repay.empty")}
+                rowTestID={(r) => `repayment-${r.id}`} />
             </>
           ) : null}
 

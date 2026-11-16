@@ -8,10 +8,15 @@
   guard re-reads the user row on every request (`active`, `token_version`), so revocation is immediate.
 - **Refresh tokens:** 48 random bytes, only SHA-256 hashes stored in `refresh_sessions`, rotated on every
   use, bound to a user and a session family. Presenting a rotated token revokes the family and is audited.
-- **Storage:** Android/iOS use `expo-secure-store` (Keystore/Keychain) for both tokens. The web keeps only
-  the access token in memory; the refresh token is an `HttpOnly`, `SameSite=Strict`, `Secure` (HTTPS)
-  cookie scoped to `/auth`. A readable CSRF cookie plus a required `x-csrf-token` header protect
-  cookie-based refresh/logout.
+- **Storage:** Android/iOS use `expo-secure-store` (Keystore/Keychain) for both tokens. The web keeps the
+  access token in memory and the refresh token in an `HttpOnly`, `SameSite=Strict`, `Secure` (HTTPS)
+  cookie scoped to `/auth`; a readable CSRF cookie plus a required `x-csrf-token` header protect
+  cookie-based refresh/logout. Because iOS Safari blocks third-party cookies, the web client also keeps
+  the rotated refresh token in same-origin storage (`refresh_token`) and presents it only when the API
+  reports that no cookie arrived. That copy is reachable by script, so it is an XSS-persistence
+  trade-off accepted for the cross-site deployment; it is removed on sign-out, sign-out everywhere,
+  password reset and any refused credential, and it disappears entirely once the web app and the API
+  share one registrable domain.
 - **Logout / logout-all / password change / password reset** revoke server-side sessions; the last three
   also bump `token_version`. Admin `POST /admin/users/:id/revoke` deactivates the account and bumps it.
 - **Password reset:** cryptographically random single-use tokens, hash-only storage, configurable expiry,

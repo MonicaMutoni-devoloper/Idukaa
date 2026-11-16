@@ -3,7 +3,7 @@ import { ApiError, request } from "./api";
 import { isUnsynced, mergePendingRows, readReportCache, reportCacheKey } from "./local-reports";
 import { cacheWriteMeta, touchCacheAccess } from "./cache-meta";
 import type {
-  ReportAdjustmentRow, ReportExpenseRow, ReportItemRow, ReportPurchaseRow, ReportSaleRow,
+  ReportAdjustmentRow, ReportExpenseRow, ReportItemRow, ReportPurchaseRow, ReportRepaymentRow, ReportSaleRow,
 } from "./local-reports";
 import { buildLocalReport, buildLocalSummary } from "./local-reports-data";
 import {
@@ -162,10 +162,13 @@ export async function loadInventory(ctx: LoadContext): Promise<Loaded<InventoryD
     if (!products.length) return null;
     return { items: inventoryFromProducts(products), totalValue: null, financials: false };
   };
+  /** Stock saved from the server is the shop's stock; this device's queued deltas are applied on top. */
+  const withPendingStock = (base: InventoryData): InventoryData =>
+    products.length ? { ...base, items: applyPendingStock(base.items ?? [], products) } : base;
 
   if (!ctx.online) {
     const cached = await readCache<InventoryData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }) };
+    if (cached) return { data: withPendingStock(cached.data), meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }) };
     const device = fromDevice();
     return device
       ? { data: device, meta: meta({ source: "device", pendingOps }) }
@@ -186,7 +189,7 @@ export async function loadInventory(ctx: LoadContext): Promise<Loaded<InventoryD
     return { data, meta: meta({ source: "server", savedLocally, pendingOps }) };
   } catch (e) {
     const cached = await readCache<InventoryData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }) };
+    if (cached) return { data: withPendingStock(cached.data), meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }) };
     const device = fromDevice();
     if (device) return { data: device, meta: meta({ source: "device", pendingOps, ...failMeta(e) }) };
     return { data: null, meta: { ...EMPTY_META, pendingOps, ...failMeta(e) } };
@@ -220,10 +223,13 @@ export async function loadMovements(ctx: LoadContext): Promise<Loaded<MovementsD
     if (!products.length) return null;
     return { items: movementsFromRecords({ records, products, from: ctx.from, to: ctx.to }), truncated: false, financials: false };
   };
+  /** Saved movements keep their saved rows; queued movements are added, never swapped in. */
+  const withPendingMovements = (base: MovementsData): MovementsData =>
+    pending.length ? { ...base, items: [...pending, ...(base.items ?? [])].sort((a, b) => b.at.localeCompare(a.at)) } : base;
 
   if (!ctx.online) {
     const cached = await readCache<MovementsData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }) };
+    if (cached) return { data: withPendingMovements(cached.data), meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }) };
     const device = fromDevice();
     return device
       ? { data: device, meta: meta({ source: "device", pendingOps }) }
@@ -241,7 +247,7 @@ export async function loadMovements(ctx: LoadContext): Promise<Loaded<MovementsD
     return { data, meta: meta({ source: "server", savedLocally, pendingOps }) };
   } catch (e) {
     const cached = await readCache<MovementsData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }) };
+    if (cached) return { data: withPendingMovements(cached.data), meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }) };
     const device = fromDevice();
     if (device) return { data: device, meta: meta({ source: "device", pendingOps, ...failMeta(e) }) };
     return { data: null, meta: { ...EMPTY_META, pendingOps, ...failMeta(e) } };
@@ -273,6 +279,34 @@ export async function loadSales(ctx: LoadContext): Promise<Loaded<SalesData>> {
   const pendingOps = pendingIn(records, ctx.from, ctx.to);
   const view = "analytics:sales";
 
+  /** Sales this device queued and has not synchronized: they cannot be on the server yet. */
+  const pendingSalesRows = async (): Promise<{ sales: ReportSaleRow[]; items: ReportItemRow[] }> => {
+    if (!records.length) return { sales: [], items: [] };
+    try {
+      const [s, i] = await Promise.all([
+        buildLocalReport({ view: "sales", from: ctx.from, to: ctx.to }),
+        buildLocalReport({ view: "items", from: ctx.from, to: ctx.to }),
+      ]);
+      return {
+        sales: (s.rows as ReportSaleRow[]).filter((r) => r.syncStatus && isUnsynced(r.syncStatus)),
+        items: (i.rows as ReportItemRow[]).filter((r) => r.syncStatus && isUnsynced(r.syncStatus)),
+      };
+    } catch {
+      return { sales: [], items: [] };
+    }
+  };
+  /**
+   * One view for the reader: whatever basis we hold (server answer or the saved copy) plus the
+   * operations this device has not sent yet. A saved copy alone would hide today's offline sale;
+   * the device rows alone would hide every sale the shop made on other phones.
+   */
+  const mergedWith = async (base: SalesData): Promise<SalesData> => {
+    const pending = await pendingSalesRows();
+    const sales = mergePendingRows(base.sales ?? [], pending.sales);
+    const items = mergePendingItems(base.items ?? [], pending.items);
+    return { sales, items, totals: totalsFrom(sales, items) };
+  };
+
   const fromDevice = async (): Promise<SalesData | null> => {
     try {
       const [salesLocal, itemsLocal] = await Promise.all([
@@ -290,7 +324,7 @@ export async function loadSales(ctx: LoadContext): Promise<Loaded<SalesData>> {
 
   if (!ctx.online) {
     const cached = await readCache<SalesData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }) };
+    if (cached) return { data: await mergedWith(cached.data), meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }) };
     const device = await fromDevice();
     return device
       ? { data: device, meta: meta({ source: "device", pendingOps }) }
@@ -303,26 +337,12 @@ export async function loadSales(ctx: LoadContext): Promise<Loaded<SalesData>> {
       allTransactions<ReportSaleRow>("sales", ctx),
       request<ApiItems>(`/reports/items?${q}`),
     ]);
-    let pendingSales: ReportSaleRow[] = [];
-    let pendingItems: ReportItemRow[] = [];
-    if (records.length) {
-      try {
-        const [s, i] = await Promise.all([
-          buildLocalReport({ view: "sales", from: ctx.from, to: ctx.to }),
-          buildLocalReport({ view: "items", from: ctx.from, to: ctx.to }),
-        ]);
-        pendingSales = (s.rows as ReportSaleRow[]).filter((r) => r.syncStatus && isUnsynced(r.syncStatus));
-        pendingItems = (i.rows as ReportItemRow[]).filter((r) => r.syncStatus && isUnsynced(r.syncStatus));
-      } catch { /* nothing local to add */ }
-    }
-    const sales = mergePendingRows(tx, pendingSales);
-    const items = mergePendingItems(itemReport.items, pendingItems);
-    const data: SalesData = { sales, items, totals: totalsFrom(sales, items) };
+    const data = await mergedWith({ sales: tx, items: itemReport.items, totals: totalsFrom(tx, itemReport.items) });
     const savedLocally = await writeCache(ctx, view, data);
     return { data, meta: meta({ source: "server", savedLocally, pendingOps }) };
   } catch (e) {
     const cached = await readCache<SalesData>(ctx, view);
-    if (cached) return { data: cached.data, meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }) };
+    if (cached) return { data: await mergedWith(cached.data), meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }) };
     const device = await fromDevice();
     if (device) return { data: device, meta: meta({ source: "device", pendingOps, ...failMeta(e) }) };
     return { data: null, meta: { ...EMPTY_META, pendingOps, ...failMeta(e) } };
@@ -367,11 +387,14 @@ export interface FinancialData {
   adjustments: ReportAdjustmentRow[];
   /** Posted sales in the period: the rows behind the revenue trend. */
   sales: ReportSaleRow[];
+  /** Repayments received in the period, dated by the day the money was actually paid. */
+  repayments: ReportRepaymentRow[];
   /** The same ledgers as this device holds them (synchronized records plus queued operations). */
   localExpenses: ReportExpenseRow[];
   localPurchases: ReportPurchaseRow[];
   localAdjustments: ReportAdjustmentRow[];
   localSales: ReportSaleRow[];
+  localRepayments: ReportRepaymentRow[];
   /** Value of queued operations in the period, shown separately — never folded into a confirmed total. */
   pending: PendingFinancials;
   /** True when the local ledger cannot price every movement (cost basis or history incomplete). */
@@ -397,20 +420,22 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
 
   const localRows = async () => {
     try {
-      const [expenses, purchases, adjustments, sales] = await Promise.all([
+      const [expenses, purchases, adjustments, sales, repayments] = await Promise.all([
         buildLocalReport({ view: "expenses", from: ctx.from, to: ctx.to }),
         buildLocalReport({ view: "purchases", from: ctx.from, to: ctx.to }),
         buildLocalReport({ view: "adjustments", from: ctx.from, to: ctx.to }),
         buildLocalReport({ view: "sales", from: ctx.from, to: ctx.to }),
+        buildLocalReport({ view: "repayments", from: ctx.from, to: ctx.to }),
       ]);
       return {
         expenses: expenses.rows as ReportExpenseRow[],
         purchases: purchases.rows as ReportPurchaseRow[],
         adjustments: adjustments.rows as ReportAdjustmentRow[],
         sales: sales.rows as ReportSaleRow[],
+        repayments: repayments.rows as ReportRepaymentRow[],
       };
     } catch {
-      return { expenses: [], purchases: [], adjustments: [], sales: [] };
+      return { expenses: [], purchases: [], adjustments: [], sales: [], repayments: [] };
     }
   };
 
@@ -420,16 +445,17 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
     return { summary, rows, pending: pendingFinancials(rows) };
   };
   type LocalBundle = Awaited<ReturnType<typeof localBundle>>;
-  const withLocal = (base: Omit<FinancialData, "localSummary" | "localExpenses" | "localPurchases" | "localAdjustments" | "localSales" | "pending" | "provisional" | "summary"> & { summary: SummaryPayload | null }, local: LocalBundle): FinancialData => ({
+  const withLocal = (base: Omit<FinancialData, "localSummary" | "localExpenses" | "localPurchases" | "localAdjustments" | "localSales" | "localRepayments" | "pending" | "provisional" | "summary"> & { summary: SummaryPayload | null }, local: LocalBundle): FinancialData => ({
     ...base,
     summary: base.summary,
     localSummary: local.summary,
     localExpenses: local.rows.expenses, localPurchases: local.rows.purchases,
     localAdjustments: local.rows.adjustments, localSales: local.rows.sales,
+    localRepayments: local.rows.repayments,
     pending: local.pending,
     provisional: !local.summary || local.summary.provisional === true,
   });
-  const emptyBase = { expenses: [], purchases: [], adjustments: [], sales: [] };
+  const emptyBase = { expenses: [], purchases: [], adjustments: [], sales: [], repayments: [] };
 
   const fromDevice = async (): Promise<FinancialData | null> => {
     if (!ctx.financials) return null;
@@ -448,6 +474,7 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
         summary: cached.data.summary ?? null,
         expenses: cached.data.expenses ?? [], purchases: cached.data.purchases ?? [],
         adjustments: cached.data.adjustments ?? [], sales: cached.data.sales ?? [],
+        repayments: cached.data.repayments ?? [],
       }, await localBundle()),
       meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps }),
     };
@@ -459,17 +486,18 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
 
   try {
     const q = `from=${encodeURIComponent(ctx.from)}&to=${encodeURIComponent(ctx.to)}`;
-    const [summary, expenses, purchases, adjustments, sales] = await Promise.all([
+    const [summary, expenses, purchases, adjustments, sales, repayments] = await Promise.all([
       request<SummaryPayload>(`/reports/summary?${q}`),
       allTransactions<ReportExpenseRow>("expenses", ctx),
       allTransactions<ReportPurchaseRow>("purchases", ctx),
       allTransactions<ReportAdjustmentRow>("adjustments", ctx),
       allTransactions<ReportSaleRow>("sales", ctx),
+      allTransactions<ReportRepaymentRow>("repayments", ctx),
     ]);
     // Confirmed rows stay exactly as the server returned them; queued work lives in the local
     // basis. This is what keeps a pending sale from appearing in both totals at once.
     const data = withLocal({
-      summary, expenses, purchases, adjustments, sales,
+      summary, expenses, purchases, adjustments, sales, repayments,
     }, await localBundle());
     const savedLocally = await writeCache(ctx, view, data);
     return { data, meta: meta({ source: "server", savedLocally, pendingOps }) };
@@ -480,6 +508,7 @@ export async function loadFinancial(ctx: LoadContext): Promise<Loaded<FinancialD
         summary: cached.data.summary ?? null,
         expenses: cached.data.expenses ?? [], purchases: cached.data.purchases ?? [],
         adjustments: cached.data.adjustments ?? [], sales: cached.data.sales ?? [],
+        repayments: cached.data.repayments ?? [],
       }, await localBundle()),
       meta: meta({ source: "cached", savedAt: cached.savedAt, savedLocally: true, pendingOps, ...failMeta(e) }),
     };

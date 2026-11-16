@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { refreshVerdict } from "../src/services/session-policy.ts";
+import { noCredentialReceived, refreshVerdict } from "../src/services/session-policy.ts";
 
 test("a refused refresh credential ends the session", () => {
   assert.equal(refreshVerdict(401, { error: "refresh_invalid" }), "rejected");
@@ -24,6 +24,19 @@ test("a 401 that never carried a credential keeps the session", () => {
   assert.equal(refreshVerdict(401, {
     statusCode: 401, message: "refresh_missing_credential", error: "Unauthorized",
   }), "deferred");
+});
+
+test("a refresh that carried no credential is told apart from a refused one", () => {
+  // This is the decision the web client takes before presenting the token it stored at sign-in:
+  // iOS Safari never sends the cross-site refresh cookie, so this answer is normal there and must
+  // not be read as "the session is dead".
+  const missing = { statusCode: 401, message: "refresh_missing_credential", error: "Unauthorized" };
+  assert.equal(noCredentialReceived(401, missing), true);
+  assert.equal(noCredentialReceived(401, { error: "refresh_missing_credential" }), true);
+  assert.equal(noCredentialReceived(401, { message: "refresh_expired", error: "Unauthorized" }), false);
+  assert.equal(noCredentialReceived(401, { message: "refresh_reused", error: "Unauthorized" }), false);
+  assert.equal(noCredentialReceived(403, { error: "csrf_failed" }), false);
+  assert.equal(noCredentialReceived(502, { error: "Bad Gateway" }), false);
 });
 
 test("a refused credential is recognised in Nest's real response shape too", () => {

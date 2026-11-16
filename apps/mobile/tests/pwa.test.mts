@@ -34,15 +34,19 @@ test("Idukaa manifest is installable and correctly branded", () => {
 
 test("the service worker caches only the shell and never API responses", () => {
   const sw = read("public/sw.js");
-  assert.match(sw, /const CACHE = "idukaa-shell-v5"/);
+  assert.match(sw, /const CACHE = "idukaa-shell-v6"/);
   assert.match(sw, /"\/manifest\.json"/);
   assert.match(sw, /"\/icon-maskable-512\.png"/);
+  // One online visit must be enough: install saves the bundle the exported launch page names.
+  assert.match(sw, /launchAssets\(html\)/, "install must precache the scripts/styles the shell needs");
+  assert.match(sw, /ignoreVary: true/, "a saved asset must be found again even if Vary differs");
+  assert.match(sw, /const fallback = await saved\(url\.pathname\)/, "a failed asset fetch must fall back to the saved copy");
   for (const prefix of ["/auth", "/sync", "/reports", "/sales", "/purchases"]) {
     assert.ok(sw.includes(`"${prefix}"`), `${prefix} must be excluded from the shell cache`);
   }
   assert.match(sw, /if \(isApiPath\(url\.pathname\)\) return;/);
   assert.match(sw, /if \(req\.headers\.get\("authorization"\)\) return;/);
-  assert.match(sw, /caches\.match\("\/"\)/, "a navigation must fall back to the cached shell");
+  assert.match(sw, /await saved\("\/"\)/, "a navigation must fall back to the cached shell");
   // A launch may not wait on a hanging network: the cached shell answers after a bounded delay.
   assert.match(sw, /const NAV_TIMEOUT_MS = \d+;/);
   assert.match(sw, /setTimeout\(/, "the navigation path must be time-bounded");

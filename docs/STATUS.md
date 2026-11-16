@@ -19,7 +19,7 @@ served by the Expo dev server.
 | CI workflow definition | `node -e "require('js-yaml').load(...)"` over `.github/workflows/ci.yml` | parses; triggers, read-only permissions, `postgres:16` service + health check, `TEST_DATABASE_URL` and all 7 steps present. **Not executed on GitHub Actions from this environment** — see §3 |
 | Web export | `npm run build:web -w @sms/mobile` | export produced in `apps/mobile/dist` |
 | Web app in Chrome, full flows | `node apps/mobile/tests/e2e-web.mjs` | 16 scenarios pass on two consecutive runs, no runtime console errors |
-| PWA shell | headless Chrome against the static export on `http://localhost` | manifest complete, service worker active and controlling, 10 shell assets cached, no API path cached, offline reload renders the shell |
+| PWA shell | headless Chrome against the static export on `http://127.0.0.1` | manifest complete; after **one** online visit the worker is active and controlling and the cache holds 10 assets including all 3 launch bundles; with the network fully off (`Network.emulateNetworkConditions`), navigating to `/` cold renders the app |
 | Migration 004 on the development database | `npm run migrate` | applied |
 
 ### API integration tests (real PostgreSQL, no mocks)
