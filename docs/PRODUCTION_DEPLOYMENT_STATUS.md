@@ -909,3 +909,40 @@ features the phone had.
 Safari itself — the shell install and offline launch above were exercised in Chrome, so an iPhone must
 confirm the installed app opens with the network off. On first launch after this deploy each device
 needs one online visit; the app then keeps a refresh token for later offline relaunches.
+
+## 14. Offline screens and unsynced figures deployed (16 Nov 2026) — `34ccfeb`
+
+Reported after §13 went live: on the iPhone web app, tapping **Sell** offline showed nothing, **Reports**
+(and any screen never opened online) showed nothing offline, and a sale rung up with no network did not
+move the Overview until the phone found a connection.
+
+Cause of the blank screens: `expo export` writes **one script per screen** (`sell-<hash>.js`,
+`reports-<hash>.js`, …) and `index.html` names only the three launch bundles. The v6 worker precached
+exactly those, so every other route was fetched live on navigation — impossible offline. The v7 worker
+precaches `/sw-assets.json`, generated after the export by `scripts/write-sw-manifest.mjs`, which lists
+every exported file (59 here, 35 of them scripts).
+
+Cause of the frozen figures: the Overview deliberately keeps the server/saved snapshot as its basis (so
+one phone's rows never become the whole shop), but a queued sale is on neither the server nor the saved
+copy, so nothing changed until sync. `src/services/pending-dashboard.ts` now folds the operations still in
+the outbox onto the pristine snapshot: net sales, transactions, units, cash, credit and the day's trend bar
+move at once; COGS is added only when this device's own stock history can price the sale, otherwise profit
+is flagged provisional. Merging always starts from the untouched snapshot, so a sale can never be counted
+twice.
+
+| Check | Result |
+|---|---|
+| `GET /sw.js` | **200**, body contains `idukaa-shell-v7` and `precacheManifest` |
+| `GET /sw-assets.json` | **200**, lists **59 files / 35 scripts**, including `sell-eb3054ab…js` and `reports-1e9fbc64…js` |
+| Shell install on the live origin (headless Chrome, fresh profile, one online visit) | worker `activated` and controlling after **49 s**; `caches` → `["idukaa-shell-v7"]` with **61 entries**, including the Sell script |
+| The Sell script was never requested by the page online | confirmed (`Network.requestWillBeSent` never saw it) |
+| Offline `fetch` of that never-loaded script (`Network.emulateNetworkConditions offline`) | `navigator.onLine === false`, **200**, 35,836 bytes — served by the worker |
+| Cold launch with the network off from the same state | app shell rendered (sign-in screen: the profile has no session), `#root` populated |
+| Local static-export run of the same proof | 61 cached, Reports chunk (`reports-1e9fbc64…js`, never loaded) served offline, 68,742 bytes |
+| Tests | `tsc --noEmit` exit 0; `test:dashboard` 25 pass incl. 7 new `pending-dashboard` cases (queued sale moves figures, no double count, synced/rejected/out-of-range ignored, provisional cost, credit + repayment); `test:pwa` 3 pass; `test:i18n` pass |
+
+**Note for users:** the first online visit after this deploy downloads 59 files one at a time (~50 s
+observed) before the app is fully offline-capable; leave the app open once until it finishes.
+
+**Still unverified:** iOS Safari/WebKit itself (all proof above is Chromium), and the signed-in flows on
+production.
