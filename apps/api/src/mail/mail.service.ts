@@ -1,17 +1,20 @@
 import { Injectable, Logger } from "@nestjs/common";
 import nodemailer, { type Transporter } from "nodemailer";
+import { gmailApiConfigured, sendViaGmailApi } from "./gmail-api";
 
 /**
  * The one place in the API that talks to the outside world for e-mail.
  *
- * Sending is deliberately configured through environment variables and is optional at the process
- * level: with no credentials the server still starts, still approves shops and still accepts reset
- * requests, and every attempt is logged as skipped instead of throwing. A mail provider outage must
- * never turn into a 500 that hides whether an account exists.
+ * Two channels, one sender:
+ *   * Gmail's HTTPS send API (`MAIL_GMAIL_*`) — the default recommendation. Same real mailbox,
+ *     Google's servers sign it (SPF/DKIM pass to Gmail without owning a domain), and it runs on
+ *     443, which every host allows. Render's free tier blocks outbound SMTP since Sept 2025.
+ *   * SMTP (`MAIL_SMTP_*`) — for a paid host or any other relay, including a Gmail app password
+ *     where port 465/587 is reachable.
  *
- * The default target is a real Gmail mailbox over SMTP (an app password, never the account
- * password): Gmail delivers to Gmail, and the message is sent by Google's own servers, so SPF and
- * DKIM pass without owning a domain. Point MAIL_SMTP_HOST elsewhere to use any other SMTP relay.
+ * Sending is optional at the process level: with no credentials the server still starts, still
+ * approves shops and still accepts reset requests, and every attempt is logged as skipped instead of
+ * throwing. A mail provider outage must never become a 500 that hides whether an account exists.
  */
 @Injectable()
 export class MailService {
@@ -27,10 +30,18 @@ export class MailService {
   private pass() { return process.env.MAIL_SMTP_PASS ?? ""; }
   private fromName() { return process.env.MAIL_FROM_NAME ?? "Idukaa"; }
 
-  /** The From address must be the authenticated mailbox on Gmail; any other value is rejected. */
+  /** On Gmail the From address must be the authenticated mailbox; any other value is rejected. */
   private from() { return process.env.MAIL_FROM ?? this.user(); }
 
-  configured() { return !!this.user() && !!this.pass(); }
+  smtpConfigured() { return !!this.user() && !!this.pass(); }
+  configured() { return gmailApiConfigured() || this.smtpConfigured(); }
+
+  /** Named so a log line says which one was used, instead of the operator having to guess. */
+  channel(): "gmail-api" | "smtp" | "none" {
+    if (gmailApiConfigured()) return "gmail-api";
+    if (this.smtpConfigured()) return "smtp";
+    return "none";
+  }
 
   private client(): Transporter {
     if (this.transport) return this.transport;
@@ -49,32 +60,37 @@ export class MailService {
   }
 
   /**
-   * Never throws. The caller learns whether the message left the building, and the reason is both
-   * logged and kept for the operator to read back on the health endpoint.
+   * Never throws. The caller learns whether the message left the building, and the reason is logged
+   * for the operator — a revoked refresh token or a quota stop must be visible before a user says
+   * "I never got the link".
    */
   async send(msg: { to: string; subject: string; text: string; html: string }): Promise<{ sent: boolean; error?: string }> {
-    if (!this.configured()) {
-      this.log.warn(`mail not configured (MAIL_SMTP_USER / MAIL_SMTP_PASS unset) — "${msg.subject}" to ${msg.to} not sent`);
+    const channel = this.channel();
+    if (channel === "none") {
+      this.log.warn(`no mail channel configured (MAIL_GMAIL_* or MAIL_SMTP_USER/PASS) — "${msg.subject}" to ${msg.to} not sent`);
       return { sent: false, error: "mail_not_configured" };
     }
     try {
-      await this.client().sendMail({
-        from: `"${this.fromName()}" <${this.from()}>`,
-        to: msg.to,
-        subject: msg.subject,
-        text: msg.text,
-        html: msg.html,
-        // Transactional only: a reply goes to the operator's mailbox, never to a no-reply void.
-        replyTo: this.from(),
-        headers: { "X-Entity-Ref-ID": `idukaa-${Date.now()}` },
-      });
-      this.log.log(`sent "${msg.subject}" to ${msg.to}`);
+      if (channel === "gmail-api") {
+        await sendViaGmailApi(msg);
+      } else {
+        await this.client().sendMail({
+          from: `"${this.fromName()}" <${this.from()}>`,
+          to: msg.to,
+          subject: msg.subject,
+          text: msg.text,
+          html: msg.html,
+          // Transactional only: a reply goes to the operator's mailbox, never to a no-reply void.
+          replyTo: this.from(),
+          headers: { "X-Entity-Ref-ID": `idukaa-${Date.now()}` },
+        });
+      }
+      this.log.log(`sent "${msg.subject}" to ${msg.to} via ${channel}`);
       return { sent: true };
     } catch (e: any) {
       const message = String(e?.response ?? e?.message ?? e);
-      // A revoked app password or a quota stop would otherwise be invisible until a user complains.
-      this.log.error(`could not send "${msg.subject}" to ${msg.to}: ${message}`);
-      return { sent: false, error: "mail_send_failed" };
+      this.log.error(`could not send "${msg.subject}" to ${msg.to} via ${channel}: ${message}`);
+      return { sent: false, error: channel === "gmail-api" ? `gmail_api_failed: ${message.slice(0, 200)}` : "mail_send_failed" };
     }
   }
 }

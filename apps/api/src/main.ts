@@ -61,9 +61,19 @@ async function bootstrap() {
     console.warn(JSON.stringify({ t: new Date().toISOString(), evt: "mail.link_base_missing",
       message: "APP_WEB_URL is unset: confirmation and reset links point at http://localhost:8081" }));
   }
-  if (!process.env.MAIL_SMTP_USER || !process.env.MAIL_SMTP_PASS) {
+  const mailChannel = process.env.MAIL_GMAIL_REFRESH_TOKEN ? "gmail-api"
+    : process.env.MAIL_SMTP_USER && process.env.MAIL_SMTP_PASS ? "smtp" : "none";
+  if (mailChannel === "none") {
     console.warn(JSON.stringify({ t: new Date().toISOString(), evt: "mail.not_configured",
-      message: "MAIL_SMTP_USER/MAIL_SMTP_PASS are unset: no confirmation or reset e-mail will be sent" }));
+      message: "no mail channel (MAIL_GMAIL_* or MAIL_SMTP_USER/PASS): no confirmation or reset e-mail will be sent" }));
+  } else {
+    console.log(JSON.stringify({ t: new Date().toISOString(), evt: "mail.channel", channel: mailChannel }));
+  }
+  // A free Render instance cannot reach Gmail's SMTP ports; say so at boot instead of at the first
+  // reset request, which would otherwise sit for 20 s and fail with ETIMEDOUT in the logs.
+  if (mailChannel === "smtp" && !process.env.MAIL_GMAIL_REFRESH_TOKEN) {
+    console.warn(JSON.stringify({ t: new Date().toISOString(), evt: "mail.smtp_may_be_blocked",
+      message: "SMTP is selected: free Render instances block ports 25/465/587. Use MAIL_GMAIL_* or a paid instance." }));
   }
 }
 bootstrap();

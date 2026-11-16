@@ -1121,8 +1121,12 @@ cannot lock out a shop that is already trading. Every account created from now o
 
 ### Delivery
 
-`MAIL_SMTP_*` (Gmail app password by default) through `nodemailer`. Gmail-to-Gmail passes SPF/DKIM
-without owning a domain, which is the point: the alternative needs a domain and DNS records.
+One real Gmail mailbox, sent through **Gmail's HTTPS send API** (`MAIL_GMAIL_*`), with `nodemailer`
+over SMTP kept as the fallback for hosts that allow it. The task first chose a Gmail app password,
+but Render's free web services have blocked outbound SMTP ports 25/465/587 since September 2025 —
+that path connects and then dies on `ETIMEDOUT`. The HTTPS API runs on 443, is signed by Google (so
+Gmail delivers to Gmail with SPF/DKIM passing and no domain purchase), and needs one offline OAuth
+token minted once by `apps/api/tools/gmail-oauth.mjs`. Both channels send the same templates.
 Sending is best-effort by design — with no credentials, or with Gmail rejecting, the API still approves
 shops and still answers reset requests: the failure is logged (`MailService`, plus the boot warning
 `mail.not_configured`) and recorded in the audit log (`auth.email.verification.sent` and
@@ -1131,16 +1135,21 @@ carry the full link in the text part, so the message is usable with images and b
 
 ### Setup on the server (exact)
 
-1. Google Account for the sending mailbox → Security → 2-Step Verification → **App passwords** →
-   create one for "Mail". The 16 characters are `MAIL_SMTP_PASS`; `MAIL_SMTP_USER` is the full address.
-2. Render → the API service → Environment:
-   `MAIL_SMTP_HOST=smtp.gmail.com`, `MAIL_SMTP_PORT=465`, `MAIL_SMTP_USER=<mailbox>`,
-   `MAIL_SMTP_PASS=<app password>`, `MAIL_FROM_NAME=Idukaa`,
+1. Google Cloud console → new project → **APIs & Services → Library → Gmail API → Enable**.
+2. **OAuth consent screen**: User type *External*, add the sending Gmail address as a test user.
+   Publish the app (*In production*) before real use: while it is in *Testing*, Google expires every
+   refresh token after 7 days. An unverified app only shows a warning during consent.
+3. **Credentials → Create credentials → OAuth client ID → Desktop app**; copy the client id/secret.
+4. On this machine: `cd apps/api && MAIL_GMAIL_CLIENT_ID=... MAIL_GMAIL_CLIENT_SECRET=... node tools/gmail-oauth.mjs`,
+   open the printed URL as the sending mailbox, and copy the printed refresh token.
+5. Render → the API service → Environment: `MAIL_GMAIL_CLIENT_ID`, `MAIL_GMAIL_CLIENT_SECRET`,
+   `MAIL_GMAIL_REFRESH_TOKEN`, `MAIL_FROM=<the same Gmail address>`, `MAIL_FROM_NAME=Idukaa`,
    `APP_WEB_URL=https://idukaa-api.vercel.app`, `EMAIL_VERIFICATION_REQUIRED=true`.
-3. `APP_WEB_URL` is not optional: without it, links point at `http://localhost:8081`. The API warns at
-   boot (`mail.link_base_missing`) instead of failing silently.
-4. Gmail allows roughly 500 recipients/day. That is far above onboarding volume; if it is ever
-   exceeded, move to a transactional provider by changing only `MAIL_SMTP_HOST`/credentials.
+6. `APP_WEB_URL` is not optional: without it, links point at `http://localhost:8081`. The API warns at
+   boot (`mail.link_base_missing`) instead of failing silently, and logs `mail.channel` (or
+   `mail.smtp_may_be_blocked` if only SMTP is configured on this host).
+7. Gmail allows roughly 500 recipients/day for a free account — far above onboarding volume. If it is
+   ever exceeded, Brevo/SendGrid/Mailgun can be added behind the same two templates.
 
 ### Client
 
