@@ -10,7 +10,7 @@
  * The worker cannot list a directory from the network, so the list is produced here at build time,
  * next to the files it describes. Same hashing as the export: the names change with the code.
  */
-import { readdirSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,7 +47,15 @@ function walk(dir) {
 }
 
 const assets = walk(dist).sort();
-writeFileSync(join(dist, SELF), JSON.stringify({ generatedAt: new Date().toISOString(), assets }, null, 0) + "\n");
+/**
+ * The dashboard reads this file to show install progress by counting the saved entries, which works
+ * in every browser — WebKit does not reliably deliver the worker's own progress messages while it
+ * installs. The cache name is taken from the worker so the two can never disagree.
+ */
+const sw = readFileSync(join(root, "public", "sw.js"), "utf8");
+const cache = /const CACHE = "([^"]+)"/.exec(sw)?.[1] ?? null;
+if (!cache) console.warn("sw-assets.json: no cache name found in public/sw.js");
+writeFileSync(join(dist, SELF), JSON.stringify({ generatedAt: new Date().toISOString(), cache, assets }, null, 0) + "\n");
 
 const chunks = assets.filter((a) => a.endsWith(".js")).length;
 console.log(`sw-assets.json: ${assets.length} files (${chunks} scripts) listed for offline use`);

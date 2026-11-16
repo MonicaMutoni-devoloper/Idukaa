@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { readPrecacheMessage } from "../src/services/precache-message.ts";
+import { describeProgress, readPrecacheManifest } from "../src/services/precache-status.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -35,7 +35,7 @@ test("Idukaa manifest is installable and correctly branded", () => {
 
 test("the service worker caches only the shell and never API responses", () => {
   const sw = read("public/sw.js");
-  assert.match(sw, /const CACHE = "idukaa-shell-v9"/);
+  assert.match(sw, /const CACHE = "idukaa-shell-v10"/);
   assert.match(sw, /"\/manifest\.json"/);
   assert.match(sw, /"\/icon-maskable-512\.png"/);
   // One online visit must be enough: install saves the bundle the exported launch page names, and
@@ -48,13 +48,14 @@ test("the service worker caches only the shell and never API responses", () => {
   assert.match(sw, /const PRECACHE_CONCURRENCY = (\d+)/, "the manifest pass must be bounded-but-parallel");
   assert.ok(Number(/const PRECACHE_CONCURRENCY = (\d+)/.exec(sw)![1]) > 1);
   assert.match(sw, /await pool\(urls, PRECACHE_CONCURRENCY/, "assets are fetched through the pool");
-  assert.match(sw, /reportProgress\(done, urls\.length\)/, "install must report how much is saved");
+  // Progress is counted from the cache by the page, because WebKit drops a worker's messages while
+  // it installs; the worker therefore needs no messaging of its own.
+  assert.doesNotMatch(sw, /postMessage/, "progress must not depend on worker messages alone");
   // Bodies must be stored as they arrive, never held unread, or Chromium's install never finishes.
   assert.match(sw, /if \(res\.ok\) await c\.put\(cacheKeyOf\(key\), res\)/, "each body is stored immediately");
   // The launch bundle was being downloaded a second time; a hashed name cannot be stale.
   assert.match(sw, /IMMUTABLE_ASSET\.test\(cacheKeyOf\(key\)\) \? "default" : "reload"/,
     "hashed assets may come from the HTTP cache, unhashed ones may not");
-  assert.match(sw, /self\.clients\.matchAll\(\{ includeUncontrolled: true/, "an uncontrolled first visit must be able to hear progress");
   assert.match(sw, /ignoreVary: true/, "a saved asset must be found again even if Vary differs");
   assert.match(sw, /const fallback = await saved\(url\.pathname\)/, "a failed asset fetch must fall back to the saved copy");
   for (const prefix of ["/auth", "/sync", "/reports", "/sales", "/purchases"]) {
@@ -68,19 +69,18 @@ test("the service worker caches only the shell and never API responses", () => {
   assert.match(sw, /setTimeout\(/, "the navigation path must be time-bounded");
 });
 
-test("only the worker's own progress messages are shown, never a guessed percentage", () => {
-  assert.deepEqual(readPrecacheMessage({ type: "idukaa-precache", done: 12, total: 59 }), { done: 12, total: 59 });
-  assert.deepEqual(readPrecacheMessage({ type: "idukaa-precache", done: 59, total: 59 }), { done: 59, total: 59 });
-  // A count past the total is clamped rather than shown as "61 of 59".
-  assert.deepEqual(readPrecacheMessage({ type: "idukaa-precache", done: 70, total: 59 }), { done: 59, total: 59 });
-  for (const bad of [
-    null, undefined, "idukaa-precache", 42, [],
-    { type: "something-else", done: 1, total: 2 },
-    { type: "idukaa-precache", done: "12", total: 59 },
-    { type: "idukaa-precache", done: 1, total: 0 },
-    { type: "idukaa-precache", done: Number.NaN, total: 59 },
-  ]) {
-    assert.equal(readPrecacheMessage(bad), null, `${JSON.stringify(bad)} must be ignored`);
+test("install progress is read from the saved entries, never guessed", () => {
+  const manifest = { cache: "idukaa-shell-v10", assets: ["/a.js", "/b.js", "/c.js"] };
+  assert.deepEqual(readPrecacheManifest(manifest), { cache: "idukaa-shell-v10", total: 3 });
+  for (const bad of [null, undefined, [], {}, { assets: ["/a.js"] }, { cache: "c", assets: [] }, { cache: "", assets: ["/a.js"] }]) {
+    assert.equal(readPrecacheManifest(bad), null, `${JSON.stringify(bad)} must not start a banner`);
+  }
+  assert.deepEqual(describeProgress(1, 3), { done: 1, total: 3 });
+  // The shell page, icons and launch bundle are saved before the manifest pass, so 61 of 59 is normal.
+  assert.deepEqual(describeProgress(61, 59), { done: 59, total: 59 });
+  assert.deepEqual(describeProgress(0, 59), { done: 0, total: 59 });
+  for (const bad of [["12", 59], [Number.NaN, 59], [1, 0], [1, "59"], [null, 59]]) {
+    assert.equal(describeProgress(bad[0], bad[1]), null, `${JSON.stringify(bad)} must be ignored`);
   }
 });
 

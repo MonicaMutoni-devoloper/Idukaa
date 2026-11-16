@@ -17,7 +17,9 @@
 // v9: the install used to bypass the HTTP cache for every file, so it downloaded the ~1.6 MB launch
 // bundle a second time — the page had just fetched it. Content-hashed names can never go stale, so
 // those are allowed to come from the browser's cache and only the unhashed files force a re-fetch.
-const CACHE = "idukaa-shell-v9";
+// v10: the app reads `cache` from /sw-assets.json and counts saved entries itself, instead of relying
+// on this worker's progress messages, which WebKit does not reliably deliver during install.
+const CACHE = "idukaa-shell-v10";
 const SHELL = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png"];
 // Written next to the export by scripts/write-sw-manifest.mjs: every file, not only the launch ones.
 const MANIFEST = "/sw-assets.json";
@@ -29,8 +31,6 @@ const NAV_TIMEOUT_MS = 3000;
 // Files fetched at the same time during install. Enough to hide the round-trip latency without
 // opening the dozens of parallel requests that made the install event stall.
 const PRECACHE_CONCURRENCY = 6;
-// The window tells the app how much is saved: { type: "idukaa-precache", done, total }.
-const PROGRESS_TYPE = "idukaa-precache";
 
 // Every REST prefix used by the API. A response from any of these is always fetched live.
 const API_PREFIXES = ["/auth", "/sync", "/reports", "/notifications", "/audit", "/sales", "/purchases", "/shop", "/admin", "/health"];
@@ -98,14 +98,6 @@ async function pool(items, limit, work) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
 }
 
-/** Tell any open window how much of the app is saved, so the visit can be ended when it is done. */
-async function reportProgress(done, total) {
-  try {
-    const windows = await self.clients.matchAll({ includeUncontrolled: true, type: "window" });
-    for (const client of windows) client.postMessage({ type: PROGRESS_TYPE, done, total });
-  } catch { /* a tab that cannot be reached must not fail the install */ }
-}
-
 /**
  * Every file the export produced, in the order the build listed them, a few at a time. The count is
  * posted as it goes: this is the pass that makes screens that were never opened usable offline.
@@ -118,14 +110,7 @@ async function precacheManifest(c) {
     const list = Array.isArray(body?.assets) ? body.assets : [];
     const urls = [...new Set(list.filter((url) => typeof url === "string" && url.startsWith("/")).map(cacheKeyOf))];
     if (!urls.length) return;
-    let done = 0;
-    await reportProgress(0, urls.length);
-    await pool(urls, PRECACHE_CONCURRENCY, async (url) => {
-      await fetchAndSave(c, url);
-      done += 1;
-      await reportProgress(done, urls.length);
-    });
-    await reportProgress(urls.length, urls.length);
+    await pool(urls, PRECACHE_CONCURRENCY, (url) => fetchAndSave(c, url));
   } catch { /* a missing manifest must not make the installation unusable */ }
 }
 
