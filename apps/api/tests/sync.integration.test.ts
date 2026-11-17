@@ -618,9 +618,16 @@ test("a user can rename themselves and change their password; the old password s
   const { AuthController } = await import("../src/auth/auth.controller");
   const { AuthService } = await import("../src/auth/auth.service");
   const { NotificationService } = await import("../src/notifications/notifications.service");
+  const { MailService } = await import("../src/mail/mail.service");
+  const { EmailVerificationService } = await import("../src/auth/email-verification.service");
+  const { LoginLockout } = await import("../src/auth/login-lockout.service");
   const { JwtService } = await import("@nestjs/jwt");
   const jwt = new JwtService({ secret: "test-secret-".padEnd(48, "x") });
-  const auth = new AuthController(new AuthService(db, jwt, new NotificationService(db)));
+  // The full set AppModule injects: login() reads the verification gate and the account lockout.
+  const mail = new MailService();
+  const auth = new AuthController(new AuthService(
+    db, jwt, new NotificationService(db), new EmailVerificationService(db, mail), mail, new LoginLockout(),
+  ));
   const email = `pw-${Date.now()}@a.test`;
   const userId = (await pool.query(
     "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,$2,'Old Name',$3,'manager') RETURNING id",

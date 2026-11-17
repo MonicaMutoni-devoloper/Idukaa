@@ -49,10 +49,23 @@ before(async () => {
   const { Db } = await import("../src/db/db.service");
   const { AuthService } = await import("../src/auth/auth.service");
   const { NotificationService } = await import("../src/notifications/notifications.service");
+  const { MailService } = await import("../src/mail/mail.service");
+  const { EmailVerificationService } = await import("../src/auth/email-verification.service");
+  const { LoginLockout } = await import("../src/auth/login-lockout.service");
   const { JwtService } = await import("@nestjs/jwt");
   db = new Db();
   pool2 = db.pool;
-  auth = new AuthService(db, new JwtService({ secret: "test-secret-".padEnd(48, "x"), signOptions: { expiresIn: "15m" } }), new NotificationService(db));
+  // Built exactly as AppModule builds it: the sign-in gate reads the verification service, so a
+  // three-argument AuthService failed every login here with a TypeError, not a real refusal.
+  const mail = new MailService();
+  auth = new AuthService(
+    db,
+    new JwtService({ secret: "test-secret-".padEnd(48, "x"), signOptions: { expiresIn: "15m" } }),
+    new NotificationService(db),
+    new EmailVerificationService(db, mail),
+    mail,
+    new LoginLockout(),
+  );
 
   shop = (await pool.query("INSERT INTO shops(name) VALUES ('Refresh shop') RETURNING id")).rows[0].id;
   const r = await pool.query(

@@ -40,16 +40,19 @@ before(async () => {
   const b = (await pool.query("INSERT INTO shops(name) VALUES ('Existing B') RETURNING id")).rows[0];
   shopA = a.id; shopB = b.id;
   const owner = (await pool.query(
-    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,'owner-a@migration.test','Owner A','x','owner') RETURNING id",
+    // No email_verified_at here: this fixture is deliberately held at the pre-008 schema, and that
+    // column only arrives in migration 010. Naming it made every test in this file fail on a column
+    // that does not exist yet — a test bug, not a schema problem.
+    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,'owner-a@migration.test','Owner A','x','owner') RETURNING id",
     [shopA])).rows[0];
   ownerA = owner.id;
   const mgr = (await pool.query(
-    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,'manager-a@migration.test','Manager A','x','manager') RETURNING id",
+    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,'manager-a@migration.test','Manager A','x','manager') RETURNING id",
     [shopA])).rows[0];
   managerA = mgr.id;
   // Platform administrators have no shop and must never receive a membership row.
   await pool.query(
-    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), NULL,'admin@migration.test','Admin','x','system_admin')");
+    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES (NULL,'admin@migration.test','Admin','x','system_admin')");
 
   const opId = "11111111-1111-4111-8111-111111111111";
   existingSale = "22222222-2222-4222-8222-222222222222";
@@ -87,7 +90,7 @@ test("008 backfills memberships without inventing platform access", { skip }, as
 
   // The trigger keeps the membership table in step with a newly created shop account.
   const newUser = (await pool.query(
-    "INSERT INTO users(email_verified_at, shop_id,email,full_name,password_hash,role) VALUES (now(), $1,'new@migration.test','New Manager','x','manager') RETURNING id",
+    "INSERT INTO users(shop_id,email,full_name,password_hash,role) VALUES ($1,'new@migration.test','New Manager','x','manager') RETURNING id",
     [shopB])).rows[0];
   const created = await pool.query("SELECT shop_id, role, status FROM shop_memberships WHERE user_id=$1", [newUser.id]);
   assert.equal(created.rowCount, 1);

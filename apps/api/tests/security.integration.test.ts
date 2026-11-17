@@ -14,6 +14,14 @@ import { authenticator } from "otplib";
 
 process.env.TOTP_ENCRYPTION_KEY = randomBytes(32).toString("base64");
 process.env.JWT_EXPIRES_IN = "15m";
+// The reset form now answers 503 mail_not_configured when this host has no sending channel at all —
+// a shop told "check your inbox" against a dead channel is the failure that rule exists to prevent.
+// These tests need a channel that is configured but cannot deliver: port 1 refuses instantly, the
+// token is still stored, and the send failure is logged rather than thrown.
+process.env.MAIL_SMTP_HOST = "127.0.0.1";
+process.env.MAIL_SMTP_PORT = "1";
+process.env.MAIL_SMTP_USER = "ci@example.test";
+process.env.MAIL_SMTP_PASS = "test-only";
 
 const url = process.env.TEST_DATABASE_URL;
 const skip = url ? false : "TEST_DATABASE_URL not set";
@@ -43,10 +51,22 @@ before(async () => {
   const { Db } = await import("../src/db/db.service");
   const { AuthService } = await import("../src/auth/auth.service");
   const { NotificationService } = await import("../src/notifications/notifications.service");
+  const { MailService } = await import("../src/mail/mail.service");
+  const { EmailVerificationService } = await import("../src/auth/email-verification.service");
+  const { LoginLockout } = await import("../src/auth/login-lockout.service");
   const { JwtService } = await import("@nestjs/jwt");
   db = new Db();
   notifications = new NotificationService(db);
-  auth = new AuthService(db, new JwtService({ secret: "test-secret-".padEnd(48, "x"), signOptions: { expiresIn: "15m" } }), notifications);
+  // Same collaborators the running app injects: login() consults the verification gate.
+  const mail = new MailService();
+  auth = new AuthService(
+    db,
+    new JwtService({ secret: "test-secret-".padEnd(48, "x"), signOptions: { expiresIn: "15m" } }),
+    notifications,
+    new EmailVerificationService(db, mail),
+    mail,
+    new LoginLockout(),
+  );
 
   shopA = (await pool.query("INSERT INTO shops(name) VALUES ('Security shop A') RETURNING id")).rows[0].id;
   shopB = (await pool.query("INSERT INTO shops(name) VALUES ('Security shop B') RETURNING id")).rows[0].id;
