@@ -1266,9 +1266,54 @@ Access, then **Audience → Publish app**, then revoke the old grant and re-run
 
 * **The deployed `/health` with `mailToken`** — this commit must deploy first; until then the running
   instance has no such field.
-* **The integration suite** still needs PostgreSQL and therefore still runs only in CI. The lockout is
-  covered by a pure unit test, which does run locally.
+* **The integration suite** needs PostgreSQL. It now also runs on a Windows machine without an
+  installed server (see §22.6); the first such run found four broken suites that CI had been failing
+  on since 16 Nov.
 * **A full employee signup through the deployed app** — no account may be created from this machine
   (no password may be typed here), and the login throttle requires a real session to observe.
 * **The keep-alive workflow** — GitHub only registers a `schedule` from the default branch, so the first
   run happens after this is pushed and can be up to ten minutes later. It was not executed locally.
+
+### 22.6 CI had been red since 16 Nov, and the integration suite had never run here
+
+The readiness answer above was written assuming the integration suite passed somewhere. It did not.
+Checking the run history after pushing: the last successful CI run was `30f738d` (16 Nov 11:59); every
+run after it — `609dd22` (the verification feature), `791d439`, `a3257e7`, `af06e63`, `cdce9d1` and this
+session's `f72d2ff` — failed on *API integration tests (PostgreSQL)*. Locally those suites skip without
+`TEST_DATABASE_URL`, so "32 pass / 104 skipped" had been read as coverage it was not. Job logs need
+authentication that is not available here, so the failure was reproduced instead.
+
+Reproducing it locally needed a PostgreSQL on a machine that has none (no Docker, no `psql`). A
+throwaway cluster from the `embedded-postgres` npm package works, in `/tmp`, outside the repository:
+
+```bash
+mkdir -p /tmp/pgtest && cd /tmp/pgtest && npm init -y && npm i embedded-postgres
+# start.mjs: new EmbeddedPostgres({ databaseDir, user:'postgres', password, port:5434,
+#   persistent:true, initdbFlags:["--encoding=UTF8","--locale=C"] }); initialise(); start();
+#   createDatabase("sms_test"); then CREATE ROLE ci LOGIN PASSWORD 'ci' SUPERUSER.
+node start.mjs   # then, from apps/api:
+TEST_DATABASE_URL='postgres://ci:ci@127.0.0.1:5434/sms_test' npm test
+```
+
+`--encoding=UTF8 --locale=C` is not optional on Windows: without it the cluster is created as
+`WIN1252` and every test dies on `22P05 character ... has no equivalent in encoding`.
+
+Four causes, all in the tests rather than the application:
+
+1. **Three suites built `AuthService` with three arguments** (`refresh`, `security`, `sync`). The sign-in
+   gate added in §21 reads `this.verification.required()`, so every login in those suites threw
+   `TypeError: Cannot read properties of undefined (reading 'required')` — a 500, not a refusal. They now
+   pass the verification service, `MailService` and `LoginLockout` exactly as `AppModule` does.
+2. **`security` had no mail channel**, so the reset form correctly answered `503 mail_not_configured`
+   (§21's rule) and the password-reset test failed. It now configures an SMTP channel pointed at port 1:
+   configured, so the form works, but delivery fails instantly and is logged rather than thrown.
+3. **`migration-008` inserted `email_verified_at`**, a column from migration 010, into a fixture held
+   deliberately at the pre-008 schema. Removed, with the reason in a comment.
+4. `f72d2ff` itself was clean once those were fixed; the run before it was already red.
+
+Result: **139 tests, 139 pass, 0 fail** against a real PostgreSQL, then CI run #75 on `453d1fb`
+**success** — the first green run since 16 Nov.
+
+**Still unverified:** CI uses PostgreSQL 16 and this reproduction used 18.6; the three fixes above were
+logical (missing collaborators, a missing column) rather than version-dependent, and CI green on the
+same commit is the confirmation.
