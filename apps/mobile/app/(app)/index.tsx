@@ -3,10 +3,11 @@ import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { formatQty, formatRwf } from "@sms/shared";
 import { Badge, Banner, Button, Card, Empty, ErrorState, Screen, Segmented, Skeleton, useWide } from "../../src/components/ui";
+import { Icon, type IconName } from "../../src/components/icons";
 import { PeriodSelector } from "../../src/components/date-range-picker";
 import { OfflineReadinessStrip } from "../../src/components/offline-download";
 import { BarList, CompareBars, ProductRanking, StockHealthBar, TrendBars } from "../../src/components/charts";
-import { Appear, Disclosure, useCountUp } from "../../src/components/motion";
+import { Appear, Disclosure } from "../../src/components/motion";
 import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet, listRecords } from "../../src/database";
 import { ApiError, request, sessionRejected, useSession } from "../../src/services/api";
@@ -20,8 +21,11 @@ import {
   OVERVIEW_PRESET_LABEL, defaultSelection, formatSelectionRange, selectionRange,
   type OverviewSelection,
 } from "../../src/services/overview-period";
+import {
+  attentionItems, greetingKey, primaryFigures, trendMetricKeys, trendSeries, type TrendMetric,
+} from "../../src/services/dashboard-view";
 import { useSync } from "../../src/synchronization/engine";
-import { motion, space, type, useTheme } from "../../src/theme/tokens";
+import { radius, space, type, useTheme } from "../../src/theme/tokens";
 
 interface Snapshot {
   range: { from: string; to: string };
@@ -78,6 +82,13 @@ const localInRange = (r: LocalDashboardResult, to: string) =>
 
 const ACTION_KEYS: Record<string, Key> = {
   "op.sale.create": "dash.act.sale",
+  // A repayment is money received against an older credit, never a sale.
+  "op.credit.payment.create": "dash.act.payment",
+  "credit.payment.create": "dash.act.payment",
+  "op.customer.upsert": "dash.act.customer",
+  "op.customer.create": "dash.act.customer",
+  "customer.upsert": "dash.act.customer",
+  "shop.upsert": "dash.act.policy",
   "op.receipt.create": "dash.act.receipt",
   "op.purchase.create": "dash.act.purchase",
   "op.expense.create": "dash.act.expense",
@@ -98,46 +109,80 @@ const ACTION_KEYS: Record<string, Key> = {
   "shop.policy.update": "dash.act.policy",
 };
 
-function Kpi({ label, value, format, delta, hint, tone, emphasis, testID }: {
-  label: string; value: number; format?: (n: number) => string; delta?: Change | null; hint?: string;
-  tone?: string; emphasis?: boolean; testID?: string;
+function Kpi({ label, value, hint, delta, tone, testID }: {
+  label: string; value: string; hint?: string; delta?: Change | null; tone?: string; testID?: string;
 }) {
   const c = useTheme();
   const t = useT();
-  const shown = useCountUp(Number.isFinite(value) ? value : 0);
-  const fmt = format ?? formatRwf;
-  const good = delta ? delta.change >= 0 : true;
   return (
-    <Card style={{ flexGrow: 1, flexBasis: emphasis ? 220 : 158, gap: 4, padding: space.lg }}>
-      <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{label}</Text>
-      <Text testID={testID} style={{ color: tone ?? (emphasis ? c.ink : c.inkSoft), ...(emphasis ? type.moneyLarge : type.money) }}>{fmt(shown)}</Text>
-      {hint ? <Text style={{ color: c.muted, fontSize: 12 }}>{hint}</Text> : null}
+    <Card style={{ flexGrow: 1, flexBasis: 172, minWidth: 148, gap: 5, padding: space.lg }}>
+      <Text numberOfLines={1} style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{label}</Text>
+      <Text testID={testID} style={{ color: tone ?? c.ink, ...type.money }}>{value}</Text>
+      {hint ? <Text numberOfLines={2} style={{ color: c.muted, fontSize: 12, lineHeight: 16 }}>{hint}</Text> : null}
       {delta ? (
         delta.pct === null
           ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.noPrior")}</Text>
-          : <Text style={{ color: good ? c.success : c.danger, fontSize: 12, fontWeight: "600" }}>
-              {good ? "▲" : "▼"} {Math.abs(delta.pct)}% <Text style={{ color: c.muted, fontWeight: "400" }}>{t("fin.vsPrev")}</Text>
+          : <Text style={{ color: delta.change >= 0 ? c.success : c.danger, fontSize: 12, fontWeight: "600" }}>
+              {delta.change >= 0 ? "▲" : "▼"} {Math.abs(delta.pct)}% <Text style={{ color: c.muted, fontWeight: "400" }}>{t("fin.vsPrev")}</Text>
             </Text>
       ) : null}
     </Card>
   );
 }
 
-function QuickAction({ label, onPress, primary, testID }: { label: string; onPress: () => void; primary?: boolean; testID?: string }) {
+function QuickAction({ label, icon, onPress, primary, testID }: {
+  label: string; icon: IconName; onPress: () => void; primary?: boolean; testID?: string;
+}) {
   const c = useTheme();
   return (
     <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={label} onPress={onPress}
       style={({ hovered, pressed, focused }: any) => ({
-        flexGrow: 1, flexBasis: 132, minHeight: 44, paddingHorizontal: space.md, borderRadius: 8,
-        alignItems: "center", justifyContent: "center", backgroundColor: primary ? c.primaryStrong : c.surface,
+        flexGrow: 1, flexBasis: 128, minHeight: 48, paddingHorizontal: space.md, borderRadius: radius.sm,
+        flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7,
+        backgroundColor: primary ? c.primaryStrong : c.surface,
         borderWidth: focused ? 2 : 1, borderColor: focused ? c.focus : primary ? c.primaryStrong : c.lineStrong,
         opacity: pressed ? 0.85 : hovered ? 0.95 : 1,
       })}>
+      <Icon name={icon} size={15} color={primary ? c.onPrimary : c.inkSoft} />
       <Text style={{ color: primary ? c.onPrimary : c.ink, fontWeight: "600", fontSize: 13, textAlign: "center" }}>{label}</Text>
     </Pressable>
   );
 }
 
+/** One line of a "needs attention" list: only ever rendered for a real, non-zero count. */
+function AttentionRow({ label, count, tone, onPress }: {
+  label: string; count: number; tone: "danger" | "warn" | "neutral"; onPress: () => void;
+}) {
+  const c = useTheme();
+  const colour = tone === "danger" ? c.danger : tone === "warn" ? c.accent : c.muted;
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={`${label}: ${count}`} onPress={onPress}
+      style={({ hovered, pressed, focused }: any) => ({
+        flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 10, paddingHorizontal: space.lg,
+        borderTopWidth: 1, borderTopColor: c.line, borderRadius: 6,
+        backgroundColor: pressed ? c.pressed : hovered ? c.hover : "transparent",
+        outlineStyle: focused ? "solid" : undefined,
+      } as any)}>
+      <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: colour }} />
+      <Text numberOfLines={2} style={{ flex: 1, color: c.ink, fontSize: 13, fontWeight: "600" }}>{label}</Text>
+      <Text style={{ color: colour, fontSize: 13, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{count}</Text>
+      <Icon name="chevronRight" size={14} color={c.muted} />
+    </Pressable>
+  );
+}
+
+function FigureRow({ label, value, note }: { label: string; value: string; note?: string }) {
+  const c = useTheme();
+  return (
+    <View style={{ flexGrow: 1, flexBasis: 250, minWidth: 0, flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: space.md, paddingVertical: 7, borderBottomWidth: 1, borderBottomColor: c.line }}>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={{ color: c.muted, fontSize: 13 }}>{label}</Text>
+        {note ? <Text numberOfLines={2} style={{ color: c.muted, fontSize: 11 }}>{note}</Text> : null}
+      </View>
+      <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{value}</Text>
+    </View>
+  );
+}
 export default function Home() {
   const t = useT();
   const c = useTheme();
@@ -163,8 +208,7 @@ export default function Home() {
   const [failed, setFailed] = useState(false);
   // Distinguishes "the server rejected the session" from "the server could not be reached".
   const [authIssue, setAuthIssue] = useState(false);
-  const [trendMetric, setTrendMetric] = useState<"sales" | "profit">("sales");
-  const [activityExpanded, setActivityExpanded] = useState(false);
+  const [trendMetric, setTrendMetric] = useState<TrendMetric>("sales");
   // Every request takes a sequence number: a response for a scope the user has already changed is
   // discarded instead of overwriting newer figures (the old duplicate-request/render-loop bug).
   const loadSeq = useRef(0);
@@ -421,9 +465,7 @@ export default function Home() {
   }, [source, staleAt, localInfo, counts, lastSync, t]);
   const outCount = ops?.outOfStockCount ?? 0;
   const lowOnly = Math.max(0, (ops?.lowStockCount ?? 0) - outCount);
-  const issueCount = ops ? lowOnly + outCount + ops.pendingApprovals + ops.openInvestigations + ops.openConflicts : 0;
   const inStock = Math.max(0, (ops?.productCount ?? 0) - (ops?.lowStockCount ?? 0));
-  const chartData = (data?.trend ?? []).map((p) => ({ ...p, netSales: trendMetric === "profit" ? (p.grossProfit ?? 0) : p.netSales }));
   const chartMode: "day" | "month" = (Date.parse(range.to) - Date.parse(range.from)) / 86_400_000 > 400 ? "month" : "day";
   // Repayments by the method actually used, so a cash collection is never shown as mobile money.
   const methodNote = ops?.repaymentsByMethod
@@ -438,55 +480,79 @@ export default function Home() {
     return key ? t(key) : action.replace(/^op\./, "").replace(/[._]/g, " ");
   };
 
+  /* ---- presentation-layer decisions (see src/services/dashboard-view.ts) ---- */
+  const finVisible = !!data?.permissions?.financials;
+  const primary = ops ? primaryFigures({
+    operations: ops,
+    financials: fin ? { netSales: fin.netSales, grossProfit: fin.grossProfit, grossMarginBps: fin.grossMarginBps } : null,
+    financialsAllowed: finVisible,
+    comparison: data?.financialComparison ?? null,
+    salesComparison: data?.salesComparison ?? null,
+  }) : [];
+  const attention = attentionItems({ operations: ops ?? null, counts: counts ?? null, isOwner });
+  const attentionCount = attention.reduce((n, item) => n + item.count, 0);
+  const metrics = trendMetricKeys(finVisible);
+  const QUICK_TO_PRESET = { today: "today", yesterday: "yesterday", week: "thisWeek", month: "thisMonth" } as const;
+  type QuickPeriod = keyof typeof QUICK_TO_PRESET;
+  const quickValue = selection.kind === "preset"
+    ? (Object.keys(QUICK_TO_PRESET) as QuickPeriod[]).find((k) => QUICK_TO_PRESET[k] === selection.preset) ?? null
+    : null;
+  const kpiHint = (key: string) => {
+    if (key === "grossProfit") {
+      return fin?.grossMarginBps != null ? `${t("dash.grossMargin")} ${(fin.grossMarginBps / 100).toFixed(1)}%` : t("fin.marginUnavailable");
+    }
+    if (key === "moneyReceived") {
+      return t("dash.receivedBreakdown")
+        .replace("{sales}", formatRwf(ops?.cashCollected ?? 0))
+        .replace("{repayments}", formatRwf(ops?.creditRepayments ?? 0));
+    }
+    return undefined;
+  };
+  const metricLabel = (m: TrendMetric) =>
+    m === "profit" ? t("fin.gross") : m === "repayments" ? t("fin.creditRepayments") : t("fin.netSales");
+  const chartRows = data ? trendSeries(data.trend, trendMetric) : [];
+  const hasChartData = !!data?.trend.some((p) => p.netSales !== 0 || (p.grossProfit ?? 0) !== 0 || (p.repayments ?? 0) !== 0);
+
   return (
-    <Screen title={t("home.dashboard")} subtitle={isOwner ? t("home.ownerSubtitle") : t("home.managerSubtitle")}
-      actions={
-        <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
-          <Badge dot tone={online ? "ok" : "warn"} label={online ? t("sync.online") : t("sync.offline")} />
-          {loading && data ? <ActivityIndicator size="small" color={c.muted} /> : null}
-        </View>
-      }>
-      <View style={{ flexDirection: wide ? "row" : "column", alignItems: wide ? "center" : "stretch", gap: space.md }}>
-        <View style={{ flex: 1, gap: 5, minWidth: 240 }}>
-          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("common.period")}</Text>
-          <PeriodSelector selection={selection} onChange={setSelection} />
-          <Text style={{ color: c.muted, fontSize: 11 }}>{formatSelectionRange(selection)}</Text>
-        </View>
-        {loading && data ? <ActivityIndicator size="small" color={c.muted} /> : null}
+    <Screen
+      title={user?.name ? `${t(greetingKey())}, ${user.name.split(" ")[0]}` : t("home.dashboard")}
+      subtitle={`${periodLabel} · ${formatSelectionRange(selection)}`}
+      actions={loading && data ? <ActivityIndicator size="small" color={c.muted} /> : undefined}>
+      {/* Period: four one-tap business periods, plus the Kigali calendar for anything custom. */}
+      <View style={{ flexDirection: wide ? "row" : "column", alignItems: wide ? "center" : "stretch", gap: space.sm, flexWrap: "wrap" }}>
+        <Segmented<QuickPeriod>
+          value={quickValue as QuickPeriod | null}
+          onChange={(v) => setSelection({ kind: "preset", preset: QUICK_TO_PRESET[v] })}
+          label={t("common.period")}
+          options={[
+            { value: "today", label: t("common.today") },
+            { value: "yesterday", label: t("common.yesterday") },
+            { value: "week", label: t("common.week") },
+            { value: "month", label: t("common.month") },
+          ]} />
+        <PeriodSelector selection={selection} onChange={setSelection} compact />
       </View>
 
       {!online ? <Banner tone="warn" text={t("home.cachedData")} /> : null}
       {failed && data && online ? <Banner tone="warn" text={t("dash.refreshFailed")} /> : null}
       {authIssue ? <Banner tone="danger" text={t("dash.sessionExpired")} /> : null}
-      <OfflineReadinessStrip />
       {degraded.length ? <Banner tone="warn" text={t("dash.degraded").replace("{list}", degraded.map(sectionName).join(", "))} /> : null}
+
+      {/* One compact line of provenance. The header already carries the sync badge, so this states
+          where the FIGURES came from and how fresh they are — one indicator per question, no repeats. */}
       {data ? (
-        <Card tone={displayStatus === "conflict" || displayStatus === "sync_failed" ? "warn" : "muted"} style={{ gap: 6 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
-            <Badge dot tone={statusTone} label={t("dash.figureStatus")} />
-            <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700" }}>{t(`dash.status.${displayStatus}` as Key)}</Text>
-            <Text style={{ color: c.muted, fontSize: 12 }}>
-              {source === "server" ? t("dash.src.server") : source === "cached" ? t("dash.src.cached") : t("dash.src.local")}
-            </Text>
-          </View>
-          {figureNote ? <Text style={{ color: c.muted, fontSize: 12, lineHeight: 17 }}>{figureNote}</Text> : null}
-        </Card>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: statusTone === "ok" ? c.success : statusTone === "danger" ? c.danger : c.accent }} />
+          <Text style={{ color: c.inkSoft, fontSize: 12, fontWeight: "700" }}>{t(`dash.status.${displayStatus}` as Key)}</Text>
+          {figureNote ? <Text numberOfLines={2} style={{ flexShrink: 1, color: c.muted, fontSize: 12, lineHeight: 17 }}>· {figureNote}</Text> : null}
+        </View>
       ) : null}
 
-      <Card tone="muted" style={{ gap: space.sm }}>
-        <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("home.quickActions")}</Text>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-          <QuickAction testID="home-action-sell" primary label={t("nav.sell")} onPress={() => router.push("/sell")} />
-          <QuickAction testID="home-action-stock" label={t("nav.stock")} onPress={() => router.push("/stock")} />
-          <QuickAction testID="home-action-expense" label={t("nav.expense")} onPress={() => router.push("/expense")} />
-          {/* A stock count is a manager operation, so the owner gets this shortcut as well. */}
-          <QuickAction testID="home-action-count" label={t("stock.count")} onPress={() => router.push({ pathname: "/stock", params: { count: "1" } })} />
-        </View>
-      </Card>
+      <OfflineReadinessStrip />
 
       {loading && !data ? (
         <View testID="dash-loading" style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-          {[1, 2, 3, 4].map((i) => <Skeleton key={i} height={98} width="23%" style={{ minWidth: 150, flexGrow: 1 }} />)}
+          {[1, 2, 3, 4].map((i) => <Skeleton key={i} height={104} width="23%" style={{ minWidth: 150, flexGrow: 1 }} />)}
         </View>
       ) : failed && !data ? (
         <ErrorState text={t(authIssue ? "dash.sessionExpired" : "home.loadError")} onRetry={() => void load(true)} />
@@ -494,340 +560,241 @@ export default function Home() {
         <Loading />
       ) : (
         <>
-          {fin ? (
-            <>
-              {fin.costBasisIncomplete ? <Banner tone="warn" text={t("fin.provisional")} /> : null}
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-                <Kpi testID="kpi-netSales" emphasis label={t("fin.netSales")} value={fin.netSales} delta={data.financialComparison?.netSales} />
-                <Kpi label={t("fin.cogs")} value={fin.cogs} hint={t("fin.cogs")} />
-                <Kpi label={t("fin.gross")} value={fin.grossProfit} delta={data.financialComparison?.grossProfit}
-                  hint={fin.grossMarginBps != null ? `${t("dash.grossMargin")}: ${(fin.grossMarginBps / 100).toFixed(1)}%` : t("fin.marginUnavailable")}
-                  tone={fin.grossProfit < 0 ? c.danger : undefined} />
-                <Kpi label={t("fin.operating")} value={fin.operatingProfit} delta={data.financialComparison?.operatingProfit}
-                  tone={fin.operatingProfit < 0 ? c.danger : c.success} />
-              </View>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-                <Kpi testID="kpi-salesCollected" label={t("fin.salesCollected")} value={ops.cashCollected} hint={t("fin.salesCollectedHint")} />
-                <Kpi testID="kpi-creditRepayments" label={t("fin.creditRepayments")} value={ops.creditRepayments ?? 0}
-                  hint={methodNote || t("fin.creditRepaymentsHint")} />
-                <Kpi testID="kpi-totalReceived" label={t("fin.totalReceived")} value={ops.totalReceived ?? ops.cashCollected}
-                  hint={t("fin.totalReceivedHint")} />
-                <Kpi testID="kpi-outstandingCredit" label={t("fin.outstandingCredit")} value={ops.outstandingCredit ?? 0}
-                  tone={(ops.outstandingCredit ?? 0) > 0 ? c.accent : undefined} hint={t("fin.outstandingCreditHint")} />
-              </View>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-                <Kpi label={t("fin.expenses")} value={fin.operatingExpenses} hint={`${t("fin.outstanding")}: ${formatRwf(fin.outstandingExpenses)}`} />
-                <Kpi label={t("fin.purchases")} value={fin.inventoryPurchases}
-                  hint={`${t("dash.supplierPayables")}: ${formatRwf(ops.supplierPayables)}`} />
-                <Kpi testID="kpi-stockLosses" label={t("fin.stockLoss")} value={fin.stockLosses ?? fin.stockLossValue ?? 0}
-                  tone={(fin.stockLosses ?? fin.stockLossValue ?? 0) > 0 ? c.danger : undefined} hint={t("fin.stockLossHint")} />
-              </View>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-                <Kpi testID="kpi-invValue" label={t("fin.invValue")} value={ops.inventoryValue ?? 0} hint={t("dash.inventoryHint")} />
-                <Kpi testID="kpi-resultAfterLosses" label={t("fin.resultAfterLosses")}
-                  value={fin.operatingResultAfterStockLosses ?? fin.operatingProfit}
-                  hint={t("fin.resultAfterLossesHint")}
-                  tone={(fin.operatingResultAfterStockLosses ?? fin.operatingProfit) < 0 ? c.danger : c.success} />
-              </View>
-            </>
-          ) : (
-            <>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-                <Kpi testID="kpi-netSales" emphasis label={t("fin.netSales")} value={ops.netSales} delta={data.salesComparison?.netSales} />
-                <Kpi label={t("dash.transactions")} value={ops.transactions} format={(n) => String(n)} hint={periodLabel} />
-                <Kpi label={t("dash.unitsSold")} value={ops.unitsSold} format={(n) => formatQty(n)} hint={t("dash.unitsSoldHint")} />
-                <Kpi label={t("dash.avgSale")} value={ops.averageTransaction} hint={t("dash.avgSaleHint")} />
-              </View>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-                <Kpi testID="kpi-salesCollected" label={t("fin.salesCollected")} value={ops.cashCollected} hint={t("fin.salesCollectedHint")} />
-                <Kpi testID="kpi-creditRepayments" label={t("fin.creditRepayments")} value={ops.creditRepayments ?? 0}
-                  hint={methodNote || t("fin.creditRepaymentsHint")} />
-                <Kpi testID="kpi-totalReceived" label={t("fin.totalReceived")} value={ops.totalReceived ?? ops.cashCollected}
-                  hint={t("fin.totalReceivedHint")} />
-                <Kpi testID="kpi-outstandingCredit" label={t("fin.outstandingCredit")} value={ops.outstandingCredit ?? 0}
-                  tone={(ops.outstandingCredit ?? 0) > 0 ? c.accent : undefined} hint={t("fin.outstandingCreditHint")} />
-                {ops.inventoryValue !== null
-                  ? <Kpi label={t("fin.invValue")} value={ops.inventoryValue} hint={t("dash.inventoryHint")} />
-                  : <Kpi label={t("dash.catalogue")} value={ops.productCount} format={(n) => String(n)} hint={t("dash.catalogueHint")} />}
-                <Kpi label={t("dash.productsReceived")} value={ops.unitsReceived} format={(n) => formatQty(n)}
-                  hint={`${ops.deliveries} ${t("dash.deliveries")} · ${ops.productsReceived} ${t("dash.products")}`} />
-              </View>
-            </>
-          )}
+          {/* The four questions an owner opens the app to answer. */}
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
+            {primary.map((tile) => (
+              <Kpi key={tile.key} testID={tile.testID}
+                label={t(tile.labelKey)}
+                value={tile.key === "transactions" ? String(tile.value) : formatRwf(tile.value)}
+                delta={tile.delta}
+                hint={kpiHint(tile.key) ?? (tile.hintKey ? t(tile.hintKey) : undefined)}
+                tone={tile.tone === "danger" ? c.danger : tile.tone === "accent" ? c.accent : undefined} />
+            ))}
+          </View>
 
-          {data.permissions?.financials && range ? (
-            <Card style={{ gap: space.sm }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: space.md, flexWrap: "wrap" }}>
-                <View style={{ flex: 1, gap: 2, minWidth: 160 }}>
-                  <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("dash.drilldown")}</Text>
-                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.drilldownHint")}</Text>
-                </View>
-                {(["sales", "purchases", "expenses", "adjustments"] as const).map((kind) => (
-                  <Button key={kind} size="sm" kind="secondary"
-                    label={t(kind === "sales" ? "common.sales" : kind === "purchases" ? "common.purchases" : kind === "expenses" ? "common.expenses" : "dash.stockLosses")}
-                    onPress={() => router.push(`/reports?kind=${kind}&from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}` as any)} />
-                ))}
-                <Button key="profitability" size="sm" label={t("nav.profitability")} onPress={() => router.push("/profitability" as any)} />
-              </View>
-            </Card>
-          ) : null}
+          {fin?.costBasisIncomplete ? <Banner tone="warn" text={t("fin.provisional")} /> : null}
 
-          <Card tone={issueCount ? "warn" : "ok"} style={{ gap: space.md }}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
-              <View style={{ flex: 1, gap: 2 }}>
-                <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.actionable")}</Text>
-                <Text style={{ color: c.muted, fontSize: 12 }}>{issueCount ? t("dash.actionableHint") : t("dash.allClearDesc")}</Text>
-              </View>
-              <Badge tone={issueCount ? "warn" : "ok"} label={String(issueCount)} />
-            </View>
-            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-              {[
-                { label: t("home.productsLow"), n: lowOnly },
-                { label: t("home.productsOut"), n: outCount },
-                { label: t("dash.pendingApprovals"), n: ops.pendingApprovals },
-                { label: t("dash.openInvestigations"), n: ops.openInvestigations },
-                { label: t("dash.openConflicts"), n: ops.openConflicts },
-              ].map((s) => (
-                <View key={s.label} style={{ minWidth: 130, flexGrow: 1, flexBasis: 120, padding: space.sm, borderRadius: 8, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line, gap: 2 }}>
-                  <Text style={{ color: s.n ? c.ink : c.muted, ...type.money }}>{s.n}</Text>
-                  <Text style={{ color: c.muted, fontSize: 11 }}>{s.label}</Text>
-                </View>
-              ))}
-            </View>
-            <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
-              <Button size="sm" kind="secondary" label={t("home.viewStock")} onPress={() => router.push("/stock")} />
-              {isOwner ? <Button size="sm" label={t("dash.reviewApprovals")} onPress={() => router.push("/approvals")} /> : (
-                <Button size="sm" label={t("nav.sync")} onPress={() => router.push("/sync")} />
-              )}
-            </View>
-          </Card>
+          {/* Four actions, one row, no duplicate routes. */}
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
+            <QuickAction testID="home-action-sell" primary icon="cart" label={t("nav.sell")} onPress={() => router.push("/sell")} />
+            <QuickAction testID="home-action-stock" icon="layers" label={t("nav.stock")} onPress={() => router.push("/stock")} />
+            <QuickAction testID="home-action-expense" icon="receipt" label={t("nav.expense")} onPress={() => router.push("/expense")} />
+            <QuickAction testID="home-action-count" icon="checkSquare" label={t("stock.count")} onPress={() => router.push({ pathname: "/stock", params: { count: "1" } })} />
+          </View>
 
-          <View style={{ flexDirection: wide ? "row" : "column", gap: space.md, alignItems: "stretch" }}>
-            <Card style={{ flex: wide ? 1.5 : undefined, gap: space.md, minWidth: 0 }}>
+          <View style={{ flexDirection: wide ? "row" : "column", gap: space.md, alignItems: "flex-start" }}>
+            {/* ONE performance chart, on the metric the owner picks. */}
+            <Card style={{ flex: wide ? 1.6 : undefined, gap: space.md, minWidth: 0 }}>
               <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: space.sm }}>
                 <View style={{ flex: 1, gap: 2, minWidth: 150 }}>
-                  <Text style={{ color: c.ink, ...type.h2 }}>{trendMetric === "profit" ? t("dash.profitTrend") : t("dash.salesTrend")}</Text>
+                  <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.performance")}</Text>
                   <Text style={{ color: c.muted, fontSize: 12 }}>
-                    {trendMetric === "profit" ? `${periodLabel} · ${t("dash.profitTrendHint")}` : `${periodLabel} · ${t("dash.trendHint")}`}
+                    {t("dash.performanceHint").replace("{unit}", t(chartMode === "month" ? "dash.performanceMonth" : "dash.performanceDay"))}
                   </Text>
                 </View>
-                {data.permissions?.financials ? (
-                  <Segmented value={trendMetric} onChange={setTrendMetric} label={t("dash.trendMetric")} options={[
-                    { value: "sales", label: t("fin.netSales") },
-                    { value: "profit", label: t("fin.gross") },
-                  ]} />
+                {metrics.length > 1 ? (
+                  <Segmented<TrendMetric> value={trendMetric} onChange={setTrendMetric} label={t("dash.trendMetric")}
+                    options={metrics.map((m) => ({ value: m, label: metricLabel(m) }))} />
                 ) : null}
               </View>
-              {chartData.some((p) => p.netSales !== 0)
-                ? <TrendBars data={chartData} label={trendMetric === "profit" ? t("fin.gross") : t("fin.netSales")} pointsLabel={t("dash.transactions")} />
+              {hasChartData
+                ? <TrendBars data={chartRows} label={metricLabel(trendMetric)} pointsLabel={t("dash.transactions")} labelMode={chartMode === "month" ? "month" : "day"} showCount={trendMetric === "sales"} />
                 : <Empty icon="chart" title={t("dash.noSales")} description={t("dash.noSalesDesc")}
                     action={<Button testID="dash-record-sale" label={t("dash.recordSale")} onPress={() => router.push("/sell")} />} />}
             </Card>
-            <Card style={{ flex: 1, gap: space.md, minWidth: 0 }}>
-              <View style={{ gap: 2 }}>
-                <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.topProducts")}</Text>
-                <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.topProductsHint")}</Text>
+
+            {/* Only work that needs a decision. No rows means an honest all-clear. */}
+            <Card padded={false} style={{ flex: wide ? 1 : undefined, alignSelf: "flex-start", width: wide ? undefined : "100%", minWidth: 0, gap: 0 }} tone={attentionCount ? "warn" : "ok"}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, padding: space.lg }}>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.actionable")}</Text>
+                  <Text style={{ color: c.muted, fontSize: 12 }}>
+                    {attention.length ? t("dash.attentionHint") : t("dash.noAttention")}
+                  </Text>
+                </View>
+                {attentionCount ? <Badge tone="warn" label={String(attentionCount)} /> : <Icon name="check" size={18} color={c.success} />}
               </View>
-              <ProductRanking items={data.topProducts} emptyLabel={t("dash.noSales")} valueLabel={t("common.total")} />
+              {attention.map((item) => (
+                <AttentionRow key={item.key} label={t(item.labelKey)} count={item.count} tone={item.tone}
+                  onPress={() => router.push(item.route as any)} />
+              ))}
             </Card>
           </View>
 
-          {fin ? (
-            <View style={{ flexDirection: wide ? "row" : "column", gap: space.md, alignItems: "stretch" }}>
-              <Card style={{ flex: wide ? 1.5 : undefined, gap: space.md, minWidth: 0 }}>
-                <View style={{ gap: 2 }}>
-                  <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.gpVsExpenses")}</Text>
-                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.gpVsExpensesHint")}</Text>
-                </View>
-                {data.trend.some((p) => (p.grossProfit ?? 0) !== 0 || (p.operatingExpenses ?? 0) !== 0)
-                  ? <CompareBars data={data.trend.map((p) => ({ date: p.date, a: p.grossProfit ?? 0, b: p.operatingExpenses ?? 0 }))}
-                      labelA={t("fin.gross")} labelB={t("fin.expenses")} labelMode={chartMode} />
-                  : <Empty icon="chart" title={t("dash.noSales")} description={t("dash.noExpensesDesc")} />}
-              </Card>
-              <Card style={{ flex: 1, gap: space.md, minWidth: 0 }}>
-                <View style={{ gap: 2 }}>
-                  <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.monthlyResult")}</Text>
-                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.monthlyResultHint")}</Text>
-                </View>
-                {fin.monthly && fin.monthly.some((m) => m.netSales !== 0 || m.operatingExpenses !== 0)
-                  ? <TrendBars data={fin.monthly.map((m) => ({ date: m.month, netSales: m.operatingResult, transactions: 0 }))}
-                      label={t("fin.resultAfterLosses")} labelMode="month" showCount={false} />
-                  : <Empty title={t("dash.noSales")} description={t("dash.noSalesDesc")} />}
-              </Card>
-            </View>
-          ) : null}
-
-          {fin ? (
-            <View style={{ flexDirection: wide ? "row" : "column", gap: space.md, alignItems: "stretch" }}>
-              <Card style={{ flex: 1, gap: space.md, minWidth: 0 }}>
-                <View style={{ gap: 2 }}>
-                  <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.topByProfit")}</Text>
-                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.topByProfitHint")}</Text>
-                </View>
-                {profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
-                  : (fin.topProductsByProfit ?? []).length ? (fin.topProductsByProfit ?? []).map((p) => (
-                  <View key={p.productId} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
-                    <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
-                    <Text style={{ color: (p.grossProfit ?? 0) < 0 ? c.danger : c.success, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(p.grossProfit ?? 0)}</Text>
-                    <Text style={{ color: c.muted, fontSize: 11, width: 52, textAlign: "right" }}>{p.grossMarginBps != null ? `${(p.grossMarginBps / 100).toFixed(0)}%` : "—"}</Text>
-                  </View>
-                )) : <Empty title={t("dash.noSales")} description={t("dash.noSalesDesc")} />}
-              </Card>
-              <Card style={{ flex: 1, gap: space.md, minWidth: 0 }}>
-                <View style={{ gap: 2 }}>
-                  <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.lowMargin")}</Text>
-                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.lowMarginHint")}</Text>
-                </View>
-                {profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
-                  : (fin.lowMarginProducts ?? []).length ? (fin.lowMarginProducts ?? []).map((p) => (
-                  <View key={p.productId} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
-                    <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
-                    {p.belowCost ? <Badge tone="danger" label={t("receive.belowCostBadge")} /> : null}
-                    <Text style={{ color: c.danger, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"], minWidth: 52, textAlign: "right" }}>
-                      {p.grossMarginBps != null ? `${(p.grossMarginBps / 100).toFixed(1)}%` : "—"}
-                    </Text>
-                  </View>
-                )) : <Empty title={t("dash.noLowMargin")} description={t("dash.noLowMarginDesc")} />}
-              </Card>
-            </View>
-          ) : null}
-
-          <View style={{ flexDirection: wide ? "row" : "column", gap: space.md, alignItems: "stretch" }}>
-            <Card style={{ flex: 1, gap: space.md, minWidth: 0 }}>
-              <View style={{ gap: 2 }}>
-                <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.stockHealth")}</Text>
-                <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.stockHealthHint")}</Text>
+          {/* Recent activity, with the full reports one tap away. */}
+          <Card style={{ gap: space.sm }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
+              <View style={{ flex: 1, gap: 2, minWidth: 150 }}>
+                <Text style={{ color: c.ink, ...type.h2 }}>{t("home.recentActivity")}</Text>
+                <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.activityHint")}</Text>
               </View>
-              <StockHealthBar inStock={inStock} low={lowOnly} out={outCount} label={t("dash.stockHealth")} />
-              {data.lowStock.length ? (
-                <View style={{ gap: 2 }}>
-                  {data.lowStock.map((p) => (
-                    <View key={p.id} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
-                      <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
-                      <Badge tone={p.onHand <= 0 ? "danger" : "warn"} dot label={`${formatQty(p.onHand)} ${p.unit}`} />
-                    </View>
-                  ))}
-                </View>
-              ) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("home.noLowStockDesc")}</Text>}
-            </Card>
-
-            <Card style={{ flex: 1.25, gap: space.md, minWidth: 0 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-                <View style={{ flex: 1, gap: 2 }}>
-                  <Text style={{ color: c.ink, ...type.h2 }}>{t("home.recentActivity")}</Text>
-                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.activityHint")}</Text>
-                </View>
-              </View>
-              {(activityExpanded ? data.activity : data.activity.slice(0, 7)).map((a, i) => (
-                <Appear key={a.id} index={i}>
+              {finVisible ? (
+                <>
+                  <Button size="sm" kind="secondary" label={t("common.sales")} onPress={() => router.push(`/reports?kind=sales&from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}` as any)} />
+                  <Button size="sm" kind="secondary" label={t("common.expenses")} onPress={() => router.push(`/reports?kind=expenses&from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}` as any)} />
+                  <Button size="sm" kind="secondary" label={t("nav.profitability")} onPress={() => router.push("/profitability" as any)} />
+                </>
+              ) : null}
+            </View>
+            {data.activity.length ? data.activity.slice(0, 6).map((a, i) => (
+              <Appear key={a.id} index={i}>
                 <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm, paddingVertical: 7, borderTopWidth: 1, borderTopColor: c.line }}>
                   <View style={{ width: 6, height: 6, borderRadius: 3, marginTop: 5, backgroundColor: a.action.startsWith("adjustment") || a.action.startsWith("conflict") ? c.accent : a.action.startsWith("op.") ? c.primary : c.lineStrong }} />
                   <View style={{ flex: 1, gap: 1 }}>
                     <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{actionLabel(a.action)}</Text>
                     <Text numberOfLines={1} style={{ color: c.muted, fontSize: 11 }}>
                       {a.productName ?? a.purchaseReference ?? a.reason ?? t("appr.entity")}
-                      {a.saleTotal !== null ? ` · ${formatRwf(a.saleTotal)}` : a.purchaseTotal !== null ? ` · ${formatRwf(a.purchaseTotal)}` : ""}
+                      {a.actor ? ` · ${a.actor}` : ""}
                     </Text>
                   </View>
-                  <View style={{ alignItems: "flex-end", gap: 1, maxWidth: 150 }}>
-                    <Text numberOfLines={1} style={{ color: c.inkSoft, fontSize: 11, fontWeight: "600" }}>{a.actor ?? t("common.none")}</Text>
+                  <View style={{ alignItems: "flex-end", gap: 1 }}>
+                    {a.saleTotal !== null ? <Text style={{ color: c.inkSoft, fontSize: 12, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(a.saleTotal)}</Text>
+                      : a.purchaseTotal !== null ? <Text style={{ color: c.inkSoft, fontSize: 12, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(a.purchaseTotal)}</Text> : null}
                     <Text style={{ color: c.muted, fontSize: 10 }}>{new Date(a.at).toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</Text>
                   </View>
                 </View>
-                </Appear>
-              ))}
-              {!data.activity.length ? <Empty icon="checkSquare" title={t("appr.noActivity")} description={t("dash.noActivityDesc")} /> : null}
-              {data.activity.length > 7 ? (
-                <Button testID="dash-activity-toggle" size="sm" kind="secondary"
-                  label={activityExpanded
-                    ? t("dash.activityLess")
-                    : t("dash.activityMore").replace("{n}", String(data.activity.length - 7))}
-                  onPress={() => setActivityExpanded((open) => !open)} />
-              ) : null}
-            </Card>
-          </View>
+              </Appear>
+            )) : <Empty icon="checkSquare" title={t("appr.noActivity")} description={t("dash.noActivityDesc")} />}
+            {data.activity.length > 6 ? (
+              <Button testID="dash-activity-toggle" size="sm" kind="secondary" label={t("dash.viewAllActivity")} onPress={() => router.push("/reports" as any)} />
+            ) : null}
+          </Card>
 
-          {fin && data.expensesByCategory.length ? (
-            <Card style={{ gap: space.md }}>
-              <View style={{ gap: 2 }}>
-                <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.expensesByCategory")}</Text>
-                <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.expensesByCategoryHint")}</Text>
-              </View>
-              <BarList items={data.expensesByCategory.map((e) => ({ key: e.category, label: e.category, value: e.amount }))} emptyLabel={t("common.empty")} />
-            </Card>
-          ) : null}
-
-          {fin ? (
-            <Disclosure title={t("dash.financialDetail")} description={t("dash.financialDetailHint")} testID="dash-financial-detail">
-              <View style={{ padding: space.lg, gap: 2 }}>
-                {[
-                  { label: t("fin.netSales"), value: formatRwf(fin.netSales) },
-                  { label: `${t("fin.cogs")}`, value: formatRwf(fin.cogs) },
-                  { label: t("fin.gross"), value: formatRwf(fin.grossProfit) },
-                  { label: t("fin.expenses"), value: formatRwf(fin.operatingExpenses) },
-                  { label: t("fin.operating"), value: formatRwf(fin.operatingProfit) },
-                  { label: t("fin.resultAfterLosses"), value: formatRwf(fin.operatingResultAfterStockLosses ?? fin.operatingProfit - (fin.stockLosses ?? fin.stockLossValue ?? 0)) },
-                  { label: t("dash.discounts"), value: formatRwf(fin.discounts) },
-                  { label: t("dash.returns"), value: formatRwf(fin.salesReturns) },
-                  { label: t("fin.stockLoss"), value: formatRwf(fin.stockLosses ?? fin.stockLossValue ?? 0) },
-                  { label: t("fin.purchases"), value: formatRwf(fin.inventoryPurchases) },
-                  { label: t("fin.outstanding"), value: formatRwf(fin.outstandingExpenses) },
-                ].map((r) => (
-                  <View key={r.label} style={{ flexDirection: "row", justifyContent: "space-between", gap: space.md, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: c.line }}>
-                    <Text style={{ color: c.muted, fontSize: 13 }}>{r.label}</Text>
-                    <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{r.value}</Text>
-                  </View>
-                ))}
-                {data.expensesByCategory?.length ? (
-                  <View style={{ gap: 2, marginTop: space.md }}>
+          {/* Everything an owner still needs, folded away instead of competing with the headline. */}
+          {finVisible && fin ? (
+            <Disclosure title={t("dash.moreFigures")} description={t("dash.moreFiguresHint")} testID="dash-financial-detail">
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md, padding: space.lg, paddingTop: space.md }}>
+                <View style={{ flexGrow: 1, flexBasis: 260, minWidth: 0 }}>
+                  <FigureRow label={t("fin.cogs")} value={formatRwf(fin.cogs)} />
+                  <FigureRow label={t("fin.expenses")} value={formatRwf(fin.operatingExpenses)}
+                    note={`${t("fin.outstanding")}: ${formatRwf(fin.outstandingExpenses)}`} />
+                  <FigureRow label={t("fin.operating")} value={formatRwf(fin.operatingProfit)} />
+                  <FigureRow label={t("fin.stockLoss")} value={formatRwf(fin.stockLosses ?? fin.stockLossValue ?? 0)} />
+                  <FigureRow label={t("fin.resultAfterLosses")} value={formatRwf(fin.operatingResultAfterStockLosses ?? fin.operatingProfit)} />
+                </View>
+                <View style={{ flexGrow: 1, flexBasis: 260, minWidth: 0 }}>
+                  <FigureRow label={t("fin.salesCollected")} value={formatRwf(ops.cashCollected)} note={t("fin.salesCollectedHint")} />
+                  <FigureRow label={t("fin.creditRepayments")} value={formatRwf(ops.creditRepayments ?? 0)} note={methodNote || t("fin.creditRepaymentsHint")} />
+                  <FigureRow label={t("fin.purchases")} value={formatRwf(fin.inventoryPurchases)} note={`${t("dash.supplierPayables")}: ${formatRwf(ops.supplierPayables)}`} />
+                  <FigureRow label={t("fin.invValue")} value={ops.inventoryValue !== null ? formatRwf(ops.inventoryValue) : "—"} note={t("dash.inventoryHint")} />
+                  <FigureRow label={t("dash.discounts")} value={formatRwf(fin.discounts)} note={`${t("dash.returns")}: ${formatRwf(fin.salesReturns)}`} />
+                </View>
+                <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18, flexBasis: "100%" }}>{t("fin.calculationNote")}</Text>
+                {data.expensesByCategory.length ? (
+                  <View style={{ flexBasis: "100%", gap: space.sm, marginTop: space.xs }}>
                     <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("dash.expensesByCategory")}</Text>
-                    {data.expensesByCategory.map((e) => (
-                      <View key={e.category} style={{ flexDirection: "row", justifyContent: "space-between", gap: space.md, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: c.line }}>
-                        <Text style={{ color: c.muted, fontSize: 13 }}>{e.category}</Text>
-                        <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>
-                          {formatRwf(e.amount)}
-                          {e.unpaid > 0 ? <Text style={{ color: c.accent, fontWeight: "400" }}>{` · ${t("common.unpaid")} ${formatRwf(e.unpaid)}`}</Text> : null}
-                        </Text>
-                      </View>
-                    ))}
+                    <BarList items={data.expensesByCategory.map((e) => ({ key: e.category, label: e.category, value: e.amount }))} emptyLabel={t("common.empty")} />
                   </View>
                 ) : null}
-                <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18, marginTop: space.sm }}>{t("fin.calculationNote")}</Text>
+              </View>
+            </Disclosure>
+          ) : (
+            <Disclosure title={t("dash.moreFigures")} description={t("dash.moreFiguresHint")}>
+              <View style={{ padding: space.lg, paddingTop: space.md }}>
+                <FigureRow label={t("dash.transactions")} value={String(ops.transactions)} />
+                <FigureRow label={t("dash.unitsSold")} value={formatQty(ops.unitsSold)} />
+                <FigureRow label={t("dash.avgSale")} value={formatRwf(ops.averageTransaction)} />
+                <FigureRow label={t("dash.productsReceived")} value={formatQty(ops.unitsReceived)}
+                  note={`${ops.deliveries} ${t("dash.deliveries")} · ${ops.productsReceived} ${t("dash.products")}`} />
+              </View>
+            </Disclosure>
+          )}
+
+          {finVisible && fin ? (
+            <Disclosure title={t("dash.moreCharts")} description={t("dash.moreChartsHint")}>
+              <View style={{ padding: space.lg, gap: space.lg, paddingTop: space.md }}>
+                <View style={{ gap: 2 }}>
+                  <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.gpVsExpenses")}</Text>
+                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.gpVsExpensesHint")}</Text>
+                </View>
+                {data.trend.some((p) => (p.grossProfit ?? 0) !== 0 || (p.operatingExpenses ?? 0) !== 0)
+                  ? <CompareBars data={data.trend.map((p) => ({ date: p.date, a: p.grossProfit ?? 0, b: p.operatingExpenses ?? 0 }))}
+                      labelA={t("fin.gross")} labelB={t("fin.expenses")} labelMode={chartMode === "month" ? "month" : "day"} />
+                  : <Empty icon="chart" title={t("dash.noSales")} description={t("dash.noExpensesDesc")} />}
+                <View style={{ gap: 2 }}>
+                  <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.monthlyResult")}</Text>
+                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.monthlyResultHint")}</Text>
+                </View>
+                {fin.monthly && fin.monthly.some((m) => m.netSales !== 0 || m.operatingExpenses !== 0)
+                  ? <TrendBars data={fin.monthly.map((m) => ({ date: m.month, netSales: m.operatingResult, transactions: 0 }))}
+                      label={t("fin.resultAfterLosses")} labelMode="month" showCount={false} />
+                  : <Empty title={t("dash.noSales")} description={t("dash.noSalesDesc")} />}
               </View>
             </Disclosure>
           ) : null}
 
-          <View style={{ flexDirection: wide ? "row" : "column", gap: space.md, alignItems: "stretch" }}>
-            {data.worstProducts.length > 1 ? (
-              <Card style={{ flex: 1, gap: space.md, minWidth: 0 }}>
-                <View style={{ gap: 2 }}>
-                  <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.worstProducts")}</Text>
-                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.worstProductsHint")}</Text>
+          <Disclosure title={t("dash.productPanels")} description={t("dash.productPanelsHint")}>
+            <View style={{ padding: space.lg, gap: space.lg, paddingTop: space.md }}>
+              <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg }}>
+                <View style={{ flex: 1, gap: space.sm, minWidth: 0 }}>
+                  <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.topProducts")}</Text>
+                  <ProductRanking items={data.topProducts} emptyLabel={t("dash.noSales")} valueLabel={t("common.total")} />
                 </View>
-                <ProductRanking items={data.worstProducts} emptyLabel={t("dash.noSales")} valueLabel={t("common.total")} />
-              </Card>
-            ) : null}
-            <Card style={{ flex: 1, gap: space.md, minWidth: 0 }}>
-              <View style={{ gap: 2 }}>
-                <Text style={{ color: c.ink, ...type.h2 }}>{t("dash.staffActivity")}</Text>
-                <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.staffActivityHint")}</Text>
+                <View style={{ flex: 1, gap: space.sm, minWidth: 0 }}>
+                  <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.topByProfit")}</Text>
+                  {profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
+                    : (fin?.topProductsByProfit ?? []).length ? (fin?.topProductsByProfit ?? []).map((p) => (
+                    <View key={p.productId} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
+                      <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
+                      <Text style={{ color: (p.grossProfit ?? 0) < 0 ? c.danger : c.success, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(p.grossProfit ?? 0)}</Text>
+                      <Text style={{ color: c.muted, fontSize: 11, width: 52, textAlign: "right" }}>{p.grossMarginBps != null ? `${(p.grossMarginBps / 100).toFixed(0)}%` : "—"}</Text>
+                    </View>
+                  )) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.noSales")}</Text>}
+                </View>
               </View>
-              {data.staffActivity.length ? data.staffActivity.map((s) => (
-                <View key={s.actor} style={{ flexDirection: "row", alignItems: "center", gap: space.md, paddingVertical: 7, borderTopWidth: 1, borderTopColor: c.line }}>
-                  <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: c.primarySoft, alignItems: "center", justifyContent: "center" }}>
-                    <Text style={{ color: c.primaryStrong, fontWeight: "800", fontSize: 11 }}>{s.actor.slice(0, 1).toUpperCase()}</Text>
+              {finVisible && fin ? (
+                <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg }}>
+                  <View style={{ flex: 1, gap: space.sm, minWidth: 0 }}>
+                    <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.lowMargin")}</Text>
+                    {profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
+                      : (fin.lowMarginProducts ?? []).length ? (fin.lowMarginProducts ?? []).map((p) => (
+                      <View key={p.productId} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
+                        <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
+                        {p.belowCost ? <Badge tone="danger" label={t("receive.belowCostBadge")} /> : null}
+                        <Text style={{ color: c.danger, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"], minWidth: 52, textAlign: "right" }}>
+                          {p.grossMarginBps != null ? `${(p.grossMarginBps / 100).toFixed(1)}%` : "—"}
+                        </Text>
+                      </View>
+                    )) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.noLowMargin")}</Text>}
                   </View>
-                  <Text style={{ color: c.ink, fontSize: 13, flex: 1 }} numberOfLines={1}>{s.actor}</Text>
-                  <Text style={{ color: c.inkSoft, fontSize: 12, fontWeight: "700" }}>{s.actions} {t("dash.actions")}</Text>
-                </View>
-              )) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.noStaff")}</Text>}
-              {isOwner ? (
-                <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
-                  <Button size="sm" kind="secondary" label={t("nav.approvals")} onPress={() => router.push("/approvals")} />
+                  <View style={{ flex: 1, gap: space.sm, minWidth: 0 }}>
+                    <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.worstProducts")}</Text>
+                    <ProductRanking items={data.worstProducts} emptyLabel={t("dash.noSales")} valueLabel={t("common.total")} />
+                  </View>
                 </View>
               ) : null}
-            </Card>
-          </View>
+              <View style={{ gap: space.sm }}>
+                <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.stockHealth")}</Text>
+                <StockHealthBar inStock={inStock} low={lowOnly} out={outCount} label={t("dash.stockHealth")} />
+                {data.lowStock.length ? data.lowStock.map((p) => (
+                  <View key={p.id} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
+                    <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
+                    <Badge tone={p.onHand <= 0 ? "danger" : "warn"} dot label={`${formatQty(p.onHand)} ${p.unit}`} />
+                  </View>
+                )) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("home.noLowStockDesc")}</Text>}
+                <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
+                  <Button size="sm" kind="secondary" label={t("home.viewStock")} onPress={() => router.push("/stock")} />
+                  {isOwner ? <Button size="sm" kind="secondary" label={t("nav.approvals")} onPress={() => router.push("/approvals")} /> : null}
+                </View>
+              </View>
+            </View>
+          </Disclosure>
+
+          {isOwner && data.staffActivity.length ? (
+            <Disclosure title={t("dash.staffActivity")} description={t("dash.staffActivityHint")}>
+              <View style={{ padding: space.lg, paddingTop: space.md }}>
+                {data.staffActivity.map((s) => (
+                  <View key={s.actor} style={{ flexDirection: "row", alignItems: "center", gap: space.md, paddingVertical: 7, borderTopWidth: 1, borderTopColor: c.line }}>
+                    <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: c.primarySoft, alignItems: "center", justifyContent: "center" }}>
+                      <Text style={{ color: c.primaryStrong, fontWeight: "800", fontSize: 11 }}>{s.actor.slice(0, 1).toUpperCase()}</Text>
+                    </View>
+                    <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{s.actor}</Text>
+                    <Text style={{ color: c.inkSoft, fontSize: 12, fontWeight: "700" }}>{s.actions} {t("dash.actions")}</Text>
+                  </View>
+                ))}
+              </View>
+            </Disclosure>
+          ) : null}
         </>
       )}
     </Screen>

@@ -100,8 +100,10 @@ function MonthGrid({ start, end, mode, today, view, onShift, onToday, onPick }: 
  * No external calendar dependency — the existing design tokens and geometric icons keep the web
  * and Android layouts identical.
  */
-export function PeriodSelector({ selection, onChange, testID = "period-selector" }: {
+export function PeriodSelector({ selection, onChange, testID = "period-selector", compact = false }: {
   selection: OverviewSelection; onChange: (next: OverviewSelection) => void; testID?: string;
+  /** A small pill for screens that already offer today/yesterday/week/month as quick picks. */
+  compact?: boolean;
 }) {
   const t = useT(); const c = useTheme();
   const [open, setOpen] = useState(false);
@@ -160,21 +162,38 @@ export function PeriodSelector({ selection, onChange, testID = "period-selector"
         accessibilityRole="button"
         accessibilityLabel={`${t("common.period")}: ${heading}, ${formatSelectionRange(selection)}`}
         onPress={() => setOpen(true)}
-        style={({ hovered, pressed, focused }: any) => ({
+        style={({ hovered, pressed, focused }: any) => (compact ? {
+          minHeight: 40, alignSelf: "flex-start", paddingHorizontal: space.md,
+          borderRadius: radius.pill, borderWidth: focused ? 2 : 1, borderColor: focused ? c.focus : c.lineStrong,
+          backgroundColor: pressed ? c.pressed : hovered ? c.hover : c.surface,
+          flexDirection: "row", alignItems: "center", gap: 6,
+        } : {
           minHeight: 52, width: "100%", maxWidth: 430, paddingHorizontal: space.md, paddingVertical: 8,
           borderRadius: radius.md, borderWidth: focused ? 2 : 1, borderColor: focused ? c.focus : c.lineStrong,
           backgroundColor: pressed ? c.pressed : hovered ? c.hover : c.surface,
           flexDirection: "row", alignItems: "center", gap: space.sm,
         })}
       >
-        <View style={{ width: 34, height: 34, borderRadius: radius.sm, backgroundColor: c.primarySoft, alignItems: "center", justifyContent: "center" }}>
-          <Icon name="calendar" size={18} color={c.primaryStrong} bg={c.primarySoft} />
-        </View>
-        <View style={{ flex: 1, gap: 1 }}>
-          <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700" }}>{heading}</Text>
-          <Text numberOfLines={1} style={{ color: c.muted, fontSize: 12 }}>{formatSelectionRange(selection)}</Text>
-        </View>
-        <Icon name="chevronDown" size={16} color={c.muted} />
+        {compact ? (
+          <>
+            <Icon name="calendar" size={15} color={c.primaryStrong} />
+            <Text style={{ color: c.ink, fontSize: 12, fontWeight: "700" }}>
+              {selection.kind === "preset" ? t("dash.custom") : formatSelectionRange(selection)}
+            </Text>
+            <Icon name="chevronDown" size={14} color={c.muted} />
+          </>
+        ) : (
+          <>
+            <View style={{ width: 34, height: 34, borderRadius: radius.sm, backgroundColor: c.primarySoft, alignItems: "center", justifyContent: "center" }}>
+              <Icon name="calendar" size={18} color={c.primaryStrong} bg={c.primarySoft} />
+            </View>
+            <View style={{ flex: 1, gap: 1 }}>
+              <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700" }}>{heading}</Text>
+              <Text numberOfLines={1} style={{ color: c.muted, fontSize: 12 }}>{formatSelectionRange(selection)}</Text>
+            </View>
+            <Icon name="chevronDown" size={16} color={c.muted} />
+          </>
+        )}
       </Pressable>
 
       <Modal open={open} onClose={() => setOpen(false)} title={t("date.title")} description={t("date.help")} scroll
