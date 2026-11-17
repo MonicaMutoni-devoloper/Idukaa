@@ -13,6 +13,7 @@ export const rw: Record<Key, string> = {
   "login.welcome": "Injira mu iduka", "login.subtitle": "Koresha konti nyir'iduka yaguhaye.",
   "login.email": "Izina ry'umukoresha cyangwa imeri", "login.password": "Ijambobanga", "login.submit": "Injira", "login.signingIn": "Turi kwinjira…",
   "login.error": "Imeri cyangwa ijambobanga si byo.", "login.network": "Ntibishoboye kugera kuri seriveri y'iduka. Reba ko API iri gukora kandi iki gikoresho kiri kuri Wi-Fi imwe.", "login.localFirst": "Ibikorwa byawe bibikwa kuri iki gikoresho mbere, hanyuma bihuzwe n'interineti igihe ihari.",
+  "login.tooMany": "Ijambobanga ryakoreshejwe nabi kenshi kuri iyi konti. Tegereza iminota mike, hanyuma ugerageze — cyangwa uhindure ijambobanga.",
   "login.hero": "Iduka ryawe mu maboko — nta nterineti ikenewe.",
   "login.pitch1": "Komeza ugurishe nubwo interineti ihagarara.", "login.pitch2": "Ububiko n'amafaranga bijya ku murongo.", "login.pitch3": "Porogaramu imwe kuri telefoni, mudasobwa n'ishusho.",
 

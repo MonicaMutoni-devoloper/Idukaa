@@ -9,6 +9,7 @@ import { NotificationService } from "../notifications/notifications.service";
 import { MailService } from "../mail/mail.service";
 import { passwordResetEmail } from "../mail/templates";
 import { appWebBase, EmailVerificationService } from "./email-verification.service";
+import { LoginLockout } from "./login-lockout.service";
 import {
   decryptSecret, encryptSecret, generateRecoveryCodes, hashRecoveryCode, hashToken, isEncryptionConfigured,
   looksLikeRecoveryCode, newChallengeToken, newOpaqueToken, newTotpSecret, otpauthUri, passwordSchema,
@@ -68,6 +69,11 @@ export class AuthService {
     private notifications: NotificationService,
     private verification: EmailVerificationService,
     private mail: MailService,
+    /**
+     * Optional so a test can build the service with just a database. In the running app it is always
+     * injected; when absent the per-account lockout simply does not apply.
+     */
+    private lockout?: LoginLockout,
   ) {}
 
   /* ------------------------------------------------------------------ sessions */
@@ -103,9 +109,12 @@ export class AuthService {
   }
 
   async login(email: string, password: string, meta: SessionMeta): Promise<SessionPayload | TwoFactorChallenge> {
+    // Checked before the lookup so a locked address cannot be used to probe which accounts exist.
+    this.lockout?.assertAllowed(email);
     const [u] = await this.db.query("SELECT * FROM users WHERE lower(email)=lower($1)", [email]);
     const okPassword = !!u && (await bcrypt.compare(password, u.password_hash));
     if (!u || !okPassword) {
+      this.lockout?.fail(email);
       if (u) {
         await audit(this.db.pool, { shopId: u.shop_id, actorId: null, action: "auth.login.failed", entity: "user", entityId: u.id, newValue: { reason: "invalid_credentials" } });
         throw new UnauthorizedException("invalid_credentials");
@@ -129,6 +138,8 @@ export class AuthService {
       }
       throw new UnauthorizedException("invalid_credentials");
     }
+    // A correct password ends the lockout arithmetic, whichever state the account turns out to be in.
+    this.lockout?.succeed(email);
     // The password proved the caller owns the address, so the account STATE may now be named.
     // Before that, the same generic answer is returned for every unknown or wrong-password login.
     if (u.account_status === "pending_activation") {

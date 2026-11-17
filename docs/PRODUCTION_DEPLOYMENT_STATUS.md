@@ -1181,3 +1181,94 @@ must be confirmed first. Keys exist in English and Kinyarwanda (`verify.*`, `log
 from this machine. The integration suite runs in CI (`.github/workflows/ci.yml` provides PostgreSQL)
 but not locally; it was not executed during this change. The first real message should be checked on a
 phone before inviting shops: register a shop, approve it, and confirm the link arrives and signs in.
+
+---
+
+## 22. What blocked a five-person pilot, and what was changed (17 Nov 2026)
+
+The API deployed, the database answered, and `/health` reported `mail: "gmail-api"`. Readiness was
+still blocked by four things that show up in the first hour of real use, not in a test suite. Three
+were code and are fixed below; the fourth is an operator action.
+
+### 22.1 Login could be rate-limited by a shared shop connection — fixed
+
+`POST /auth/login` was throttled at **8/min per IP**, and nothing in the API counted failures per
+account. A shop is exactly the wrong shape for that limit: five employees behind one router, each
+retyping a password twice, reach eight requests in thirty seconds and get 429s that look like the app
+rejecting correct passwords.
+
+Raising the limit alone would have made guessing cheaper, so both halves changed together:
+
+* `src/auth/login-lockout.service.ts` — **ten wrong passwords on one address** inside 15 minutes now
+  cost that address a 15-minute wait (`429`, body `{ message: "too_many_attempts", retryAfterSeconds }`).
+  A correct password clears the count, so a forgotten capital letter never becomes a lockout, and the
+  lock expires on its own because nobody is on duty to unlock an employee at 07:30. Counted per address,
+  not per IP, because an attacker can rent IPs and the shop cannot rent a second NAT.
+  In-process by design: no table, no migration, and a failed login never costs a database write.
+* `POST /auth/login` throttle raised to **30/min per IP** for the honest shared connection.
+* `apps/mobile/app/login.tsx` maps `429` to `login.tooMany` (added to `en.ts` and `rw.ts`) instead of
+  the generic error, so the screen says the account is waiting rather than implying the password was
+  wrong again.
+
+Verified locally: `tests/login-lockout.test.ts` (3 tests, clock injected — a lock ends by itself, a
+success clears the count, failures outside the window do not accumulate), API `tsc` exit 0, `npm test`
+**35 pass / 0 fail / 104 skipped**, mobile `tsc` exit 0, `test:i18n` and `test:pwa` pass.
+
+### 22.2 A dead refresh token looked healthy — fixed
+
+The Gmail client refuses to mint a token once a grant is revoked, and Google destroys refresh tokens
+minted while the OAuth app is still in *Testing* after seven days. Every variable stays set, so
+`mail: "gmail-api"` kept reporting a working channel while every send failed — the failure mode being
+an employee who registers, never receives a link, and therefore cannot sign in, with nothing on any
+screen saying why.
+
+`/health` now carries `mailToken`, minted through the real code path (no mail sent) and cached for ten
+minutes so a monitor cannot turn into a token-minting loop:
+
+| `mailToken` | Meaning |
+|---|---|
+| `ok` | a token was just minted; sending can authenticate |
+| `invalid` | the refresh token is dead — re-mint `MAIL_GMAIL_REFRESH_TOKEN` |
+| `unreachable` | Google did not answer; sending may fail |
+| `smtp` | SMTP configured, not probed (a probe would open a TCP connection) |
+| `none` | no channel configured |
+
+Verified locally against the real credentials: `probe: ok` with the production token, `invalid` with a
+well-formed fake one. Request timeouts (`AbortSignal.timeout`) were added to both Google calls so a
+hung connection cannot hold a login request open.
+
+### 22.3 Morning cold starts — mitigated, not solved
+
+Measured while checking production: the first request after idle returned nothing within 20 seconds;
+the next answered with `uptimeSeconds: 13`, i.e. the free instance had spun down and was booting.
+Render's free plan sleeps after ~15 minutes without traffic, so the first person to open the app each
+morning waits.
+
+`.github/workflows/keepalive.yml` pings `/health` every ten minutes between 05:00 and 20:59 UTC
+(07:00–22:59 in Kigali), keeping the instance awake for the hours a shop uses it and dark at night so
+the month stays inside the free plan's 750 instance hours. The same job fails on a non-`ok` status and
+raises a `::warning::` when `mailToken` is `invalid`/`unreachable` or no channel is configured, so §22.2
+is noticed from the Actions tab rather than from an employee who cannot sign in.
+
+This reduces cold starts; it does not remove them. GitHub's scheduler is best-effort (runs can be
+delayed, and scheduled workflows in a repository idle for 60 days are disabled). A paid instance is the
+only fix that guarantees an instant first paint.
+
+### 22.4 Not fixable in code: publish the OAuth app
+
+`/health` now makes this visible, but only the operator can clear it. Until the Google app leaves
+*Testing*, the refresh token dies roughly seven days after it was minted — at which point `mailToken`
+turns `invalid` and no new employee can confirm an address or recover a password. Branding + Data
+Access, then **Audience → Publish app**, then revoke the old grant and re-run
+`tools/gmail-oauth.mjs` to mint a permanent token.
+
+### 22.5 Still unverified after this change
+
+* **The deployed `/health` with `mailToken`** — this commit must deploy first; until then the running
+  instance has no such field.
+* **The integration suite** still needs PostgreSQL and therefore still runs only in CI. The lockout is
+  covered by a pure unit test, which does run locally.
+* **A full employee signup through the deployed app** — no account may be created from this machine
+  (no password may be typed here), and the login throttle requires a real session to observe.
+* **The keep-alive workflow** — GitHub only registers a `schedule` from the default branch, so the first
+  run happens after this is pushed and can be up to ten minutes later. It was not executed locally.

@@ -54,6 +54,7 @@ export default function Login() {
         : code === "account_not_activated" ? t("login.notActivated")
         : code === "account_suspended" ? t("login.suspended")
         : code === "shop_suspended" ? t("login.shopSuspended")
+        : e?.status === 429 ? t("login.tooMany")
         : e?.status === 401 ? t("login.error")
         : t("common.error"));
     }

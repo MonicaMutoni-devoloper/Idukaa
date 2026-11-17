@@ -1,0 +1,58 @@
+name: Keep API warm
+
+# Why this exists: Render's free web service sleeps after ~15 minutes without traffic, and the first
+# request afterwards waits for a cold boot. For a shop that opens in the morning, that means the first
+# person to sign in waits, decides the app is broken, and goes back to paper. This touches /health
+# every ten minutes during working hours so the instance is already awake when somebody opens it.
+#
+# 05:00-20:59 UTC is 07:00-22:59 in Kigali (UTC+2) — the hours a shop actually uses the app. Staying
+# dark at night keeps the monthly instance hours well inside the free plan's 750, and a cold start
+# nobody is awake to see costs nothing.
+#
+# GitHub's scheduler is best-effort: a run can be delayed several minutes under load, and scheduled
+# workflows in a repository inactive for 60 days are disabled automatically. This reduces cold
+# starts; it does not promise an instant first paint. A paid instance is the only real fix.
+on:
+  schedule:
+    - cron: "*/10 5-20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keep-api-warm
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wake the API and read its own report
+        env:
+          API: https://idukaa-qqk2.onrender.com
+        run: |
+          set -uo pipefail
+          # 90s covers a full cold boot; a warm instance answers in well under a second.
+          body=$(curl -sS --max-time 90 "$API/health" || true)
+          echo "health: ${body:-<no answer>}"
+
+          case "$body" in
+            *'"status":"ok"'*) ;;
+            *) echo "::error title=API not healthy::/health did not report status ok"; exit 1 ;;
+          esac
+
+          # A configured channel with a dead refresh token is the failure that lets people sign up,
+          # never receive their confirmation link, and therefore never sign in. Warn loudly instead.
+          case "$body" in
+            *'"mailToken":"invalid"'*)
+              echo "::warning title=Mail refresh token is dead::/health says mailToken=invalid. Nobody can be sent a verification or password-reset link until MAIL_GMAIL_REFRESH_TOKEN is replaced (Google expires tokens minted while the OAuth app is still in Testing)."
+              ;;
+            *'"mailToken":"unreachable"'*)
+              echo "::warning title=Mail cannot reach Google::/health says mailToken=unreachable; sending may fail."
+              ;;
+            *'"mail":"none"'*)
+              echo "::warning title=No mail channel::/health says mail=none, so no verification or reset e-mail can be delivered."
+              ;;
+          esac

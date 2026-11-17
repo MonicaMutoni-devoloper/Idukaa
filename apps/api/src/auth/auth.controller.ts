@@ -31,7 +31,13 @@ function presentedRefreshToken(req: Request, bodyToken?: string): string | undef
 export class AuthController {
   constructor(private auth: AuthService) {}
 
-  @Public() @Throttle({ default: { limit: 8, ttl: 60_000 } }) @Post("login")
+  /**
+   * 30/min per IP rather than 8: a whole shop leaves through one address, and five employees each
+   * retyping a password twice must not read as an attack. Guessing is bounded per ACCOUNT instead
+   * (LoginLockout: ten wrong passwords on one address, then a fifteen-minute wait), which is the
+   * part an attacker cannot rotate around.
+   */
+  @Public() @Throttle({ default: { limit: 30, ttl: 60_000 } }) @Post("login")
   async login(@Body() body: unknown, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const { email, password } = Login.parse(body);
     const result = await this.auth.login(email, password, clientMeta(req));

@@ -11,6 +11,7 @@ export const en = {
   "login.welcome": "Sign in", "login.subtitle": "Use the account your shop owner created for you.",
   "login.email": "Username or email", "login.password": "Password", "login.submit": "Sign in", "login.signingIn": "Signing in…",
   "login.error": "Wrong email or password.", "login.network": "Cannot reach the shop server. Check that the API is running and that this device is on the same Wi-Fi.", "login.localFirst": "Your work is saved on this device first, then synced when you are online.",
+  "login.tooMany": "Too many wrong passwords on this account. Wait a few minutes, then try again — or reset your password.",
   "login.hero": "Your shop, in control — even without internet.",
   "login.pitch1": "Keep selling when the connection drops.", "login.pitch2": "Stock and money that always add up.", "login.pitch3": "One app for the phone, the PC and the browser.",
 

@@ -1,6 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import nodemailer, { type Transporter } from "nodemailer";
-import { gmailApiConfigured, sendViaGmailApi } from "./gmail-api";
+import { gmailApiConfigured, probeGmailApi, sendViaGmailApi } from "./gmail-api";
 
 /**
  * The one place in the API that talks to the outside world for e-mail.
@@ -41,6 +41,26 @@ export class MailService {
     if (gmailApiConfigured()) return "gmail-api";
     if (this.smtpConfigured()) return "smtp";
     return "none";
+  }
+
+  private probeCache: { at: number; value: string } | null = null;
+
+  /**
+   * Whether mail can still be *sent*, not merely whether it is *configured*.
+   *
+   * "ok" / "invalid" (refresh token revoked or expired — needs a re-mint) / "unreachable" (Google
+   * not answering) / "smtp" (configured but not probed: a probe would open a TCP connection, too
+   * slow to do inside a health check) / "none". The answer is cached for ten minutes so a monitor
+   * hitting /health cannot turn into a token-minting loop.
+   */
+  async probe(): Promise<string> {
+    const ch = this.channel();
+    if (ch === "none") return "none";
+    if (ch === "smtp") return "smtp";
+    if (this.probeCache && Date.now() - this.probeCache.at < 600_000) return this.probeCache.value;
+    const value = await probeGmailApi();
+    this.probeCache = { at: Date.now(), value };
+    return value;
   }
 
   private client(): Transporter {

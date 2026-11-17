@@ -68,6 +68,8 @@ async function accessToken(c: Creds): Promise<string> {
   if (cached && cached.key === key && cached.expiresAt - 60_000 > Date.now()) return cached.token;
   const res = await fetch(TOKEN_URL, {
     method: "POST",
+    // Without this a hung Google connection would hold a login request open indefinitely.
+    signal: AbortSignal.timeout(15_000),
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       client_id: c.clientId,
@@ -87,6 +89,27 @@ async function accessToken(c: Creds): Promise<string> {
   return cached.token;
 }
 
+/**
+ * Can this instance still mint a token for the configured refresh token? Sends no mail.
+ *
+ * This is the difference between "mail is configured" and "mail works": a refresh token minted in a
+ * Google project still in Testing is destroyed after seven days, while every environment variable
+ * stays exactly as it was. Without a probe, /health kept answering "gmail-api" and the first person
+ * to find out was an employee who never received a confirmation link and therefore could not sign in.
+ */
+export async function probeGmailApi(): Promise<"ok" | "invalid" | "unreachable" | "none"> {
+  const c = cfg();
+  if (!c) return "none";
+  try {
+    await accessToken(c);
+    return "ok";
+  } catch (e: any) {
+    const message = String(e?.message ?? e);
+    // Google's answer for a revoked or expired grant: retrying cannot fix it, a human must re-mint.
+    return message.includes("invalid_grant") ? "invalid" : "unreachable";
+  }
+}
+
 /** Throws with a readable reason; the caller turns that into a logged, non-fatal failure. */
 export async function sendViaGmailApi(msg: { to: string; subject: string; text: string; html: string }) {
   const c = cfg();
@@ -95,6 +118,7 @@ export async function sendViaGmailApi(msg: { to: string; subject: string; text: 
   const raw = Buffer.from(mime(c, msg), "utf8").toString("base64url");
   const res = await fetch(SEND_URL, {
     method: "POST",
+    signal: AbortSignal.timeout(20_000),
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ raw }),
   });
