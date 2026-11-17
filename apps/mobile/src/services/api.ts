@@ -19,7 +19,7 @@ function resolveApiUrl(): string {
   return host ? `http://${host}:3000` : fromEnv ?? "http://localhost:3000";
 }
 export const API_URL = resolveApiUrl();
-export interface SessionUser { id: string; name: string; role: "owner" | "manager" | "system_admin"; shopId: string | null }
+export interface SessionUser { id: string; name: string; role: "owner" | "manager" | "system_admin"; shopId: string | null; shopName?: string | null }
 export interface SessionResponse { token: string; refreshToken?: string; expiresIn: number; user: SessionUser }
 export interface TwoFactorRequired { twoFactorRequired: true; challengeToken: string; expiresIn: number }
 

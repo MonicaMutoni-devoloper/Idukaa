@@ -13,6 +13,7 @@ import { kvGet, kvSet, listRecords } from "../../src/database";
 import { ApiError, request, sessionRejected, useSession } from "../../src/services/api";
 import { degradedList, sectionKey, sectionLabel } from "../../src/services/report-sections";
 import { businessRevisionKey, dashboardCacheIsCurrent, dashboardCacheKey, dashboardScope } from "../../src/services/dashboard-cache";
+import { readOfflineSnapshot, snapshotKeys } from "../../src/services/offline-data";
 import { cacheWriteMeta, touchCacheAccess } from "../../src/services/cache-meta";
 import { buildLocalDashboard } from "../../src/services/local-dashboard-data";
 import { applyPendingDashboard, pendingFigures } from "../../src/services/pending-dashboard";
@@ -209,6 +210,13 @@ export default function Home() {
   // Distinguishes "the server rejected the session" from "the server could not be reached".
   const [authIssue, setAuthIssue] = useState(false);
   const [trendMetric, setTrendMetric] = useState<TrendMetric>("sales");
+  // The shop's own name, from the profile snapshot the offline download already keeps. No extra
+  // request: a shop whose download has not run yet simply shows the period line alone.
+  const [savedShopName, setSavedShopName] = useState<string | null>(null);
+  // The session carries the shop name (sign-in and every token refresh). The saved profile snapshot
+  // is the fallback for a session issued before the API started sending it, so no extra request is
+  // ever made from this screen.
+  const shopName = user?.shopName?.trim() || savedShopName;
   // Every request takes a sequence number: a response for a scope the user has already changed is
   // discarded instead of overwriting newer figures (the old duplicate-request/render-loop bug).
   const loadSeq = useRef(0);
@@ -234,6 +242,18 @@ export default function Home() {
     [user?.shopId, user?.id, user?.role, range.from, range.to],
   );
   const revisionKey = businessRevisionKey(user?.shopId);
+
+  useEffect(() => {
+    let live = true;
+    if (!user?.shopId || user.shopName?.trim()) { setSavedShopName(null); return; }
+    readOfflineSnapshot<{ name?: string | null }>(snapshotKeys.shop(user.shopId))
+      .then((snap) => {
+        const name = snap?.data?.name;
+        if (live) setSavedShopName(typeof name === "string" && name.trim() ? name.trim() : null);
+      })
+      .catch(() => { if (live) setSavedShopName(null); });
+    return () => { live = false; };
+  }, [user?.shopId, user?.shopName, revisionKey]);
   // A payload is rendered only when it belongs to the CURRENT range. Clearing state in an effect
   // happens after a paint, which is exactly how the old build flashed today's figures under a newly
   // selected label. This derivation makes that impossible by construction.
@@ -516,7 +536,7 @@ export default function Home() {
   return (
     <Screen
       title={user?.name ? `${t(greetingKey())}, ${user.name.split(" ")[0]}` : t("home.dashboard")}
-      subtitle={`${periodLabel} · ${formatSelectionRange(selection)}`}
+      subtitle={[shopName, periodLabel, formatSelectionRange(selection)].filter(Boolean).join(" · ")}
       actions={loading && data ? <ActivityIndicator size="small" color={c.muted} /> : undefined}>
       {/* Period: four one-tap business periods, plus the Kigali calendar for anything custom. */}
       <View style={{ flexDirection: wide ? "row" : "column", alignItems: wide ? "center" : "stretch", gap: space.sm, flexWrap: "wrap" }}>

@@ -16,7 +16,7 @@ import {
   sameHash, totpStep, verifyTotp,
 } from "./security";
 
-export interface SessionUser { id: string; name: string; role: "owner" | "manager" | "system_admin"; shopId: string | null }
+export interface SessionUser { id: string; name: string; role: "owner" | "manager" | "system_admin"; shopId: string | null; shopName?: string | null }
 export interface SessionMeta { deviceId?: string; userAgent?: string; ip?: string | null }
 export interface SessionPayload { token: string; refreshToken: string; expiresIn: number; user: SessionUser }
 export interface TwoFactorChallenge { twoFactorRequired: true; challengeToken: string; expiresIn: number }
@@ -55,7 +55,9 @@ const resetUrl = (token: string) => {
   return `${base}?token=${encodeURIComponent(token)}`;
 };
 
-const sessionUser = (u: any): SessionUser => ({ id: u.id, name: u.full_name, role: u.role, shopId: u.shop_id ?? null });
+const sessionUser = (u: any): SessionUser => ({
+  id: u.id, name: u.full_name, role: u.role, shopId: u.shop_id ?? null, shopName: u.shop_name ?? null,
+});
 
 /**
  * Authentication beyond the password: rotating refresh sessions, single-use password resets and
@@ -111,7 +113,10 @@ export class AuthService {
   async login(email: string, password: string, meta: SessionMeta): Promise<SessionPayload | TwoFactorChallenge> {
     // Checked before the lookup so a locked address cannot be used to probe which accounts exist.
     this.lockout?.assertAllowed(email);
-    const [u] = await this.db.query("SELECT * FROM users WHERE lower(email)=lower($1)", [email]);
+    const [u] = await this.db.query(
+      "SELECT u.*, s.name AS shop_name FROM users u LEFT JOIN shops s ON s.id=u.shop_id WHERE lower(u.email)=lower($1)",
+      [email],
+    );
     const okPassword = !!u && (await bcrypt.compare(password, u.password_hash));
     if (!u || !okPassword) {
       this.lockout?.fail(email);
@@ -234,7 +239,10 @@ export class AuthService {
         await this.db.query("UPDATE refresh_sessions SET revoked_at=now(), revoke_reason='expired' WHERE id=$1 AND revoked_at IS NULL", [row.id]);
         throw new UnauthorizedException("refresh_expired");
       }
-      const [u] = await this.db.query("SELECT * FROM users WHERE id=$1", [row.user_id]);
+      const [u] = await this.db.query(
+        "SELECT u.*, s.name AS shop_name FROM users u LEFT JOIN shops s ON s.id=u.shop_id WHERE u.id=$1",
+        [row.user_id],
+      );
       if (!u || !u.active || u.account_status !== "active") throw new UnauthorizedException("session_revoked");
 
       const session = await this.claimAndIssue(row, u, meta);
