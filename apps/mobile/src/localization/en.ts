@@ -28,6 +28,7 @@ export const en = {
   "common.supplier": "Supplier", "common.category": "Category", "common.note": "Note", "common.amount": "Amount", "common.today": "Today",
   "common.week": "This week", "common.lastWeek": "Last week", "common.month": "This month", "common.lastMonth": "Last month", "common.year": "This year", "common.lastYear": "Last year", "common.empty": "Nothing here yet", "common.loading": "Loading…",
   "common.error": "Something went wrong", "common.retry": "Try again", "common.signOut": "Sign out", "common.language": "Language",
+  "common.mailUnavailable": "Idukaa cannot send e-mail right now, so no link can reach you. Ask your shop administrator to finish setting up mail.",
   "common.add": "Add", "common.remove": "Remove", "common.date": "Date", "common.period": "Period", "common.all": "All",
   "common.none": "None", "common.status": "Status", "common.optional": "Optional", "common.on": "On", "common.off": "Off", "common.never": "Never", "common.sales": "Sales",
   "common.purchases": "Purchases", "common.expenses": "Expenses", "common.balance": "Balance", "common.unpaid": "Unpaid",  "common.active": "Active", "common.details": "Details", "common.saved": "Saved.",

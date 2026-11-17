@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
 import { MailService } from "../mail/mail.service";
@@ -100,6 +100,10 @@ export class EmailVerificationService {
 
   /** Public entry point: same answer for an unknown address, a verified one and an unverified one. */
   async resend(email: string, ip: string | null = null) {
+    // Without a sending channel there is nothing to resend, and saying so reveals nothing about the
+    // address: the answer is identical for every input. Saying "sent" here would send a shop to an
+    // inbox that can never fill — the exact dead end this feature exists to avoid.
+    if (!this.mail.configured()) throw new ServiceUnavailableException("mail_not_configured");
     const [u] = await this.db.query(
       "SELECT id, email, full_name, email_verified_at FROM users WHERE lower(email)=lower($1) AND active=true",
       [email.trim()],

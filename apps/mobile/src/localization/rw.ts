@@ -31,6 +31,7 @@ export const rw: Record<Key, string> = {
   "common.product": "Igicuruzwa", "common.supplier": "Utanga ibicuruzwa", "common.category": "Icyiciro", "common.note": "Icyitonderwa", "stock.category": "Icyiciro",
   "common.amount": "Amafaranga", "common.today": "Uyu munsi", "common.week": "Iki Cyumweru", "common.lastWeek": "Icyumweru gishize", "common.month": "Uku Kwezi", "common.lastMonth": "Ukwezi gushize", "common.year": "Uyu mwaka", "common.lastYear": "Umwaka ushize",
   "common.empty": "Nta makuru arimo", "common.loading": "Birimo gufunguka…", "common.error": "Hari ikitagenze neza",
+  "common.mailUnavailable": "Idukaa ntishobora kohereza imeyili ubu, bityo nta murongo ushobora kukugeraho. Saba umuyobozi w'iduka kurangiza igenamiterere ry'imeyili.",
   "common.retry": "Ongera ugerageze", "common.signOut": "Sohoka", "common.language": "Ururimi", "common.add": "Ongeraho",
   "common.remove": "Kuraho", "common.date": "Itariki", "common.period": "Igihe", "common.all": "Byose", "common.none": "Nta na kimwe",
   "common.status": "Imimerere", "common.optional": "Si ngombwa", "common.on": "Mfunguye", "common.off": "Bifunze", "common.never": "Nta na rimwe", "common.sales": "Igurisha",

@@ -31,9 +31,13 @@ import { hashToken } from "../src/auth/security";
 process.env.JWT_SECRET = "email-verification-secret-".padEnd(48, "x");
 process.env.JWT_EXPIRES_IN = "15m";
 process.env.EMAIL_VERIFICATION_REQUIRED = "true";
-// No provider in CI: the code must cope with a message that cannot be delivered.
-delete process.env.MAIL_SMTP_USER;
-delete process.env.MAIL_SMTP_PASS;
+// A channel that exists and can never deliver: the gate is armed (that is what it keys on), while
+// every send fails in milliseconds against a closed port, exactly like a mailbox that stopped working.
+process.env.MAIL_SMTP_HOST = "127.0.0.1";
+process.env.MAIL_SMTP_PORT = "1";
+process.env.MAIL_SMTP_USER = "ci@example.test";
+process.env.MAIL_SMTP_PASS = "test-only";
+delete process.env.MAIL_GMAIL_REFRESH_TOKEN;
 
 const url = process.env.TEST_DATABASE_URL;
 const skip = url ? false : "TEST_DATABASE_URL not set";
@@ -171,6 +175,30 @@ test("an expired link, and a link for a changed address, are both refused", { sk
   assert.equal(r2.status, 400, "the link was issued for an address the account no longer has");
   assert.equal((await pool.query("SELECT email_verified_at FROM users WHERE id=$1", [userId])).rows[0].email_verified_at, null);
   await pool.query("UPDATE users SET email=$2 WHERE id=$1", [userId, UNVERIFIED]);
+});
+
+test("with no sending channel at all, nobody is refused and the reset form says why", { skip }, async () => {
+  await pool.query("UPDATE users SET email_verified_at=NULL WHERE id=$1", [userId]);
+  const saved = { user: process.env.MAIL_SMTP_USER, pass: process.env.MAIL_SMTP_PASS };
+  delete process.env.MAIL_SMTP_USER;
+  delete process.env.MAIL_SMTP_PASS;
+  try {
+    // A gate nobody can satisfy is a dead end, not a check: the account gets in, and the app learns
+    // from a 503 that mail — not the password — is what is missing.
+    const login = await call("POST", "/auth/login", { email: UNVERIFIED, password: PASSWORD });
+    assert.ok(login.status < 300, `login -> ${login.status} ${JSON.stringify(login.data)}`);
+
+    const forgot = await call("POST", "/auth/password/forgot", { email: UNVERIFIED });
+    assert.equal(forgot.status, 503);
+    assert.equal(msg(forgot.data), "mail_not_configured", "an honest answer instead of a fake 'sent'");
+
+    const resend = await call("POST", "/auth/email/resend", { email: UNVERIFIED });
+    assert.equal(resend.status, 503);
+    assert.equal(msg(resend.data), "mail_not_configured", "the same answer for an unknown address too");
+  } finally {
+    process.env.MAIL_SMTP_USER = saved.user;
+    process.env.MAIL_SMTP_PASS = saved.pass;
+  }
 });
 
 test("EMAIL_VERIFICATION_REQUIRED=false lets an operator turn the gate off without a deploy", { skip }, async () => {

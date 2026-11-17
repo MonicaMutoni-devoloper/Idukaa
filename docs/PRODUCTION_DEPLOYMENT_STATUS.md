@@ -1119,6 +1119,16 @@ expiring, single-use link has been clicked:
 Accounts that already existed are backfilled as verified at their creation time, so this deploy
 cannot lock out a shop that is already trading. Every account created from now on must confirm.
 
+### A gate that cannot be satisfied does not run
+
+Refusing sign-in is only defensible while a confirmation can actually be delivered. With **no** sending
+channel configured the gate stays off (boot log: `mail.gate_inactive`), so a fresh deploy cannot create
+accounts nobody is able to use, and it arms itself the moment `MAIL_GMAIL_*` or `MAIL_SMTP_*` appears.
+For the same reason `POST /auth/password/forgot` and `POST /auth/email/resend` answer
+`503 mail_not_configured` instead of the usual `{ ok: true }`: "we sent you a link" when nothing can be
+sent is the one answer that wastes a shop's afternoon. The 503 is returned before any account lookup, so
+it is identical for every address and still reveals nothing about which accounts exist.
+
 ### Delivery
 
 One real Gmail mailbox, sent through **Gmail's HTTPS send API** (`MAIL_GMAIL_*`), with `nodemailer`

@@ -24,6 +24,7 @@ export default function ForgotPassword() {
     } catch (e: any) {
       setError(e instanceof NetworkError ? t("forgot.offline")
         : e instanceof ApiError && e.status === 429 ? t("forgot.rateLimited")
+        : e instanceof ApiError && e.status === 503 ? t("common.mailUnavailable")
         : t("common.error"));
     } finally { setBusy(false); }
   }

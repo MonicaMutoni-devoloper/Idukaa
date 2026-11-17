@@ -75,5 +75,11 @@ async function bootstrap() {
     console.warn(JSON.stringify({ t: new Date().toISOString(), evt: "mail.smtp_may_be_blocked",
       message: "SMTP is selected: free Render instances block ports 25/465/587. Use MAIL_GMAIL_* or a paid instance." }));
   }
+  // Be explicit about the consequence rather than silently running a shop app that cannot confirm
+  // anyone: with no channel the sign-in gate cannot be satisfied, so it stays off until one exists.
+  if (mailChannel === "none" && (process.env.EMAIL_VERIFICATION_REQUIRED ?? "true").toLowerCase() !== "false") {
+    console.warn(JSON.stringify({ t: new Date().toISOString(), evt: "mail.gate_inactive",
+      message: "e-mail verification is required but no sending channel exists: unconfirmed accounts are not refused, and password reset answers 503 mail_not_configured" }));
+  }
 }
 bootstrap();

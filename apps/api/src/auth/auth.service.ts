@@ -155,8 +155,11 @@ export class AuthService {
     // The column is absent only when this build runs against a database whose migration has not been
     // applied yet. Then nobody is refused: a schema that lags the code must never lock every shop
     // out, and the boot sequence migrates before the port opens anyway.
+    // And the gate only exists when mail does: with no sending channel nobody could ever confirm, so
+    // refusing every new account would be a dead end rather than a check. The API says so at boot
+    // (mail.gate_inactive), and the gate switches itself on the moment a channel is configured.
     const unverified = Object.prototype.hasOwnProperty.call(u, "email_verified_at") && !u.email_verified_at;
-    if (this.verification.required() && unverified) {
+    if (this.verification.required() && this.mail.configured() && unverified) {
       await audit(this.db.pool, { shopId: u.shop_id, actorId: u.id, action: "auth.login.blocked", entity: "user", entityId: u.id, newValue: { reason: "email_unverified" } });
       throw new ForbiddenException("email_not_verified");
     }
@@ -334,6 +337,8 @@ export class AuthService {
   /* ------------------------------------------------------------------ password reset */
 
   async requestPasswordReset(email: string, ip: string | null) {
+    // Answered before the account lookup, so it is the same for every address and leaks nothing.
+    if (!this.mail.configured()) throw new ServiceUnavailableException("mail_not_configured");
     const [u] = await this.db.query(
       "SELECT id, shop_id, full_name, email, email_verified_at FROM users WHERE lower(email)=lower($1) AND active=true", [email]);
     // Always the same answer: a request never reveals whether an account exists.
