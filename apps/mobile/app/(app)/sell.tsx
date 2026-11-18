@@ -6,6 +6,7 @@ import { Appear, Disclosure, Dismiss, Shake } from "../../src/components/motion"
 import { Icon } from "../../src/components/icons";
 import { DayField } from "../../src/components/date-range-picker";
 import { cartSellingQty, maxSellingMilli, mergeCartQty, stepSellingQty, validateQuickAddQty } from "../../src/services/sell-quick-add";
+import { splitStock } from "../../src/services/package-stock";
 import { applyLocalCreditSale, enqueue, listCustomers, listProducts, upsertLocalCustomer, type LocalCustomer, type LocalProduct } from "../../src/database/local";
 import { creditLimitState, creditTotals, validateNewCreditCustomer } from "../../src/services/credit-sale";
 import { useT } from "../../src/localization";
@@ -150,6 +151,14 @@ export default function Sell() {
   }
 
   const eff = (p: LocalProduct) => p.on_hand + p.pending_delta;
+  // "6 Crate + 3 Bottle left" instead of "75 Bottle left": the count a shopkeeper actually makes.
+  // A product with a single package, fractional stock or no exact split keeps the plain figure.
+  const stockText = (p: LocalProduct, stock: number) => {
+    const parts = splitStock(stock, packagesOf(p));
+    return parts.length
+      ? `${parts.map((x) => `${formatQty(x.qty * 1000)} ${x.unit}`).join(" + ")} ${t("sell.left")}`
+      : `${formatQty(stock)} ${p.unit} ${t("sell.left")}`;
+  };
   const amount = (l: Line) => (qtyOrNull(l.qty) && parseRwf(l.price) !== null ? lineAmount(qtyOrNull(l.qty)!, parseRwf(l.price)!) : 0);
   const gross = lines.reduce((s, l) => s + amount(l), 0);
   const disc = parseRwf(discount) ?? 0;
@@ -370,8 +379,8 @@ export default function Sell() {
                     <Text numberOfLines={2} style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{p.name}</Text>
                     <Text style={{ color: c.inkSoft, fontSize: 12, fontVariant: ["tabular-nums"] }}>{formatRwf(p.selling_price)}{unitsSellingOf(p) !== 1 || sellingUnitOf(p) !== p.unit ? ` / ${sellingUnitOf(p)}` : ""}</Text>
                     {out ? <Badge tone="danger" dot label={t("sell.outOfStock")} />
-                      : stock <= p.low_threshold ? <Badge tone="warn" dot label={`${formatQty(stock)} ${p.unit} ${t("sell.left")}`} />
-                      : <Text style={{ color: c.muted, fontSize: 11, fontWeight: "600" }}>{`${formatQty(stock)} ${p.unit} ${t("sell.left")}`}</Text>}
+                      : stock <= p.low_threshold ? <Badge tone="warn" dot label={stockText(p, stock)} />
+                      : <Text style={{ color: c.muted, fontSize: 11, fontWeight: "600" }}>{stockText(p, stock)}</Text>}
                   </Pressable>
                 );
               })}
@@ -394,7 +403,7 @@ export default function Sell() {
               <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
                 <View style={{ flex: 1 }}>
                   <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{l.p.name}{l.unit && l.unit.qtyBase > 1 ? ` · ${l.unit.name}` : ""}</Text>
-                  <Text style={{ color: c.muted, fontSize: 11 }}>{t("sell.remaining")} {formatQty(eff(l.p))} {l.p.unit} · {formatRwf(unitPriceOf(l))} / {unitNameOf(l)}</Text>
+                  <Text style={{ color: c.muted, fontSize: 11 }}>{t("sell.remaining")} {stockText(l.p, eff(l.p))} · {formatRwf(unitPriceOf(l))} / {unitNameOf(l)}</Text>
                 </View>
                 <Button size="sm" kind="quiet" label={t("common.remove")} onPress={() => setLeaving((v) => [...v, lineKey(l)])} />
               </View>
