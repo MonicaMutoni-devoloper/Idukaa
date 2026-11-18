@@ -11,7 +11,15 @@ export type MovementType =
 export interface Movement {
   type: MovementType;
   qty: QtyMilli;          // signed
-  unitCost?: Rwf;         // required for inbound (opening, receipt, transfer_in); ignored otherwise
+  /**
+   * The cost per base unit this movement moved at.
+   *
+   * Required for costed inbound (opening, receipt, transfer_in). For a `sale` it is the moving
+   * average the sale was posted at, recorded once and never recomputed; for a `sale_return` it is
+   * the cost the returned goods originally left at. Left undefined on legacy rows, where the
+   * replay falls back to the running average (the previous behaviour).
+   */
+  unitCost?: Rwf;
   occurredAt: string;     // ISO
 }
 
@@ -48,13 +56,19 @@ export function replayLedger(movements: Movement[]): ValuationResult {
       onHand += m.qty; value += add; per.push(add);
       continue;
     }
-    if (m.qty > 0) { // sale_return, positive adjustments: restored at current average cost
-      const add = share(m.qty); onHand += m.qty; value += add; per.push(add);
+    if (m.qty > 0) { // sale_return, positive adjustments: restored at the recorded cost, else current average
+      // A return puts back exactly what left, so a cost change after the sale cannot rewrite either
+      // the inventory value or the COGS the sale was reported with.
+      const add = m.type === "sale_return" && m.unitCost !== undefined ? lineAmount(m.qty, m.unitCost) : share(m.qty);
+      onHand += m.qty; value += add; per.push(add);
       if (m.type === "sale_return") cogs -= add;
       continue;
     }
     const outQty = -m.qty;
-    const relieved = outQty >= onHand ? value : share(outQty);
+    // A sale records the cost it was posted at (perpetual weighted average under the sale's lock).
+    // Legacy rows carry none and keep the historical running-average rule.
+    const recorded = m.unitCost !== undefined ? lineAmount(outQty, m.unitCost) : null;
+    const relieved = recorded !== null ? Math.min(recorded, value) : outQty >= onHand ? value : share(outQty);
     onHand -= outQty; value -= relieved; per.push(relieved);
     if (m.type === "sale") cogs += relieved;
     else if (m.type !== "supplier_return" && m.type !== "transfer_out") lossValue += relieved;
@@ -76,6 +90,26 @@ export function valueAt(movements: Movement[], at: string): { onHand: QtyMilli; 
   const before = movements.filter((m) => m.occurredAt < at);
   const r = replayLedger(before);
   return { onHand: r.onHand, value: r.value };
+}
+
+/**
+ * The moving weighted average cost per base unit an outbound movement posted now would use: the
+ * running average of every movement already in the ledger up to (and including) `at`.
+ *
+ * Sale posting calls this INSIDE the transaction that holds the product row lock, so two concurrent
+ * sales can never both read the same stale average, and the result is written to the movement and
+ * the sale line. Returns use it only when no original sale cost was recorded (legacy rows).
+ */
+export function averageCostAt(movements: Movement[], at: string): Rwf {
+  // Compare instants, not strings: a client may send an offset (…+02:00) while ledger rows are UTC.
+  const cut = Date.parse(at);
+  const before = Number.isNaN(cut)
+    ? movements
+    : movements.filter((m) => {
+        const t = Date.parse(String(m.occurredAt ?? ""));
+        return Number.isNaN(t) || t <= cut;
+      });
+  return replayLedger(before).avgCost;
 }
 
 export interface Discrepancy { expected: QtyMilli; counted: QtyMilli; difference: QtyMilli; requiresInvestigation: boolean }

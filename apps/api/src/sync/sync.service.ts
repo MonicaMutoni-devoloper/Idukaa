@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { PoolClient } from "pg";
-import { Operation, lineAmount, normalizeRwandaPhone, priceBelowCost, toBaseQty, type OperationT, type OpResult } from "@sms/shared";
+import { Operation, averageCostAt, lineAmount, normalizeRwandaPhone, priceBelowCost, toBaseQty, type Movement, type OperationT, type OpResult } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
 import { canRunOp } from "./op-permissions";
@@ -134,6 +134,26 @@ export class SyncService {
   private async onHand(c: PoolClient, productId: string): Promise<number> {
     const { rows: [r] } = await c.query("SELECT COALESCE(SUM(qty),0)::bigint AS q FROM stock_movements WHERE product_id=$1", [productId]); return Number(r.q);
   }
+  /**
+   * Perpetual moving weighted average cost per product as of `at`, read inside the caller's
+   * transaction. Called only after `lock()` has taken the product row locks, so two sales of the
+   * same product cannot both observe the same pre-sale average.
+   */
+  private async costsAt(c: PoolClient, shopId: string, productIds: string[], at: string): Promise<Map<string, number>> {
+    const ids = [...new Set(productIds)].sort();
+    const { rows } = await c.query(
+      `SELECT product_id, type, qty, unit_cost,
+              to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+         FROM stock_movements WHERE shop_id=$1 AND product_id = ANY($2::uuid[])
+        ORDER BY occurred_at, id`, [shopId, ids]);
+    const by = new Map<string, Movement[]>();
+    for (const r of rows) {
+      const list = by.get(r.product_id) ?? [];
+      list.push({ type: r.type, qty: Number(r.qty), unitCost: r.unit_cost === null ? undefined : Number(r.unit_cost), occurredAt: r.at });
+      by.set(r.product_id, list);
+    }
+    return new Map(ids.map((id) => [id, averageCostAt(by.get(id) ?? [], at)]));
+  }
   private async mv(c: PoolClient, shopId: string, userId: string, productId: string, type: string, qty: number, unitCost: number | null, src: string, srcId: string, at: string, reason?: string) {
     await c.query("INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [shopId, productId, type, qty, unitCost, src, srcId, userId, reason ?? null, at]);
     await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [productId]); // drives incremental pull
@@ -200,6 +220,8 @@ export class SyncService {
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending_approval')
                  RETURNING id`,
                 [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod, p.customerId, p.dueAt ?? null]);
+              // No cost yet: this sale has moved no stock, and the cost it will move is the average
+              // at the moment the owner approves it (recorded then, in approveCredit).
               for (const [i, l] of p.lines.entries()) {
                 await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered) VALUES ($1,$2,$3,$4,$5,$6)",
                   [pending.id, l.productId, l.qty, l.unitPrice, amounts[i], natural[i]]);
@@ -213,13 +235,19 @@ export class SyncService {
               newValue: { credit, limit, owing, customerId: p.customerId }, reason: p.creditOverrideReason });
           }
         }
+        // The cost of this sale is fixed here, once: the current weighted average of everything in
+        // the ledger, read under the product row locks taken above. Recording it on both the line and
+        // the movement is what keeps historical profit stable when a later (even backdated) receipt
+        // or a return arrives.
+        const costs = await this.costsAt(c, shopId, p.lines.map((l) => l.productId), p.soldAt);
         await c.query(
           "INSERT INTO sales(id,shop_id,op_id,user_id,sold_at,gross_amount,discount,amount_paid,payment_method,customer_id,due_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
           [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod, p.customerId ?? null, p.dueAt ?? null]);
         if (u.role !== "owner" && p.discount > 0) await audit(c, { shopId, actorId: u.id, action: "sale.discount", entity: "sale", entityId: p.saleId, newValue: { discount: p.discount, gross, limitPercent: max_discount_percent } });
         for (const [i, l] of p.lines.entries()) {
-          await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered) VALUES ($1,$2,$3,$4,$5,$6)", [p.saleId, l.productId, l.qty, l.unitPrice, amounts[i], natural[i]]);
-          await this.mv(c, shopId, u.id, l.productId, "sale", -l.qty, null, "sale", p.saleId, p.soldAt);
+          const cost = costs.get(l.productId) ?? 0;
+          await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered,unit_cost) VALUES ($1,$2,$3,$4,$5,$6,$7)", [p.saleId, l.productId, l.qty, l.unitPrice, amounts[i], natural[i], cost]);
+          await this.mv(c, shopId, u.id, l.productId, "sale", -l.qty, cost, "sale", p.saleId, p.soldAt);
         }
         return;
       }

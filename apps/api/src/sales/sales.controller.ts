@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Post } from "@nestjs/common";
 import { z } from "zod";
+import { averageCostAt, type Movement } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { audit } from "../audits/audit";
@@ -16,6 +17,27 @@ const CreditDecision = z.object({ reason: z.string().trim().min(3).max(500).opti
 @Controller("sales") @Roles("owner")
 export class SalesController {
   constructor(private db: Db) {}
+
+  /**
+   * The moving weighted average cost per product as of `at`, read inside the caller's transaction.
+   * Called while the product rows are locked, so a concurrent sale of the same product cannot post
+   * at a stale average.
+   */
+  private async costsAt(c: any, shopId: string, productIds: string[], at: string): Promise<Map<string, number>> {
+    const ids = [...new Set(productIds)].sort();
+    const { rows } = await c.query(
+      `SELECT product_id, type, qty, unit_cost,
+              to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+         FROM stock_movements WHERE shop_id=$1 AND product_id = ANY($2::uuid[]) ORDER BY occurred_at, id`,
+      [shopId, ids]);
+    const by = new Map<string, Movement[]>();
+    for (const r of rows) {
+      const list = by.get(r.product_id) ?? [];
+      list.push({ type: r.type, qty: Number(r.qty), unitCost: r.unit_cost === null ? undefined : Number(r.unit_cost), occurredAt: r.at });
+      by.set(r.product_id, list);
+    }
+    return new Map(ids.map((id) => [id, averageCostAt(by.get(id) ?? [], at)]));
+  }
 
   /** The owner's approvals desk: credit sales that are waiting and have moved no stock yet. */
   @Get("pending-credit")
@@ -59,11 +81,15 @@ export class SalesController {
         const { rows: [h] } = await c.query("SELECT COALESCE(SUM(qty),0)::bigint q FROM stock_movements WHERE product_id=$1", [l.product_id]);
         if (Number(h.q) < Number(l.qty)) throw new BadRequestException(`insufficient_stock:${l.product_id}`);
       }
+      // Stock only moves now, so this is when the sale's cost is fixed — once, under the same locks.
+      const costs = await this.costsAt(c, u.shopId!, lines.map((l: any) => l.product_id), new Date(sale.sold_at).toISOString());
       for (const l of lines) {
+        const cost = costs.get(l.product_id) ?? 0;
         await c.query(
           `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at)
-           VALUES ($1,$2,'sale',$3,NULL,'sale',$4,$5,$6,$7)`,
-          [u.shopId, l.product_id, -Number(l.qty), id, u.id, "credit approval", sale.sold_at]);
+           VALUES ($1,$2,'sale',$3,$4,'sale',$5,$6,$7,$8)`,
+          [u.shopId, l.product_id, -Number(l.qty), cost, id, u.id, "credit approval", sale.sold_at]);
+        await c.query("UPDATE sale_lines SET unit_cost=$2 WHERE sale_id=$1 AND product_id=$3", [id, cost, l.product_id]);
         await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [l.product_id]);
       }
       await c.query("UPDATE sales SET status='posted' WHERE id=$1", [id]);
@@ -122,16 +148,20 @@ export class SalesController {
       }
 
       const { rows: lines } = await c.query(
-        `SELECT sl.product_id, sl.qty, sl.unit_price, sl.line_amount, p.name, p.code
+        `SELECT sl.product_id, sl.qty, sl.unit_price, sl.line_amount, sl.unit_cost, p.name, p.code
          FROM sale_lines sl JOIN products p ON p.id = sl.product_id
          WHERE sl.sale_id = $1 ORDER BY sl.id`, [id]);
       if (!lines.length) throw new BadRequestException("sale_has_no_lines");
 
       for (const l of lines) {
+        // The goods go back at the cost they left at, not at today's average: voiding a sale cannot
+        // move profit into (or out of) the period the cost changed in. Legacy lines carry no recorded
+        // cost and keep the running-average fallback.
+        const cost = l.unit_cost === null || l.unit_cost === undefined ? null : Number(l.unit_cost);
         await c.query(
           `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at)
-           VALUES ($1,$2,'sale_return',$3,NULL,'sale_void',$4,$5,$6,now())`,
-          [u.shopId, l.product_id, l.qty, id, u.id, `sale void: ${reason}`]);
+           VALUES ($1,$2,'sale_return',$3,$4,'sale_void',$5,$6,$7,now())`,
+          [u.shopId, l.product_id, l.qty, cost, id, u.id, `sale void: ${reason}`]);
         await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [l.product_id]);
       }
 

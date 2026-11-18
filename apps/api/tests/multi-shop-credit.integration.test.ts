@@ -449,20 +449,21 @@ test("anomaly rules detect all six categories, deduplicate, reopen and stay shop
 
   const first = await call("POST", "/alerts/detect", {}, a.token);
   assert.equal(first.status, 201, JSON.stringify(first.data));
-  const categories = new Set((await call("GET", "/alerts?status=open", undefined, a.token)).data.map((x: any) => x.category));
+  const categories = new Set((await call("GET", "/alerts?status=open", undefined, a.token)).data.alerts.map((x: any) => x.category));
   for (const c of ["stock_reduction", "discount", "margin", "adjustments", "expense", "credit_risk"]) assert.ok(categories.has(c), `missing ${c}`);
-  assert.ok(!(await call("GET", "/alerts", undefined, a.token)).data.some((x: any) => /theft|fraud|stole/i.test(`${x.title} ${x.explanation}`)), "wording must not accuse");
+  assert.ok(!(await call("GET", "/alerts", undefined, a.token)).data.alerts.some((x: any) => /theft|fraud|stole/i.test(`${x.title} ${x.explanation}`)), "wording must not accuse");
 
   const count = Number((await pool.query("SELECT count(*)::int n FROM business_alerts WHERE shop_id=$1", [ids.shopA])).rows[0].n);
   const second = await call("POST", "/alerts/detect", {}, a.token);
   assert.equal(second.status, 201);
   assert.equal(Number((await pool.query("SELECT count(*)::int n FROM business_alerts WHERE shop_id=$1", [ids.shopA])).rows[0].n), count, "detect is idempotent per dedupe key");
 
-  const alert = (await call("GET", "/alerts", undefined, a.token)).data[0];
+  const alert = (await call("GET", "/alerts", undefined, a.token)).data.alerts[0];
   assert.equal((await call("GET", `/alerts/${alert.id}`, undefined, b.token)).status, 404, "another shop cannot read the alert");
-  const investigating = await call("POST", `/alerts/${alert.id}/status`, { status: "investigating", note: "Checking the records" }, a.token);
+  const investigating = await call("POST", `/alerts/${alert.id}/actions`, { action: "investigate", note: "Checking the records" }, a.token);
   assert.equal(investigating.status, 201);
-  const resolved = await call("POST", `/alerts/${alert.id}/status`, { status: "resolved", note: "Counted and explained" }, a.token);
+  assert.equal(investigating.data.status, "investigating");
+  const resolved = await call("POST", `/alerts/${alert.id}/actions`, { action: "resolve", note: "Counted and explained", category: "human_error" }, a.token);
   assert.equal(resolved.status, 201);
   assert.equal(resolved.data.status, "resolved");
   const after = await call("POST", "/alerts/detect", {}, a.token);
@@ -470,8 +471,8 @@ test("anomaly rules detect all six categories, deduplicate, reopen and stay shop
   assert.ok(after.data.updated >= 1);
   const reopened = await call("GET", `/alerts/${alert.id}`, undefined, a.token);
   assert.equal(reopened.data.status, "open");
-  assert.ok(reopened.data.events.some((ev: any) => ev.action === "reopened"));
-  assert.ok(reopened.data.events.some((ev: any) => ev.action === "resolved" && ev.note === "Counted and explained"));
+  assert.ok(reopened.data.events.some((ev: any) => ev.action === "reopened"), "detection reopening a closed alert is in the history");
+  assert.ok(reopened.data.events.some((ev: any) => ev.action === "resolve" && ev.note === "Counted and explained"));
 });
 
 test("credit identity: the debtor is registered at the counter, once, with an owner-set line", { skip }, async () => {

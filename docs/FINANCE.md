@@ -4,7 +4,9 @@
 
 - Money: integer RWF. Quantity: integer milli-units (2.5 kg = 2500). Line amount = round-half-up(qty × price / 1000) using BigInt. No floating point.
 - **Net sales** = gross sales − discounts − approved sales-return refunds. A voided sale leaves gross sales, so it also leaves net sales.
-- **COGS**: moving weighted average over the full ledger history; sale cost relieved = value × qty / on-hand. Sale returns restore stock at the current average and reduce COGS.
+- **COGS**: perpetual moving weighted average. An inbound movement adds `qty × unit cost` to inventory value; an outbound movement relieves `qty × current average`. New average = (previous value + received value) / (previous quantity + received quantity), always from the **purchase cost**, never from a selling price.
+- **The cost of a sale is fixed when it is posted**: the server locks the product rows, reads the average in the same transaction, and records it on `sale_lines.unit_cost` and on the `sale` stock movement. A later receipt — including a backdated one — or a later return cannot restate that sale's COGS. Legacy sale rows without a recorded cost keep the old running-average replay.
+- Sale returns restore stock at the **cost the goods originally left at** (the recorded movement cost; legacy rows fall back to the current average) and reduce COGS by the same amount.
 - **Gross profit** = net sales − COGS. **Operating profit** = gross profit − operating expenses **incurred** in the period (accrual). Purchases are inventory, not expenses.
 - Stock losses (damage/expiry/negative corrections, once owner-approved) are reported as `stockLossValue` and are **not** included in COGS or operating profit; owners review them separately.
 - Cash view: cash collected = sum of amounts paid on sales; expenses paid vs incurred shown separately; receivables = gross − discount − paid. A customer's credit sale is a receivable, not revenue collected.
@@ -30,7 +32,7 @@
 - In one transaction the server locks the sale row, confirms it is still `posted`, writes a `sale_return` ledger movement for every line (source `sale_void`), stamps `status='reversed'`, `reversed_at`, `reversed_by` and `reversal_reason`, and writes a `sale.void` audit entry.
 - The status check under the row lock makes a second reversal impossible; a retry receives `409 sale_already_reversed` and no stock moves.
 - Voided sales remain in the transaction report (marked **Voided**) and in the CSV, and are excluded from posted-sales totals.
-- Accounting effect: the sale leaves net sales in its original period, while the returned stock is valued at the **current** moving average. If the cost changed after the sale, the two are not an exact mirror; both records remain auditable. Returns via an approved `sale_return` adjustment behave the same way.
+- Accounting effect: the sale leaves net sales in its original period, and the returned stock re-enters inventory at the cost the sale recorded, decreasing COGS in the reversal's period. That reverses the sale's own cost basis even if the average has moved since. Returns via an approved `sale_return` adjustment are recorded at the average at approval time (the adjustment has no link to the original sale line), and remain auditable.
 
 ## Payment methods
 
@@ -40,7 +42,8 @@ Sales record `cash`, `momo` (mobile money), `bank` or `credit`. The method is st
 
 - Reports show their date range, compare with the immediately preceding period of equal length, and can list the underlying sales/purchases/expenses.
 - CSV export (`GET /reports/export?kind=sales|purchases|expenses&from=&to=`) exports the same rows with plain integer RWF amounts, UTF-8 BOM for spreadsheets, and quoted fields when a name/note contains a comma, quote or newline.
-- Limitation: COGS for a period is recomputed from the ledger, so backdated receipts can restate history.
+- Period COGS is attributed from the ledger to the period each movement occurred in; the cost per movement is the recorded one, so backdated receipts no longer restate already-posted sales.
+- Limitation: movements posted before this policy (sale cost recorded) carry no cost snapshot; their COGS comes from the running average of the full ledger, so a backdated receipt can still affect those legacy rows.
 
 ## Verification
 
