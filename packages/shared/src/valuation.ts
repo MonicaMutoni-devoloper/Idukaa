@@ -20,7 +20,20 @@ export interface Movement {
    * replay falls back to the running average (the previous behaviour).
    */
   unitCost?: Rwf;
-  occurredAt: string;     // ISO
+  occurredAt: string;     // ISO — the business/document date, used for reporting periods
+  /**
+   * Immutable posting order (`stock_movements.seq`, or the local operation order).
+   *
+   * Costing uses posting order, NOT the document timestamp. A shop that receives stock at 09:22
+   * can only record the delivery date, and the app stores that date at noon; sorting by
+   * `occurredAt` would place the receipt after sales made earlier the same morning and cost those
+   * sales from the previous (higher/lower) purchase price. The sequence is the order in which the
+   * stock actually entered the ledger, so it is the only safe ordering for a perpetual average.
+   *
+   * Optional only for legacy rows and unit tests without a database sequence: when no movement in
+   * a replay has a sequence, the historical `occurredAt` ordering is kept.
+   */
+  seq?: number;
 }
 
 export interface ValuationResult {
@@ -43,9 +56,25 @@ const INBOUND_COSTED: MovementType[] = ["opening", "receipt", "transfer_in"];
  * a single malformed row must never take a whole report down with "cannot read localeCompare".
  */
 const byTime = (a: Movement, b: Movement) => String(a.occurredAt ?? "").localeCompare(String(b.occurredAt ?? ""));
+const byPosted = (a: Movement, b: Movement) => {
+  const as = a.seq, bs = b.seq;
+  if (as !== undefined && bs !== undefined) return as === bs ? byTime(a, b) : as - bs;
+  // A mixed legacy list is extremely rare; keep the deterministic document order for the pair.
+  return byTime(a, b);
+};
+
+/**
+ * The order in which the ledger is replayed. Posting order wins whenever the caller supplied it
+ * (every database and local-device loader does); otherwise the historical document order is used.
+ * Exported so period calculations iterate exactly the same order as `replayLedger`.
+ */
+export function ledgerOrder(movements: Movement[]): Movement[] {
+  const hasSeq = movements.some((m) => typeof m.seq === "number" && Number.isFinite(m.seq));
+  return [...movements].sort(hasSeq ? byPosted : byTime);
+}
 
 export function replayLedger(movements: Movement[]): ValuationResult {
-  const sorted = [...movements].sort(byTime);
+  const sorted = ledgerOrder(movements);
   let onHand = 0, value = 0, cogs = 0, lossValue = 0;
   const per: Rwf[] = [];
   for (const m of sorted) {
@@ -93,12 +122,19 @@ export function valueAt(movements: Movement[], at: string): { onHand: QtyMilli; 
 }
 
 /**
- * The moving weighted average cost per base unit an outbound movement posted now would use: the
- * running average of every movement already in the ledger up to (and including) `at`.
- *
- * Sale posting calls this INSIDE the transaction that holds the product row lock, so two concurrent
- * sales can never both read the same stale average, and the result is written to the movement and
- * the sale line. Returns use it only when no original sale cost was recorded (legacy rows).
+ * The moving weighted average cost per base unit for the movements already posted. This is the
+ * function a sale uses inside its posting transaction: the rows it reads are exactly the postings
+ * that happened before this sale, so a receipt entered at 09:22 counts even though its document
+ * date is noon. Do NOT filter by the sale's document timestamp — that was the old-cost defect.
+ */
+export function currentAverageCost(movements: Movement[]): Rwf {
+  return replayLedger(movements).avgCost;
+}
+
+/**
+ * The moving weighted average cost per base unit as of a business instant, using only movements
+ * whose document timestamp is at or before `at`. Kept for historical analysis; sale posting uses
+ * `currentAverageCost` instead.
  */
 export function averageCostAt(movements: Movement[], at: string): Rwf {
   // Compare instants, not strings: a client may send an offset (…+02:00) while ledger rows are UTC.
@@ -120,7 +156,7 @@ export function compareCount(expected: QtyMilli, counted: QtyMilli): Discrepancy
 
 /** COGS and loss value attributable to movements inside [from, to) for ONE product, using the full-history moving average. */
 export function periodCosts(movements: Movement[], from: string, to: string): { cogs: Rwf; lossValue: Rwf } {
-  const sorted = [...movements].sort(byTime);
+  const sorted = ledgerOrder(movements);
   const r = replayLedger(sorted);
   let cogs = 0, lossValue = 0;
   sorted.forEach((m, i) => {

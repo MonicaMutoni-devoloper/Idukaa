@@ -34,16 +34,20 @@ import { ShopMembershipsController } from "./shop/memberships.controller";
 import { CustomersController } from "./customers/customers.controller";
 import { AlertsController } from "./alerts/alerts.controller";
 import { AlertsService } from "./alerts/alerts.service";
+import { ReturnsController } from "./returns/returns.controller";
+import { ReturnsService } from "./returns/returns.service";
+import { PricesController } from "./returns/prices.controller";
+import { PricingService } from "./returns/pricing.service";
 
 @Module({
   imports: [
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 240 }]),
     JwtModule.register({ global: true, secret: process.env.JWT_SECRET, signOptions: { expiresIn: process.env.JWT_EXPIRES_IN ?? "15m" } }),
   ],
-  controllers: [HealthController, AppVersionController, AuthController, AdminController, NotificationsController, SyncController, ReportsController, ProfitabilityController, AuditsController, PurchasesController, SalesController, ShopController, StaffController, ApplicationsController, AdminApplicationsController, StaffInvitationsController, SubscriptionsController, ShopMembershipsController, CustomersController, AlertsController],
+  controllers: [HealthController, AppVersionController, AuthController, AdminController, NotificationsController, SyncController, ReportsController, ProfitabilityController, AuditsController, PurchasesController, SalesController, ShopController, StaffController, ApplicationsController, AdminApplicationsController, StaffInvitationsController, SubscriptionsController, ShopMembershipsController, CustomersController, AlertsController, ReturnsController, PricesController],
   providers: [
     Db, SyncService, AuthService, EmailVerificationService, MailService, NotificationService, FinanceService, OnboardingService,
-    LoginLockout, AlertsService,
+    LoginLockout, AlertsService, ReturnsService, PricingService,
     { provide: APP_GUARD, useClass: ThrottlerGuard }, { provide: APP_GUARD, useClass: AuthGuard },
     // Global error handling (ZodError -> 400, no leaked internals) lives in the module so the
     // integration tests — which build AppModule without main.ts's bootstrap — see identical behaviour.

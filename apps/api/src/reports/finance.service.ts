@@ -54,9 +54,10 @@ export class FinanceService {
   async movements(shopId: string): Promise<Map<string, Movement[]>> {
     // COALESCE on the timestamp and a filter on impossible rows: the ledger is NOT NULL by schema,
     // but a report must never throw because one legacy row cannot be ordered (see valuation#byTime).
-    const rows = await this.db.query("SELECT product_id, type, qty, unit_cost, to_char(COALESCE(occurred_at, recorded_at) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at FROM stock_movements WHERE shop_id=$1 AND COALESCE(occurred_at, recorded_at) IS NOT NULL ORDER BY COALESCE(occurred_at, recorded_at), id", [shopId]);
+    const rows = await this.db.query("SELECT product_id, type, qty, unit_cost, seq, to_char(COALESCE(occurred_at, recorded_at) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at FROM stock_movements WHERE shop_id=$1 AND COALESCE(occurred_at, recorded_at) IS NOT NULL ORDER BY seq", [shopId]);
     const m = new Map<string, Movement[]>();
-    for (const r of rows) { const l = m.get(r.product_id) ?? []; l.push({ type: r.type, qty: r.qty, unitCost: r.unit_cost ?? undefined, occurredAt: r.at }); m.set(r.product_id, l); }
+    // `seq` is the immutable posting order; `occurredAt` stays the document date used by reports.
+    for (const r of rows) { const l = m.get(r.product_id) ?? []; l.push({ type: r.type, qty: r.qty, unitCost: r.unit_cost ?? undefined, occurredAt: r.at, seq: Number(r.seq) }); m.set(r.product_id, l); }
     return m;
   }
 
@@ -75,8 +76,16 @@ export class FinanceService {
       FROM sales WHERE shop_id=$1 AND status='posted' AND sold_at>=$2 AND sold_at<$3`);
     const units = await q<any>(`SELECT COALESCE(SUM(sl.qty),0)::bigint u FROM sale_lines sl JOIN sales s ON s.id=sl.sale_id
       WHERE s.shop_id=$1 AND s.status='posted' AND s.sold_at>=$2 AND s.sold_at<$3`);
-    const ret = await q<any>(`SELECT COALESCE(SUM(refund_amount),0)::bigint r FROM adjustments
-      WHERE shop_id=$1 AND status='approved' AND reason='sale_return' AND decided_at>=$2 AND decided_at<$3`);
+    // Returns are period activity dated by when the goods came back, not by the sale date: a
+    // January sale returned in February reduces February revenue. Sale-linked return documents are
+    // the current workflow; approved legacy `sale_return` adjustments are still counted so history
+    // reconciles after the upgrade.
+    const ret = await q<any>(`SELECT (
+        COALESCE((SELECT SUM(l.refund_amount) FROM sale_return_lines l JOIN sale_returns r ON r.id=l.return_id
+                  WHERE r.shop_id=$1 AND r.returned_at>=$2 AND r.returned_at<$3),0)
+      + COALESCE((SELECT SUM(refund_amount) FROM adjustments
+                  WHERE shop_id=$1 AND status='approved' AND reason='sale_return' AND decided_at>=$2 AND decided_at<$3),0)
+      )::bigint AS r`);
     const exp = await q<any>(`SELECT COALESCE(SUM(amount),0)::bigint a, COALESCE(SUM(amount) FILTER (WHERE paid),0)::bigint p
       FROM expenses WHERE shop_id=$1 AND incurred_at>=$2 AND incurred_at<$3`);
     const pur = await q<any>(`SELECT COALESCE(SUM(total_amount),0)::bigint t FROM purchases
@@ -149,6 +158,18 @@ export class FinanceService {
        WHERE s.shop_id=$1 AND s.status='posted' AND s.sold_at>=$2 AND s.sold_at<$3
        GROUP BY sl.product_id`, [shopId, from, to]);
     const revenue = new Map(revRows.map((r: any) => [r.id, { units: Number(r.units), net: Number(r.net) }]));
+    // Refunds and returned units reduce the product's period revenue/units, matching the headline
+    // salesReturns line. Returned resalable goods also reduce COGS through the ledger replay below.
+    const retRows = await this.db.query<any>(
+      `SELECT l.product_id AS id, COALESCE(SUM(l.qty),0)::bigint AS units,
+              COALESCE(SUM(l.refund_amount),0)::bigint AS net
+         FROM sale_return_lines l JOIN sale_returns r ON r.id = l.return_id
+        WHERE r.shop_id=$1 AND r.returned_at>=$2 AND r.returned_at<$3
+        GROUP BY l.product_id`, [shopId, from, to]);
+    for (const r of retRows) {
+      const e = revenue.get(r.id) ?? { units: 0, net: 0 };
+      revenue.set(r.id, { units: e.units - Number(r.units), net: e.net - Number(r.net) });
+    }
 
     // Trailing 30-day sales window ending at the range end — the velocity reference period.
     const v30From = new Date(Date.parse(to) - 30 * 86_400_000).toISOString();

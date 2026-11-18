@@ -25,6 +25,8 @@ let shop: string, owner: any;
 const product = uuid();
 const saleId = uuid();
 const sale2 = uuid();
+const product2 = uuid();
+const sale3 = uuid();
 const now = () => new Date().toISOString();
 const op = (type: string, payload: object, createdAt = now()) => ({ opId: uuid(), deviceId: "costing-test", createdAt, type, payload });
 const WIDE = { from: "2000-01-01T00:00:00.000Z", to: "2100-01-01T00:00:00.000Z" };
@@ -136,6 +138,95 @@ test("voiding a sale returns the goods at the cost that sale recorded", { skip }
   assert.equal(p.cogs, 2640, "only the surviving 3-unit sale costs 3 x 880");
   assert.equal(p.closingInventoryUnits, 19000);
   assert.equal(p.closingInventoryValue, 17360);  // 12,960 + 5 x 880
+});
+
+test("a receipt entered before a sale counts even when its document timestamp is later (posting order)", { skip }, async () => {
+  const push = async (ops: any[]) => {
+    const res = await svc.push(owner, "costing-dev", ops);
+    for (const r of res) assert.equal(r.status, "applied", `op failed: ${r.status} ${r.message ?? ""}`);
+  };
+  const purchaseId = uuid();
+  await push([
+    op("product.upsert", {
+      productId: product2, code: "COST-2", name: "Posted-order item", unit: "pcs",
+      sellingPrice: 1500, lowStockThreshold: 0, initialQty: 10000, initialUnitCost: 1000,
+    }, "2026-01-01T06:00:00.000Z"),
+    // Entered at 09:22 but stored with the mobile form's noon document date.
+    op("purchase.create", {
+      purchaseId, supplierId: null, orderedAt: "2026-01-02T12:00:00.000Z", amountPaid: 20000,
+      receiveNow: true, lines: [{ productId: product2, qty: 10000, unitCost: 2000 }],
+    }),
+    // Posted after the receipt, at a time before the receipt's document date.
+    op("sale.create", {
+      saleId: sale3, soldAt: "2026-01-02T09:00:00.000Z", discount: 0, amountPaid: 7500, paymentMethod: "cash",
+      lines: [{ productId: product2, qty: 5000, unitPrice: 1500 }],
+    }),
+  ]);
+
+  const line = (await pool.query("SELECT unit_price, unit_cost FROM sale_lines WHERE sale_id=$1", [sale3])).rows[0];
+  assert.equal(Number(line.unit_price), 1500);
+  assert.equal(Number(line.unit_cost), 1500, "10 @ 1,000 + 10 @ 2,000 -> 1,500, not the old 1,000");
+  const mv = (await pool.query("SELECT unit_cost FROM stock_movements WHERE source_type='sale' AND source_id=$1", [sale3])).rows[0];
+  assert.equal(Number(mv.unit_cost), 1500);
+
+  const rows = await finance.productProfitability(shop, WIDE.from, WIDE.to);
+  const row = rows.find((r: any) => r.productId === product2);
+  assert.equal(row.revenue, 7500);
+  assert.equal(row.cogs, 7500);
+  assert.equal(row.grossProfit, 0, "5 x 1,500 revenue against 5 x 1,500 cost");
+});
+
+test("posting order is applied to every later purchase and sale, and the snapshots stay historical", { skip }, async () => {
+  const push = async (ops: any[]) => {
+    const res = await svc.push(owner, "costing-dev", ops);
+    for (const r of res) assert.equal(r.status, "applied", `op failed: ${r.status} ${r.message ?? ""}`);
+  };
+  const product3 = uuid();
+  const first = uuid(), second = uuid();
+  await push([
+    op("product.upsert", {
+      productId: product3, code: "COST-3", name: "Multi-purchase item", unit: "pcs",
+      sellingPrice: 1200, lowStockThreshold: 0, initialQty: 10000, initialUnitCost: 1000,
+    }, "2026-02-01T06:00:00.000Z"),
+    // Test C: only the selling price changes; cost stays the 1,000 purchase cost.
+    op("product.upsert", { productId: product3, code: "COST-3", name: "Multi-purchase item", unit: "pcs", sellingPrice: 1200, lowStockThreshold: 0 }, "2026-02-02T06:00:00.000Z"),
+    op("sale.create", {
+      saleId: first, soldAt: "2026-02-02T09:00:00.000Z", discount: 0, amountPaid: 6000, paymentMethod: "cash",
+      lines: [{ productId: product3, qty: 5000, unitPrice: 1200 }],
+    }),
+    op("purchase.create", {
+      purchaseId: uuid(), supplierId: null, orderedAt: "2026-02-03T12:00:00.000Z", amountPaid: 7000,
+      receiveNow: true, lines: [{ productId: product3, qty: 5000, unitCost: 1400 }],
+    }),
+    op("sale.create", {
+      saleId: second, soldAt: "2026-02-04T09:00:00.000Z", discount: 0, amountPaid: 6400, paymentMethod: "cash",
+      lines: [{ productId: product3, qty: 4000, unitPrice: 1600 }],
+    }),
+  ]);
+
+  const lines = (await pool.query("SELECT sale_id, unit_price, unit_cost FROM sale_lines WHERE sale_id = ANY($1::uuid[]) ORDER BY sale_id", [[first, second]])).rows;
+  const bySale = new Map(lines.map((l: any) => [l.sale_id, l]));
+  assert.equal(Number(bySale.get(first).unit_cost), 1000, "selling price 1,200 does not change the 1,000 cost");
+  assert.equal(Number(bySale.get(second).unit_cost), 1200, "10 @ 1,000 then 5 @ 1,400, after selling 5 -> 1,200");
+  const rows = await finance.productProfitability(shop, "2026-02-01T00:00:00.000Z", "2026-03-01T00:00:00.000Z");
+  const row = rows.find((r: any) => r.productId === product3);
+  assert.equal(row.revenue, 6000 + 6400);
+  assert.equal(row.cogs, 5000 + 4800);
+  assert.equal(row.grossProfit, 2600);
+
+  // A backdated receipt entered AFTER these sales must not rewrite either snapshot.
+  await push([
+    op("purchase.create", {
+      purchaseId: uuid(), supplierId: null, orderedAt: "2026-02-01T12:00:00.000Z", amountPaid: 3000,
+      receiveNow: true, lines: [{ productId: product3, qty: 1000, unitCost: 3000 }],
+    }),
+  ]);
+  const after = (await pool.query("SELECT sale_id, unit_cost FROM sale_lines WHERE sale_id = ANY($1::uuid[]) ORDER BY sale_id", [[first, second]])).rows;
+  assert.deepEqual(Object.fromEntries(after.map((l: any) => [l.sale_id, Number(l.unit_cost)])), { [first]: 1000, [second]: 1200 }, "posted sale costs are immutable");
+  const rowAfter = (await finance.productProfitability(shop, "2026-02-01T00:00:00.000Z", "2026-03-01T00:00:00.000Z"))
+    .find((r: any) => r.productId === product3);
+  assert.equal(rowAfter.cogs, row.cogs, "historical COGS does not move when a later receipt is backdated");
+  assert.notEqual(rowAfter.avgCost, row.avgCost, "the receipt changes today's average and inventory value going forward");
 });
 
 test("changing only the selling price leaves the cost basis and inventory value untouched", { skip }, async () => {

@@ -20,8 +20,12 @@ UPDATE business_alerts SET severity_level = CASE severity
   WHEN 'critical' THEN 'critical' WHEN 'warning' THEN 'high' ELSE 'medium' END
  WHERE severity_level IS NULL;
 
+-- Safe to re-run: some production databases already carry these objects from an out-of-band
+-- application that was never recorded in schema_migrations. A deploy must not stop on them.
+ALTER TABLE business_alerts DROP CONSTRAINT IF EXISTS business_alerts_severity_level_check;
 ALTER TABLE business_alerts ADD CONSTRAINT business_alerts_severity_level_check
   CHECK (severity_level IS NULL OR severity_level IN ('critical','high','medium','low'));
+ALTER TABLE business_alerts DROP CONSTRAINT IF EXISTS business_alerts_resolution_category_check;
 ALTER TABLE business_alerts ADD CONSTRAINT business_alerts_resolution_category_check
   CHECK (resolution_category IS NULL OR resolution_category IN ('approved_activity','human_error','suspicious_activity','false_positive','other'));
 

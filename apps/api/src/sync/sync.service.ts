@@ -1,10 +1,12 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { PoolClient } from "pg";
-import { Operation, averageCostAt, lineAmount, normalizeRwandaPhone, priceBelowCost, toBaseQty, type Movement, type OperationT, type OpResult } from "@sms/shared";
+import { Operation, currentAverageCost, lineAmount, normalizeRwandaPhone, priceBelowCost, toBaseQty, type Movement, type OperationT, type OpResult } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
 import { canRunOp } from "./op-permissions";
 import { AlertConflictError, AlertsService } from "../alerts/alerts.service";
+import { ReturnsService } from "../returns/returns.service";
+import { PriceConflictError, PricingService } from "../returns/pricing.service";
 import { emitShopChange } from "../realtime/hub";
 import type { AuthUser } from "../common/auth";
 
@@ -25,7 +27,13 @@ const NEG_ONLY = ["damage", "expiry", "supplier_return", "theft", "disposal", "s
 
 @Injectable()
 export class SyncService {
-  constructor(private db: Db, private alerts: AlertsService) {}
+  private returns: ReturnsService;
+  private pricing: PricingService;
+  constructor(private db: Db, private alerts: AlertsService, returns?: ReturnsService, pricing?: PricingService) {
+    // The optional services keep the service constructible in narrow tests; Nest always injects them.
+    this.returns = returns ?? new ReturnsService(db);
+    this.pricing = pricing ?? new PricingService(db);
+  }
 
   /**
    * Product operations queued by an older build used the separate `openingQty`/`openingUnitCost`
@@ -135,24 +143,25 @@ export class SyncService {
     const { rows: [r] } = await c.query("SELECT COALESCE(SUM(qty),0)::bigint AS q FROM stock_movements WHERE product_id=$1", [productId]); return Number(r.q);
   }
   /**
-   * Perpetual moving weighted average cost per product as of `at`, read inside the caller's
-   * transaction. Called only after `lock()` has taken the product row locks, so two sales of the
-   * same product cannot both observe the same pre-sale average.
+   * Perpetual moving weighted average cost per product for the movements already posted, read
+   * inside the caller's transaction after `lock()` has taken the product row locks. Posting order
+   * (`seq`) is authoritative, not the document timestamp: a delivery entered at 09:22 must be in
+   * the average of a sale at 09:30 even though the delivery date is stored at noon.
    */
-  private async costsAt(c: PoolClient, shopId: string, productIds: string[], at: string): Promise<Map<string, number>> {
+  private async costsNow(c: PoolClient, shopId: string, productIds: string[]): Promise<Map<string, number>> {
     const ids = [...new Set(productIds)].sort();
     const { rows } = await c.query(
       `SELECT product_id, type, qty, unit_cost,
-              to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+              to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at, seq
          FROM stock_movements WHERE shop_id=$1 AND product_id = ANY($2::uuid[])
-        ORDER BY occurred_at, id`, [shopId, ids]);
+        ORDER BY seq`, [shopId, ids]);
     const by = new Map<string, Movement[]>();
     for (const r of rows) {
       const list = by.get(r.product_id) ?? [];
-      list.push({ type: r.type, qty: Number(r.qty), unitCost: r.unit_cost === null ? undefined : Number(r.unit_cost), occurredAt: r.at });
+      list.push({ type: r.type, qty: Number(r.qty), unitCost: r.unit_cost === null ? undefined : Number(r.unit_cost), occurredAt: r.at, seq: Number(r.seq) });
       by.set(r.product_id, list);
     }
-    return new Map(ids.map((id) => [id, averageCostAt(by.get(id) ?? [], at)]));
+    return new Map(ids.map((id) => [id, currentAverageCost(by.get(id) ?? [])]));
   }
   private async mv(c: PoolClient, shopId: string, userId: string, productId: string, type: string, qty: number, unitCost: number | null, src: string, srcId: string, at: string, reason?: string) {
     await c.query("INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [shopId, productId, type, qty, unitCost, src, srcId, userId, reason ?? null, at]);
@@ -164,13 +173,19 @@ export class SyncService {
     if (sellingPrice === undefined || sellingPrice === null) return;
     const { rows: [p] } = await c.query("SELECT selling_price FROM products WHERE id=$1 AND shop_id=$2", [productId, shopId]);
     if (!p || Number(p.selling_price) === sellingPrice) return;
-    await c.query("UPDATE products SET selling_price=$2, updated_at=now() WHERE id=$1", [productId, sellingPrice]);
+    await c.query("UPDATE products SET selling_price=$2, pending_selling_price=NULL, pending_price_at=NULL, updated_at=now() WHERE id=$1", [productId, sellingPrice]);
+    // Same ledger as an explicit price change: the owner's price history shows every price move,
+    // including one carried in by a received purchase.
+    await this.pricing.recordImpliedChange(c, shopId, userId, productId, Number(p.selling_price), sellingPrice, `purchase ${purchaseId}`);
     await audit(c, { shopId, actorId: userId, action: "product.price_from_purchase", entity: "product", entityId: productId, oldValue: { sellingPrice: Number(p.selling_price) }, newValue: { sellingPrice, purchaseId } });
   }
 
   private async apply(c: PoolClient, u: AuthUser, shopId: string, op: OperationT): Promise<OpResult["status"] | void> {
     switch (op.type) {
       case "sale.create": {
+        // A scheduled price that has come due is promoted before this sale is posted, so the price
+        // a cashier sees when the sale is committed is the price recorded on its lines.
+        await this.pricing.applyDuePrices(c, shopId);
         const p = op.payload; const cfg = await this.lock(c, shopId, p.lines.map(l => l.productId));
         const need = new Map<string, number>(); p.lines.forEach(l => need.set(l.productId, (need.get(l.productId) ?? 0) + l.qty));
         for (const [pid, q] of need) { const have = await this.onHand(c, pid); if (have < q) throw new BizError("conflict", `insufficient_stock:${pid}:have=${have}:need=${q}`); }
@@ -239,7 +254,7 @@ export class SyncService {
         // the ledger, read under the product row locks taken above. Recording it on both the line and
         // the movement is what keeps historical profit stable when a later (even backdated) receipt
         // or a return arrives.
-        const costs = await this.costsAt(c, shopId, p.lines.map((l) => l.productId), p.soldAt);
+        const costs = await this.costsNow(c, shopId, p.lines.map((l) => l.productId));
         await c.query(
           "INSERT INTO sales(id,shop_id,op_id,user_id,sold_at,gross_amount,discount,amount_paid,payment_method,customer_id,due_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
           [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod, p.customerId ?? null, p.dueAt ?? null]);
@@ -434,6 +449,7 @@ export class SyncService {
            p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1]);
         const stock = { initialQty: p.initialQty ?? null, initialUnitCost: p.initialUnitCost ?? null, initialStockValue: p.initialQty ? lineAmount(p.initialQty, p.initialUnitCost ?? 0) : 0 };
         if (ex) {
+          await this.pricing.recordImpliedChange(c, shopId, u.id, p.productId, Number(ex.selling_price), p.sellingPrice, "product edit");
           await audit(c, { shopId, actorId: u.id, action: "product.update", entity: "product", entityId: p.productId, oldValue: { name: ex.name, selling_price: ex.selling_price, code: ex.code }, newValue: { name: p.name, sellingPrice: p.sellingPrice, code: p.code } });
         } else {
           // Product creation is always audited; initial stock, when supplied, is audited with it
@@ -443,6 +459,40 @@ export class SyncService {
             newValue: { code: p.code, name: p.name, unit: p.unit, sellingPrice: p.sellingPrice, lowStockThreshold: p.lowStockThreshold, barcode: p.barcode ?? null,
               purchaseUnit: p.purchaseUnit ?? p.unit, sellingUnit: p.sellingUnit ?? p.unit,
               unitsPerPurchase: p.unitsPerPurchase ?? 1, unitsPerSelling: p.unitsPerSelling ?? 1, ...stock } });
+        }
+        return;
+      }
+      /**
+       * A product return recorded offline. The service re-validates everything against the server's
+       * sale and earlier returns inside this transaction; a stale device can therefore never return
+       * more than was sold, and two devices returning the same line cannot both win (the DB quantity
+       * trigger and the row locks serialize them). The document id is the idempotency key.
+       */
+      case "sale.return": {
+        try {
+          await this.returns.applyInTx(c, u, shopId, op.payload, op.opId);
+        } catch (e: any) {
+          if (e instanceof BizError) throw e;
+          if (e instanceof BadRequestException || e instanceof NotFoundException) throw new BizError("rejected", String(e.message));
+          throw e;
+        }
+        return;
+      }
+      /**
+       * An explicit selling-price change, online or queued offline. A price the device expected but
+       * that is no longer current is a conflict: the server's newer price wins and the client is told,
+       * instead of the stale change silently overwriting it.
+       */
+      case "product.price.set": {
+        const p = op.payload;
+        try {
+          await this.pricing.applyInTx(c, u, shopId, p, op.opId);
+        } catch (e: any) {
+          if (e instanceof PriceConflictError) throw new BizError("conflict", e.code);
+          if (e instanceof BizError) throw e;
+          if (e instanceof ForbiddenException || e instanceof BadRequestException) throw new BizError("rejected", String(e.message));
+          if (e instanceof NotFoundException) throw new BizError("rejected", "unknown_product");
+          throw e;
         }
         return;
       }
@@ -505,6 +555,9 @@ export class SyncService {
 
   /** Incremental pull. Checkpoint is an opaque JSON cursor: {p:[ts,id], s:[ts,id]} using (updated_at,id) row comparison. */
   async pull(user: AuthUser, checkpoint?: string, limit = 200) {
+    // Scheduled prices that have come due are promoted here too: an idle shop that only pulls still
+    // sees the price it must charge from today, without waiting for the next sale.
+    if (user.shopId) await this.db.tx((c) => this.pricing.applyDuePrices(c, user.shopId!));
     const cur = checkpoint ? JSON.parse(checkpoint) : {}; const epoch = "1970-01-01T00:00:00.000000Z", nil = "00000000-0000-0000-0000-000000000000";
     const [pt, pid] = cur.p ?? [epoch, nil]; const [st, sid] = cur.s ?? [epoch, nil]; const [ct, cid] = cur.c ?? [epoch, nil];
     const ts = `to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;

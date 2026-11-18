@@ -161,10 +161,49 @@ export const AlertActionOp = z.object({
   }),
 });
 
-export const Operation = z.discriminatedUnion("type", [SaleOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp, CustomerOp, CreditPaymentOp, AlertActionOp]).and(
+/**
+ * Returning goods from a completed sale. Lines carry only the quantity and the condition: the
+ * refund and the original cost are read from the sale on the server, so a device (or a tampered
+ * request) can never refund more than was charged or reverse a cost the sale never carried.
+ */
+export const ReturnOp = z.object({
+  type: z.literal("sale.return"),
+  payload: z.object({
+    returnId: id, saleId: id, returnedAt: iso,
+    reason: z.string().trim().min(3).max(500),
+    note: z.string().trim().max(1000).optional(),
+    /** Owner authorisation when the shop policy requires it (dispatched goods, damaged concession). */
+    approvalRef: z.string().trim().max(120).optional(),
+    lines: z.array(z.object({
+      productId: id, qty,
+      condition: z.enum(["resalable", "damaged", "expired", "inspection"]),
+    })).min(1).max(100),
+  }),
+});
+
+/**
+ * A selling-price change is its own operation: it never purchases stock, never moves the ledger and
+ * never rewrites a completed sale. `expectedPrice` is the price the device displayed; when the
+ * server already has a different current price the change is refused as a conflict instead of
+ * silently overwriting a newer decision made on another device.
+ */
+export const PriceOp = z.object({
+  type: z.literal("product.price.set"),
+  payload: z.object({
+    productId: id, priceId: id, newPrice: int.nonnegative(),
+    reason: z.string().trim().min(3).max(500),
+    effectiveAt: iso.optional(),
+    expectedPrice: int.nonnegative().optional(),
+    approvalRef: z.string().trim().max(120).optional(),
+  }),
+});
+
+export const Operation = z.discriminatedUnion("type", [SaleOp, ReturnOp, PriceOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp, CustomerOp, CreditPaymentOp, AlertActionOp]).and(
   z.object({ opId: id, deviceId: z.string().min(1).max(64), createdAt: iso }),
 );
 export type OperationT = z.infer<typeof Operation>;
+export type ReturnPayload = z.infer<typeof ReturnOp>["payload"];
+export type PricePayload = z.infer<typeof PriceOp>["payload"];
 
 export const PushRequest = z.object({ operations: z.array(Operation).min(1).max(100) });
 export type OpStatus = "applied" | "duplicate" | "conflict" | "rejected" | "pending_approval";

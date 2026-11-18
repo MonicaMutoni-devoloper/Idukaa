@@ -15,6 +15,7 @@ export const NAV: Record<Role, NavGroup[]> = {
     // Sales visibility: a manager sees the same shop activity as the owner (without cost/profit).
     { label: "nav.groupOversight", items: [
       { href: "/reports", key: "nav.reports", description: "nav.reportsDesc" },
+      { href: "/sales", key: "nav.sales", description: "nav.salesDesc" },
       { href: "/customers", key: "nav.customers", description: "nav.customersDesc" },
     ] },
     { label: "nav.groupAdmin", items: [
@@ -37,6 +38,7 @@ export const NAV: Record<Role, NavGroup[]> = {
     { label: "nav.groupOversight", items: [
       { href: "/", key: "nav.home", description: "nav.homeDesc" },
       { href: "/reports", key: "nav.reports", description: "nav.reportsDesc" },
+      { href: "/sales", key: "nav.sales", description: "nav.salesDesc" },
       { href: "/profitability", key: "nav.profitability", description: "nav.profitabilityDesc" },
       { href: "/approvals", key: "nav.approvals", description: "nav.approvalsDesc" },
       { href: "/shops", key: "nav.shops", description: "nav.shopsDesc" },

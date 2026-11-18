@@ -1,12 +1,20 @@
 import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Post } from "@nestjs/common";
 import { z } from "zod";
-import { averageCostAt, type Movement } from "@sms/shared";
+import { currentAverageCost, type Movement } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { audit } from "../audits/audit";
 import { emitShopChange } from "../realtime/hub";
 
-const VoidRequest = z.object({ reason: z.string().trim().min(3).max(500) });
+const VoidRequest = z.object({
+  reason: z.string().trim().min(3).max(500),
+  /** Idempotency key: a retried cancellation with the same id never posts a second reversal. */
+  cancellationId: z.string().uuid().optional(),
+  /** Owner authorisation reference when the goods already left the shop. */
+  approvalRef: z.string().trim().min(3).max(120).optional(),
+  /** Whether the goods are physically back and sellable. Dispatched goods default to false. */
+  restock: z.boolean().optional(),
+});
 const CreditDecision = z.object({ reason: z.string().trim().min(3).max(500).optional() });
 
 /**
@@ -19,24 +27,24 @@ export class SalesController {
   constructor(private db: Db) {}
 
   /**
-   * The moving weighted average cost per product as of `at`, read inside the caller's transaction.
-   * Called while the product rows are locked, so a concurrent sale of the same product cannot post
-   * at a stale average.
+   * The moving weighted average cost per product for the movements already posted, read inside the
+   * caller's transaction while the product rows are locked. Posting order is authoritative; the
+   * sale's document timestamp does not decide which receipts existed when it was posted.
    */
-  private async costsAt(c: any, shopId: string, productIds: string[], at: string): Promise<Map<string, number>> {
+  private async costsNow(c: any, shopId: string, productIds: string[]): Promise<Map<string, number>> {
     const ids = [...new Set(productIds)].sort();
     const { rows } = await c.query(
       `SELECT product_id, type, qty, unit_cost,
-              to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
-         FROM stock_movements WHERE shop_id=$1 AND product_id = ANY($2::uuid[]) ORDER BY occurred_at, id`,
+              to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at, seq
+         FROM stock_movements WHERE shop_id=$1 AND product_id = ANY($2::uuid[]) ORDER BY seq`,
       [shopId, ids]);
     const by = new Map<string, Movement[]>();
     for (const r of rows) {
       const list = by.get(r.product_id) ?? [];
-      list.push({ type: r.type, qty: Number(r.qty), unitCost: r.unit_cost === null ? undefined : Number(r.unit_cost), occurredAt: r.at });
+      list.push({ type: r.type, qty: Number(r.qty), unitCost: r.unit_cost === null ? undefined : Number(r.unit_cost), occurredAt: r.at, seq: Number(r.seq) });
       by.set(r.product_id, list);
     }
-    return new Map(ids.map((id) => [id, averageCostAt(by.get(id) ?? [], at)]));
+    return new Map(ids.map((id) => [id, currentAverageCost(by.get(id) ?? [])]));
   }
 
   /** The owner's approvals desk: credit sales that are waiting and have moved no stock yet. */
@@ -82,7 +90,7 @@ export class SalesController {
         if (Number(h.q) < Number(l.qty)) throw new BadRequestException(`insufficient_stock:${l.product_id}`);
       }
       // Stock only moves now, so this is when the sale's cost is fixed — once, under the same locks.
-      const costs = await this.costsAt(c, u.shopId!, lines.map((l: any) => l.product_id), new Date(sale.sold_at).toISOString());
+      const costs = await this.costsNow(c, u.shopId!, lines.map((l: any) => l.product_id));
       for (const l of lines) {
         const cost = costs.get(l.product_id) ?? 0;
         await c.query(
@@ -120,16 +128,46 @@ export class SalesController {
     return out;
   }
 
+  @Post(":id/cancel")
+  async cancelSale(@Me() u: AuthUser, @Param("id") id: string, @Body() body: unknown) {
+    return this.voidSale(u, id, body);
+  }
+
+  /**
+   * Cancel a completed sale (full reversal). The sale row is never deleted or edited: it is stamped
+   * `reversed` with the actor, time, reason and approval reference, and every line goes back to the
+   * ledger at the cost it left at. Repeated requests are idempotent by `cancellationId`.
+   *
+   * Dispatch policy: once goods have left the shop, a cancellation is a concession. It needs an
+   * owner approval reference and may only restore stock when the owner states the goods are back
+   * and sellable (`restock: true`). Undispatched goods are restored by default.
+   */
   @Post(":id/void")
   async voidSale(@Me() u: AuthUser, @Param("id") id: string, @Body() body: unknown) {
     if (!z.string().uuid().safeParse(id).success) throw new NotFoundException("sale_not_found");
-    const { reason } = VoidRequest.parse(body);
+    const parsed = VoidRequest.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.issues[0]?.message);
+    const { reason, cancellationId, approvalRef } = parsed.data;
     const out = await this.db.tx(async (c) => {
       const { rows: [sale] } = await c.query(
-        "SELECT id, status, gross_amount, discount, amount_paid, payment_method, sold_at, customer_id FROM sales WHERE id=$1 AND shop_id=$2 FOR UPDATE",
+        "SELECT id, status, gross_amount, discount, amount_paid, payment_method, sold_at, customer_id, dispatched_at, cancellation_id FROM sales WHERE id=$1 AND shop_id=$2 FOR UPDATE",
         [id, u.shopId]);
       if (!sale) throw new NotFoundException("sale_not_found");
+      // A retried request (same cancellation id) is answered with the original outcome, never a
+      // second reversal. A different id aimed at an already-cancelled sale is refused.
+      if (cancellationId && sale.cancellation_id === cancellationId) {
+        return { ok: true, saleId: id, status: "reversed", duplicate: true };
+      }
       if (sale.status !== "posted") throw new BadRequestException("sale_already_reversed");
+      // Returned goods are a separate document. Cancelling underneath a return would reverse the
+      // same revenue twice, so it is refused with an instruction instead.
+      const { rows: [ret] } = await c.query("SELECT COUNT(*)::int AS n FROM sale_returns WHERE sale_id=$1 AND shop_id=$2", [id, u.shopId]);
+      if (Number(ret?.n ?? 0) > 0) throw new BadRequestException("sale_has_returns");
+      const dispatched = sale.dispatched_at !== null && sale.dispatched_at !== undefined;
+      if (dispatched && !approvalRef) throw new BadRequestException("approval_ref_required_after_dispatch");
+      // Undispatched goods are assumed to be in the shop; dispatched goods are never silently
+      // restocked — the owner must confirm they are physically back and sellable.
+      const restock = parsed.data.restock ?? !dispatched;
       // Reversing a credit sale removes the debt. If repayments already cover that debt, the
       // customer would be left with a negative balance; require an explicit credit adjustment first.
       if (sale.customer_id) {
@@ -153,29 +191,34 @@ export class SalesController {
          WHERE sl.sale_id = $1 ORDER BY sl.id`, [id]);
       if (!lines.length) throw new BadRequestException("sale_has_no_lines");
 
-      for (const l of lines) {
-        // The goods go back at the cost they left at, not at today's average: voiding a sale cannot
-        // move profit into (or out of) the period the cost changed in. Legacy lines carry no recorded
-        // cost and keep the running-average fallback.
-        const cost = l.unit_cost === null || l.unit_cost === undefined ? null : Number(l.unit_cost);
-        await c.query(
-          `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at)
-           VALUES ($1,$2,'sale_return',$3,$4,'sale_void',$5,$6,$7,now())`,
-          [u.shopId, l.product_id, l.qty, cost, id, u.id, `sale void: ${reason}`]);
-        await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [l.product_id]);
+      if (restock) {
+        for (const l of lines) {
+          // The goods go back at the cost they left at, not at today's average: voiding a sale cannot
+          // move profit into (or out of) the period the cost changed in. Legacy lines carry no recorded
+          // cost and keep the running-average fallback.
+          const cost = l.unit_cost === null || l.unit_cost === undefined ? null : Number(l.unit_cost);
+          await c.query(
+            `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at)
+             VALUES ($1,$2,'sale_return',$3,$4,'sale_void',$5,$6,$7,now())`,
+            [u.shopId, l.product_id, l.qty, cost, id, u.id, `sale cancelled: ${reason}`]);
+          await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [l.product_id]);
+        }
       }
 
       await c.query(
-        "UPDATE sales SET status='reversed', reversed_at=now(), reversed_by=$3, reversal_reason=$4 WHERE id=$1 AND shop_id=$2",
-        [id, u.shopId, u.id, reason]);
+        `UPDATE sales SET status='reversed', reversed_at=now(), reversed_by=$3, reversal_reason=$4,
+                          cancellation_id=$5, cancellation_approval_ref=$6
+          WHERE id=$1 AND shop_id=$2`,
+        [id, u.shopId, u.id, reason, cancellationId ?? null, approvalRef ?? null]);
 
       await audit(c, {
         shopId: u.shopId, actorId: u.id, action: "sale.void", entity: "sale", entityId: id,
         oldValue: { status: "posted", grossAmount: Number(sale.gross_amount), discount: Number(sale.discount), paid: Number(sale.amount_paid), soldAt: sale.sold_at, paymentMethod: sale.payment_method },
-        newValue: { status: "reversed", lines: lines.map(l => ({ productId: l.product_id, name: l.name, code: l.code, qty: l.qty, unitPrice: l.unit_price })) },
-        reason,
+        newValue: { status: "reversed", restocked: restock, dispatched, cancellationId: cancellationId ?? null,
+          lines: lines.map(l => ({ productId: l.product_id, name: l.name, code: l.code, qty: l.qty, unitPrice: l.unit_price })) },
+        reason, approvalRef,
       });
-      return { ok: true, saleId: id, status: "reversed" };
+      return { ok: true, saleId: id, status: "reversed", restocked: restock, dispatched, duplicate: false };
     });
     // The returned stock and the reversed sale are visible to every connected device at once.
     emitShopChange(u.shopId, ["sale", "product"]);

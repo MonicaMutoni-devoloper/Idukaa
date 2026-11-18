@@ -3,18 +3,23 @@ import type { Request, Response } from "express";
 import { z } from "zod";
 import {
   TARGET_GROSS_MARGIN_BPS, allocateLineDiscounts, compare, dayRange, kigaliDay, presetRange,
-  replayLedger, type CalendarPreset, type Movement,
+  ledgerOrder, replayLedger, type CalendarPreset, type Movement,
 } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { FinanceService, parseRange as parse } from "./finance.service";
+import { ReturnsService } from "../returns/returns.service";
 import { reportLog } from "../common/report-log";
 
 interface DashboardProduct { id: string; name: string; qty: string | number; net_sales: string | number }
 
 @Controller("reports") @Roles("owner", "manager")
 export class ReportsController {
-  constructor(private db: Db, private finance: FinanceService) {}
+  private returns: ReturnsService;
+  constructor(private db: Db, private finance: FinanceService, returns?: ReturnsService) {
+    // Optional so the controller stays constructible in report tests; Nest injects the real service.
+    this.returns = returns ?? new ReturnsService(db);
+  }
 
   /** Owner always sees profit; a manager only when the owner enabled it for the shop. Enforced here, not in the UI. */
   private canSeeFinancials(u: AuthUser): Promise<boolean> { return this.finance.canSeeFinancials(u); }
@@ -151,7 +156,8 @@ export class ReportsController {
     const lossByMonth = new Map<string, number>();
     if (canSeeFinancials) {
       for (const list of moves.values()) {
-        const sorted = [...list].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+        // Same order as replayLedger/periodCosts: posting sequence, not the document timestamp.
+        const sorted = ledgerOrder(list);
         const r = replayLedger(sorted);
         sorted.forEach((m, i) => {
           const cost = r.perMovementCost[i] ?? 0;
@@ -179,10 +185,17 @@ export class ReportsController {
               COALESCE(SUM(gross_amount - discount),0)::bigint AS net
        FROM sales WHERE shop_id=$1 AND status='posted' AND sold_at>=$2 AND sold_at<$3 GROUP BY 1`, [shopId, yearFrom, yearTo]), []) : [];
     const monthReturns = canSeeFinancials ? await this.section(req, "monthly_returns", () => this.db.query(
-      `SELECT to_char(date_trunc('month', decided_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS month,
-              COALESCE(SUM(refund_amount),0)::bigint AS r
-       FROM adjustments WHERE shop_id=$1 AND status='approved' AND reason='sale_return'
-         AND decided_at>=$2 AND decided_at<$3 GROUP BY 1`, [shopId, yearFrom, yearTo]), []) : [];
+      `SELECT month, SUM(r)::bigint AS r FROM (
+         SELECT to_char(date_trunc('month', returned_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS month,
+                SUM(refund_amount) AS r
+           FROM sale_return_lines l JOIN sale_returns sr ON sr.id=l.return_id
+          WHERE sr.shop_id=$1 AND sr.returned_at>=$2 AND sr.returned_at<$3 GROUP BY 1
+         UNION ALL
+         SELECT to_char(date_trunc('month', decided_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS month,
+                SUM(refund_amount) AS r
+           FROM adjustments WHERE shop_id=$1 AND status='approved' AND reason='sale_return'
+             AND decided_at>=$2 AND decided_at<$3 GROUP BY 1
+       ) x GROUP BY month`, [shopId, yearFrom, yearTo]), []) : [];
     const monthExp = canSeeFinancials ? await this.section(req, "monthly_expenses", () => this.db.query(
       `SELECT to_char(date_trunc('month', incurred_at AT TIME ZONE 'Africa/Kigali'),'YYYY-MM-DD') AS month,
               COALESCE(SUM(amount),0)::bigint AS amount
@@ -432,7 +445,9 @@ export class ReportsController {
       `SELECT s.id, to_char(s.sold_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
               s.gross_amount, s.discount, s.amount_paid, s.payment_method, s.status,
               to_char(s.reversed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS reversed_at,
-              s.reversal_reason, us.full_name AS cashier
+              s.reversal_reason, s.cancellation_id, s.cancellation_approval_ref,
+              to_char(s.dispatched_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS dispatched_at,
+              us.full_name AS cashier
        FROM sales s JOIN users us ON us.id=s.user_id
        WHERE s.id=$1 AND s.shop_id=$2`, [id, u.shopId]);
     if (!sale) throw new NotFoundException("sale_not_found");
@@ -449,7 +464,10 @@ export class ReportsController {
         net: Number(sale.gross_amount) - Number(sale.discount),
         balance: Number(sale.gross_amount) - Number(sale.discount) - Number(sale.amount_paid),
         reversedAt: sale.reversed_at ?? null, reversalReason: sale.reversal_reason ?? null,
+        cancellationId: sale.cancellation_id ?? null, approvalRef: sale.cancellation_approval_ref ?? null,
+        dispatchedAt: sale.dispatched_at ?? null,
       },
+      returns: await this.returns.listForSale(u.shopId!, id),
       lines: lines.map((l: any, i: number) => ({
         productId: l.product_id, name: l.name, code: l.code, unit: l.unit,
         qty: Number(l.qty), unitPrice: Number(l.unit_price), lineAmount: Number(l.line_amount),
@@ -473,9 +491,15 @@ export class ReportsController {
         (SELECT COALESCE(json_agg(json_build_object(
           'productId', sl.product_id, 'name', pr.name, 'code', pr.code, 'unit', pr.unit,
           'qty', sl.qty, 'unitPrice', sl.unit_price, 'lineAmount', sl.line_amount
-        ) ORDER BY sl.id), '[]'::json) FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS lines
+        ) ORDER BY sl.id), '[]'::json) FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS lines,
+        COALESCE((SELECT SUM(l.refund_amount) FROM sale_return_lines l JOIN sale_returns r ON r.id=l.return_id WHERE r.sale_id=s.id),0)::bigint AS refunded,
+        CASE WHEN s.status='reversed' THEN 'cancelled'
+             WHEN NOT EXISTS (SELECT 1 FROM sale_returns r WHERE r.sale_id=s.id) THEN 'none'
+             WHEN (SELECT COALESCE(SUM(l.qty),0) FROM sale_return_lines l JOIN sale_returns r ON r.id=l.return_id WHERE r.sale_id=s.id)
+                  >= (SELECT COALESCE(SUM(qty),0) FROM sale_lines WHERE sale_id=s.id) THEN 'full'
+             ELSE 'partial' END AS return_status
       FROM sales s JOIN users us ON us.id=s.user_id LEFT JOIN customers c ON c.id=s.customer_id
-      WHERE s.shop_id=$1 AND s.status IN ('posted','pending_approval') AND s.sold_at>=$2 AND s.sold_at<$3
+      WHERE s.shop_id=$1 AND s.status IN ('posted','pending_approval','reversed') AND s.sold_at>=$2 AND s.sold_at<$3
       ORDER BY s.sold_at DESC, s.id DESC LIMIT $4 OFFSET $5`, p);
     if (kind === "purchases") return this.db.query(`SELECT pu.id, pu.ordered_at AT TIME ZONE 'UTC' AS at, pu.total_amount, pu.amount_paid, pu.reference, pu.notes, su.name AS supplier,
         (SELECT COALESCE(json_agg(json_build_object(

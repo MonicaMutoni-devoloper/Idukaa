@@ -43,6 +43,26 @@ const run = (records: LocalRecord[], products: LocalProduct[], range = DAY3, ove
     now: Date.parse("2026-11-03T12:00:00.000Z"),
   });
 
+test("offline costing uses the order operations were saved, not the receipt's noon date", () => {
+  const opening: LocalRecord = { op_id: "open-1", type: "product.upsert", at: "2026-11-03T08:00:00.000Z",
+    data: JSON.stringify({ productId: "p1", name: "Flour", unit: "kg", sellingPrice: 1500, lowStockThreshold: 0, initialQty: 10000, initialUnitCost: 1000 }),
+    actor: null, created_at: "2026-11-03T08:00:00.000Z", status: "synced" };
+  // Entered at 09:20 but stored with the receive form's noon document date.
+  const receipt: LocalRecord = { op_id: "pur-1", type: "purchase.create", at: "2026-11-03T12:00:00.000Z",
+    data: JSON.stringify({ purchaseId: "pur-1", orderedAt: "2026-11-03T12:00:00.000Z", receiveNow: true, amountPaid: 20000,
+      lines: [{ productId: "p1", qty: 10000, unitCost: 2000 }] }),
+    actor: null, created_at: "2026-11-03T09:20:00.000Z", status: "synced" };
+  const saleAt: LocalRecord = { op_id: "sale-1", type: "sale.create", at: "2026-11-03T09:30:00.000Z",
+    data: JSON.stringify({ saleId: "sale-1", soldAt: "2026-11-03T09:30:00.000Z", discount: 0, amountPaid: 7500,
+      paymentMethod: "cash", lines: [{ productId: "p1", qty: 5000, unitPrice: 1500, sellingQty: 5000 }] }),
+    actor: null, created_at: "2026-11-03T09:30:00.000Z", status: "synced" };
+
+  const d = run([opening, receipt, saleAt], [product({ on_hand: 15000 })], DAY3, { financials: true });
+  assert.equal(d.data.financials!.cogs, 7500, "5 x 1,500; the 2,000 receipt entered before the sale counts");
+  assert.equal(d.data.financials!.grossProfit, 0);
+  assert.equal(d.data.financials!.costBasisIncomplete, false);
+});
+
 test("the owner and an authorised manager compute the same figures from the same stored records", () => {
   const records = [purchase("op1", "2026-11-02T08:00:00.000Z"), sale("op2", "2026-11-03T09:00:00.000Z", {}, "synced")];
   const products = [product({ on_hand: 8000 })];

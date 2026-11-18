@@ -17,6 +17,12 @@ export const OP_ROLES: Record<OperationT["type"], Role[]> = {
   // The owner sells, buys, receives, counts, corrects, and maintains the catalogue exactly like a
   // manager. Being the owner must never mean "cannot use my own shop".
   "sale.create": ["manager", "owner"],
+  // Returning goods is counter work. Whether a particular return needs owner authorisation is a
+  // policy check inside the operation, not a blanket role gate.
+  "sale.return": ["manager", "owner"],
+  // A manager may reprice stock; repricing below the current cost, or overwriting a newer price
+  // set by someone else, is refused by the operation itself (see returns/pricing service).
+  "product.price.set": ["manager", "owner"],
   "credit.payment.create": ["manager", "owner"],
   "purchase.create": ["manager", "owner"],
   "receipt.create": ["manager", "owner"],

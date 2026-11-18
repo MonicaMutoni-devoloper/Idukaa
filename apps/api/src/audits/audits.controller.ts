@@ -36,11 +36,12 @@ export class AuditsController {
         await c.query("SELECT 1 FROM products WHERE id=$1 FOR UPDATE", [a.product_id]);
         const { rows: [h] } = await c.query("SELECT COALESCE(SUM(qty),0)::bigint q FROM stock_movements WHERE product_id=$1", [a.product_id]);
         if (Number(h.q) + Number(a.qty) < 0) throw new BadRequestException("would_make_stock_negative");
-        // Freeze the moving-average cost at approval time on the movement (documentation for the
-        // loss record; valuation still replays chronologically, so reports cannot disagree with it).
+        // Freeze the moving-average cost at approval time on the movement. Posting order (seq) is
+        // authoritative, exactly as it is for a sale, so the loss carries the same average the
+        // valuation replay will use.
         const { rows: mvs } = await c.query(
-          "SELECT type, qty, unit_cost, occurred_at FROM stock_movements WHERE product_id=$1 ORDER BY occurred_at, id", [a.product_id]);
-        const r = replayLedger(mvs.map((m: any) => ({ type: m.type, qty: Number(m.qty), unitCost: m.unit_cost ?? undefined, occurredAt: new Date(m.occurred_at).toISOString() })));
+          "SELECT type, qty, unit_cost, occurred_at, seq FROM stock_movements WHERE product_id=$1 ORDER BY seq", [a.product_id]);
+        const r = replayLedger(mvs.map((m: any) => ({ type: m.type, qty: Number(m.qty), unitCost: m.unit_cost ?? undefined, occurredAt: new Date(m.occurred_at).toISOString(), seq: Number(m.seq) })));
         const unitCost = r.onHand > 0 ? Math.round((r.value * 1000) / r.onHand) : null;
         await c.query("INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at) VALUES ($1,$2,$3,$4,$5,'adjustment',$6,$7,$8,now())", [u.shopId, a.product_id, MOVE[a.reason as keyof typeof MOVE], a.qty, unitCost, a.id, a.requested_by, `${a.reason}: ${a.note}`]);
         await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [a.product_id]);

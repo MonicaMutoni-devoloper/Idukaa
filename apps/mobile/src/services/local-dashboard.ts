@@ -1,5 +1,5 @@
 import {
-  KIGALI_UTC_OFFSET_MS, TARGET_GROSS_MARGIN_BPS, allocateLineDiscounts, kigaliDay, lineAmount,
+  KIGALI_UTC_OFFSET_MS, TARGET_GROSS_MARGIN_BPS, allocateLineDiscounts, kigaliDay, ledgerOrder, lineAmount,
   periodCosts, presetRange, priceBelowCost, replayLedger, summarize,
   type Movement, type PeriodSummary,
 } from "@sms/shared";
@@ -109,16 +109,16 @@ export interface LocalDashboardResult {
 /* ------------------------------------------------------------------ record shapes */
 
 interface SaleLine { productId: string; qty: number; unitPrice: number; sellingQty?: number }
-interface Sale { id: string; at: string; discount: number; paid: number; lines: SaleLine[]; status: string; customerId?: string }
+interface Sale { id: string; at: string; discount: number; paid: number; lines: SaleLine[]; status: string; customerId?: string; seq?: number }
 /** A repayment of an existing credit: money in, but never a sale and never revenue. */
 interface Repayment { id: string; at: string; customerId: string; amount: number; method: string }
 interface Expense { id: string; at: string; category: string; amount: number; paid: boolean }
 interface PurchaseLine { productId: string; qty: number; unitCost: number }
-interface Purchase { id: string; at: string; receivedAt: string; receiveNow: boolean; paid: number; lines: PurchaseLine[] }
+interface Purchase { id: string; at: string; receivedAt: string; receiveNow: boolean; paid: number; lines: PurchaseLine[]; seq?: number }
 interface Adjustment { id: string; at: string; productId: string; qty: number; reason: string; status: string }
 interface RecordSet {
   sales: Sale[]; expenses: Expense[]; purchases: Purchase[]; adjustments: Adjustment[]; repayments: Repayment[];
-  openings: { productId: string; at: string; qty: number; unitCost: number }[];
+  openings: { productId: string; at: string; qty: number; unitCost: number; seq?: number }[];
 }
 
 const num = (v: unknown, fallback = 0) => {
@@ -141,7 +141,12 @@ export const isFailedSync = (status: string) => status === "rejected" || status 
 export function parseRecords(records: LocalRecord[]): RecordSet {
   const out: RecordSet = { sales: [], expenses: [], purchases: [], adjustments: [], repayments: [], openings: [] };
   const expenses = new Map<string, Expense>();
-  for (const r of records) {
+  // Costing follows the order in which the device saved the operations (posting order), not the
+  // document date. A stock receipt is often dated at noon while it was entered in the morning; a
+  // sale entered after it must include its cost even though its own timestamp is earlier.
+  const orderedRecords = [...records].sort((a, b) =>
+    String(a.created_at ?? a.at ?? "").localeCompare(String(b.created_at ?? b.at ?? "")) || a.op_id.localeCompare(b.op_id));
+  for (const [order, r] of orderedRecords.entries()) {
     if (isFailedSync(r.status)) continue;
     let p: any;
     try { p = JSON.parse(r.data); } catch { continue; }
@@ -150,7 +155,7 @@ export function parseRecords(records: LocalRecord[]): RecordSet {
     switch (r.type) {
       case "sale.create":
         out.sales.push({
-          id: String(p.saleId ?? r.op_id), at,
+          id: String(p.saleId ?? r.op_id), at, seq: order,
           discount: Math.max(0, num(p.discount)), paid: Math.max(0, num(p.amountPaid)),
           lines: Array.isArray(p.lines) ? p.lines.map((l: any) => ({
             productId: String(l.productId), qty: num(l.qty), unitPrice: num(l.unitPrice),
@@ -194,7 +199,7 @@ export function parseRecords(records: LocalRecord[]): RecordSet {
           productId: String(l.productId), qty: num(l.qty), unitCost: num(l.unitCost),
         })).filter((l: PurchaseLine) => l.productId && l.qty > 0) : [];
         out.purchases.push({
-          id: String(p.purchaseId ?? r.op_id), at, receivedAt: at,
+          id: String(p.purchaseId ?? r.op_id), at, receivedAt: at, seq: order,
           receiveNow: !!p.receiveNow, paid: Math.max(0, num(p.amountPaid)), lines,
         });
         break;
@@ -207,7 +212,7 @@ export function parseRecords(records: LocalRecord[]): RecordSet {
           return { productId: String(l.productId), qty: num(l.qty), unitCost: num(l.unitCost ?? known?.unitCost) };
         }).filter((l: PurchaseLine) => l.productId && l.qty > 0) : [];
         out.purchases.push({
-          id: String(p.receiptId ?? r.op_id), at: clampDate(p.receivedAt, r.at), receivedAt: clampDate(p.receivedAt, r.at),
+          id: String(p.receiptId ?? r.op_id), at: clampDate(p.receivedAt, r.at), receivedAt: clampDate(p.receivedAt, r.at), seq: order,
           receiveNow: true, paid: 0, lines,
         });
         break;
@@ -220,7 +225,7 @@ export function parseRecords(records: LocalRecord[]): RecordSet {
         break;
       case "product.upsert": {
         const qty = num(p.initialQty);
-        if (p.productId && qty > 0) out.openings.push({ productId: String(p.productId), at: r.created_at, qty, unitCost: num(p.initialUnitCost) });
+        if (p.productId && qty > 0) out.openings.push({ productId: String(p.productId), at: r.created_at, qty, unitCost: num(p.initialUnitCost), seq: order });
         break;
       }
     }
@@ -239,13 +244,13 @@ export function buildLedger(recs: RecordSet): Map<string, Movement[]> {
     list.push(mv);
     m.set(productId, list);
   };
-  for (const o of recs.openings) add(o.productId, { type: "opening", qty: o.qty, unitCost: o.unitCost, occurredAt: o.at });
+  for (const o of recs.openings) add(o.productId, { type: "opening", qty: o.qty, unitCost: o.unitCost, occurredAt: o.at, seq: o.seq });
   for (const p of recs.purchases) {
     if (!p.receiveNow) continue;
-    for (const l of p.lines) add(l.productId, { type: "receipt", qty: l.qty, unitCost: l.unitCost, occurredAt: p.receivedAt });
+    for (const l of p.lines) add(l.productId, { type: "receipt", qty: l.qty, unitCost: l.unitCost, occurredAt: p.receivedAt, seq: p.seq });
   }
-  for (const s of recs.sales) for (const l of s.lines) add(l.productId, { type: "sale", qty: -l.qty, occurredAt: s.at });
-  for (const list of m.values()) list.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+  for (const s of recs.sales) for (const l of s.lines) add(l.productId, { type: "sale", qty: -l.qty, occurredAt: s.at, seq: s.seq });
+  for (const [productId, list] of m) m.set(productId, ledgerOrder(list));
   return m;
 }
 
@@ -255,7 +260,7 @@ export function buildLedger(recs: RecordSet): Map<string, Movement[]> {
  */
 export function ledgerIsComplete(list: Movement[]): boolean {
   let onHand = 0;
-  for (const mv of list) {
+  for (const mv of ledgerOrder(list)) {
     if (mv.qty > 0) { onHand += mv.qty; continue; }
     if (-mv.qty > onHand) return false;
     onHand += mv.qty;

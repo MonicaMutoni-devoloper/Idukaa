@@ -7,7 +7,9 @@
 -- report uses the recorded figure.
 --
 -- Both columns are nullable on purpose: rows posted before this migration have no recorded cost, and
--- the valuation replay falls back to the running average for them, so historical reports do not jump.
+-- no invented backfill is written for them. The valuation replay derives their cost from posting
+-- order; a later purchase cannot change it, because posting order always puts that purchase after
+-- the sale it followed. Historical lines stay NULL and are clearly distinguishable from snapshots.
 ALTER TABLE sale_lines ADD COLUMN IF NOT EXISTS unit_cost bigint;
 COMMENT ON COLUMN sale_lines.unit_cost IS
   'Moving weighted average cost per base unit at the moment this line was posted; never recalculated.';

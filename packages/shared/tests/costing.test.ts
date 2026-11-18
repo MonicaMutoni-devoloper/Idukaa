@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { averageCostAt, periodCosts, replayLedger, type Movement } from "../src/valuation.ts";
+import { averageCostAt, currentAverageCost, periodCosts, replayLedger, type Movement } from "../src/valuation.ts";
 import { lineAmount } from "../src/money.ts";
 
 /**
@@ -20,7 +20,7 @@ function sell(movements: Movement[], qty: number, at: string): Movement {
 
 const profit = (revenue: number, cogs: number) => revenue - cogs;
 
-test("the reported case: 12 @ 800 + 8 @ 1000, sell 5 @ 1400", () => {
+test("scenario A: 12 @ 800 + 8 @ 1,000, sell 5 @ 1,400", () => {
   const m: Movement[] = [
     { type: "opening", qty: u(12), unitCost: 800, occurredAt: t(1) },
     { type: "receipt", qty: u(8), unitCost: 1000, occurredAt: t(2) },
@@ -28,14 +28,17 @@ test("the reported case: 12 @ 800 + 8 @ 1000, sell 5 @ 1400", () => {
   assert.equal(averageCostAt(m, t(2)), 880);
   const sale = sell(m, 5, t(3));
   const r = replayLedger([...m, sale]);
+  const revenue = lineAmount(u(5), 1400);
+  assert.equal(revenue, 7000);
   assert.equal(sale.unitCost, 880);
   assert.equal(r.cogs, 4400);                       // 5 × 880, not 5 × 800
-  assert.equal(profit(lineAmount(u(5), 1400), r.cogs), 2600);
+  assert.equal(profit(revenue, r.cogs), 2600);
+  assert.equal(r.onHand, u(15), "20 bought − 5 sold");
   assert.equal(r.value, 13200);                     // 15 × 880
   assert.equal(r.avgCost, 880);
 });
 
-test("scenario A: purchase cost increases (10 @ 1000 then 10 @ 1400)", () => {
+test("purchase cost increases (10 @ 1,000 then 10 @ 1,400)", () => {
   const m: Movement[] = [
     { type: "opening", qty: u(10), unitCost: 1000, occurredAt: t(1) },
     { type: "receipt", qty: u(10), unitCost: 1400, occurredAt: t(2) },
@@ -65,7 +68,7 @@ test("scenario C: only the selling price changes — the cost basis does not mov
   assert.equal(profit(lineAmount(u(5), 1200), r.cogs), 1000, "revenue uses the sale's own price");
 });
 
-test("scenario D: purchase cost and selling price both decrease", () => {
+test("purchase cost and selling price both decrease", () => {
   const m: Movement[] = [
     { type: "opening", qty: u(10), unitCost: 1400, occurredAt: t(1) },
     { type: "receipt", qty: u(10), unitCost: 1000, occurredAt: t(2) },
@@ -76,7 +79,7 @@ test("scenario D: purchase cost and selling price both decrease", () => {
   assert.equal(profit(lineAmount(u(5), 1400), r.cogs), 1000);
 });
 
-test("several purchases and several sales in a row keep one moving average", () => {
+test("scenario D: several purchases and several sales keep one moving average", () => {
   const m: Movement[] = [
     { type: "opening", qty: u(10), unitCost: 1000, occurredAt: t(1) },
     { type: "receipt", qty: u(10), unitCost: 1400, occurredAt: t(2) },   // avg 1200
@@ -92,7 +95,26 @@ test("several purchases and several sales in a row keep one moving average", () 
   assert.equal(r.avgCost, 1200);
 });
 
-test("a later purchase never rewrites the cost of a sale already posted", () => {
+test("posting order beats a receipt's noon document timestamp (the live old-cost defect)", () => {
+  // Entered at 09:22, stored with the mobile form's noon date; the sale follows at 09:30.
+  const opening: Movement = { type: "opening", qty: u(10), unitCost: 1000, occurredAt: t(1), seq: 1 };
+  const receipt: Movement = { type: "receipt", qty: u(10), unitCost: 2000, occurredAt: `${t(1).slice(0, 8)}02T12:00:00.000Z`, seq: 2 };
+  const sale: Movement = { type: "sale", qty: -u(5), unitCost: currentAverageCost([opening, receipt]), occurredAt: `${t(1).slice(0, 8)}02T09:30:00.000Z`, seq: 3 };
+
+  assert.equal(sale.unitCost, 1500, "both postings are in the average, so 15,000 / 10");
+  const r = replayLedger([opening, receipt, sale]);
+  assert.equal(r.cogs, 7500, "5 x 1,500, not 5 x the old 1,000");
+  assert.equal(r.value, 22500, "15 units at 1,500");
+  assert.equal(r.avgCost, 1500);
+
+  // The date-based helper is intentionally left with the old behaviour for historical queries;
+  // sale posting must not use it.
+  assert.equal(averageCostAt([opening, receipt], "2026-01-02T09:30:00.000Z"), 1000);
+  assert.equal(periodCosts([opening, receipt, sale], "2026-01-02T00:00:00.000Z", "2026-01-03T00:00:00.000Z").cogs, 7500,
+    "period COGS uses the same posting order");
+});
+
+test("scenario E: a later purchase never rewrites the cost of a sale already posted", () => {
   const m: Movement[] = [
     { type: "opening", qty: u(12), unitCost: 800, occurredAt: t(1) },
     { type: "receipt", qty: u(8), unitCost: 1000, occurredAt: t(2) },

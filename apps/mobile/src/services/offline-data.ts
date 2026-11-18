@@ -78,6 +78,8 @@ const snapshot = async <T>(key: string, data: T): Promise<T> => {
   return data;
 };
 
+export const saveOfflineSnapshot = snapshot;
+
 export async function readOfflineSnapshot<T>(key: string): Promise<{ data: T; savedAt: string } | null> {
   try {
     const raw = await kvGet(key);
