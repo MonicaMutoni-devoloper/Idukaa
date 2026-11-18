@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Keyboard, Platform, Pressable, Text, View } from "react-native";
-import { formatQty, formatRwf, formatRwandaPhone, lineAmount, normalizeRwandaPhone, toBaseQty, type PaymentMethod } from "@sms/shared";
+import { defaultSellingUnit, formatQty, formatRwf, formatRwandaPhone, lineAmount, normalizeRwandaPhone, toBaseQty, type PaymentMethod, type SellingUnit } from "@sms/shared";
 import { Badge, Banner, Button, Card, Empty, Field, KeyValue, Modal, Screen, Segmented, useToasts, useWide } from "../../src/components/ui";
 import { Appear, Disclosure, Dismiss, Shake } from "../../src/components/motion";
 import { Icon } from "../../src/components/icons";
@@ -16,12 +16,25 @@ import { readCachedPolicy, savePolicySnapshot } from "../../src/services/policy-
 import { periodIsStale } from "../../src/services/offline-policy";
 import { elevation, radius, space, type, useTheme } from "../../src/theme/tokens";
 
-interface Line { p: LocalProduct; qty: string; price: string }
+interface Line { p: LocalProduct; qty: string; price: string; unit: SellingUnit | null }
 
-/** Selling-unit helpers: `qty` in a line is entered in the product's SELLING unit; stock checks,
- * the outbox delta and the ledger are always in BASE units (see shared units.ts). */
+/** Selling-unit helpers: `qty` in a line is entered in the package the cashier chose (a crate, or
+ * the plain bottle); stock checks, the outbox delta and the ledger are always in BASE units. A
+ * product with no packages on file falls back to its single legacy selling unit. */
+const packagesOf = (p: LocalProduct): SellingUnit[] => p.selling_units ?? [];
 const sellingUnitOf = (p: LocalProduct) => p.selling_unit ?? p.unit;
 const unitsSellingOf = (p: LocalProduct) => p.units_per_selling ?? 1;
+/** What a line entered without an explicit package is priced and converted in. */
+const defaultUnitOf = (p: LocalProduct): SellingUnit | null => defaultSellingUnit(packagesOf(p));
+const unitNameOf = (l: Line) => l.unit?.name ?? sellingUnitOf(l.p);
+const unitPriceOf = (l: Line) => l.unit?.price ?? l.p.selling_price;
+/** Base units in one of the line's packages: the chosen one, else the product's default. */
+const factorOf = (l: Line) => l.unit?.qtyBase ?? defaultUnitOf(l.p)?.qtyBase ?? unitsSellingOf(l.p);
+/** A product can appear twice in one sale (a crate AND a bottle), so a line is keyed by both. */
+const lineKey = (l: Line) => `${l.p.id}:${l.unit?.id ?? "default"}`;
+/** The package the quick-add sheet is offering: the one picked, else the product default. */
+const quickUnitFor = (p: LocalProduct, id: string | null): SellingUnit | null =>
+  packagesOf(p).find((u) => u.id === id) ?? defaultUnitOf(p);
 
 function QtyButton({ label, onPress, disabled, testID }: { label: string; onPress: () => void; disabled?: boolean; testID?: string }) {
   const c = useTheme();
@@ -72,6 +85,9 @@ export default function Sell() {
   // Quick-add is a draft on top of the real cart: closing it discards the draft, never the cart.
   const [quick, setQuick] = useState<LocalProduct | null>(null);
   const [quickQty, setQuickQty] = useState("1"); const [quickErr, setQuickErr] = useState<string | null>(null);
+  // Which package the quick-add sheet is pricing (a bottle, a crate...). Null on a product that has
+  // no packages on file, which then behaves exactly as before.
+  const [quickUnitId, setQuickUnitId] = useState<string | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
   const toast = useToasts((s) => s.push);
 
@@ -157,13 +173,14 @@ export default function Sell() {
   const identifying = method === "credit" || !!customer || balance > 0;
 
   const quickStock = quick ? eff(quick) : 0;
-  const quickFactor = quick ? unitsSellingOf(quick) : 1;
+  const quickUnit = quick ? quickUnitFor(quick, quickUnitId) : null;
+  const quickFactor = quickUnit?.qtyBase ?? (quick ? unitsSellingOf(quick) : 1);
   const quickCheck = quick ? validateQuickAddQty(quickQty, quickStock, quickFactor) : null;
   const quickSubtotal = quick && quickCheck?.ok
-    ? lineAmount(quickCheck.qty, parseRwf(String(quick.selling_price)) ?? quick.selling_price)
+    ? lineAmount(quickCheck.qty, quickUnit?.price ?? quick.selling_price)
     : 0;
-  const overStockText = (p: LocalProduct, max: number) =>
-    t("sell.overStock").replace("{qty}", formatQty(max)).replace("{unit}", sellingUnitOf(p));
+  const overStockText = (p: LocalProduct, max: number, unit?: SellingUnit | null) =>
+    t("sell.overStock").replace("{qty}", formatQty(max)).replace("{unit}", unit?.name ?? sellingUnitOf(p));
   const quickError = quickCheck?.ok === false
     ? (quickCheck.reason === "stock" ? overStockText(quick!, quickCheck.max) : t("sell.qtyPositive"))
     : quickErr;
@@ -171,10 +188,11 @@ export default function Sell() {
   function openQuick(p: LocalProduct) {
     Keyboard.dismiss();
     setSaved(null); setSaveError(null); setQuick(p); setQuickQty("1"); setQuickErr(null);
+    setQuickUnitId(defaultUnitOf(p)?.id ?? null);
   }
   function closeQuick() {
     Keyboard.dismiss();
-    setQuick(null); setQuickQty("1"); setQuickErr(null);
+    setQuick(null); setQuickQty("1"); setQuickErr(null); setQuickUnitId(null);
   }
   function openCart() {
     Keyboard.dismiss();
@@ -186,16 +204,20 @@ export default function Sell() {
   }
   function addQuick() {
     if (!quick || !quickCheck?.ok) return;
-    const existing = lines.find((x) => x.p.id === quick.id);
+    const unit = quickUnit;
+    const price = String(unit?.price ?? quick.selling_price);
+    // Same product AND same package merges; a crate and a bottle stay two separate lines, each
+    // charged at its own package price.
+    const existing = lines.find((x) => x.p.id === quick.id && (x.unit?.id ?? null) === (unit?.id ?? null));
     const merged = existing
       ? mergeCartQty(existing.qty, quickCheck.qty, quickStock, quickFactor)
       : formatQty(quickCheck.qty);
-    if (!merged) { setQuickErr(overStockText(quick, maxSellingMilli(quickStock, quickFactor))); return; }
+    if (!merged) { setQuickErr(overStockText(quick, maxSellingMilli(quickStock, quickFactor), unit)); return; }
     setSaved(null); setSaveError(null);
     setLines((ls) => (existing
-      ? ls.map((x) => (x.p.id === quick.id ? { ...x, qty: merged, price: String(quick.selling_price) } : x))
-      : [...ls, { p: quick, qty: merged, price: String(quick.selling_price) }]));
-    toast(`${quick.name} ${t("sell.addedToCart")}`);
+      ? ls.map((x) => (x.p.id === quick.id && (x.unit?.id ?? null) === (unit?.id ?? null) ? { ...x, qty: merged, price } : x))
+      : [...ls, { p: quick, qty: merged, price, unit }]));
+    toast(`${quick.name}${unit && unit.qtyBase > 1 ? ` · ${unit.name}` : ""} ${t("sell.addedToCart")}`);
     closeQuick();
   }
 
@@ -220,7 +242,7 @@ export default function Sell() {
     lines.forEach((l, i) => {
       const qn = qtyOrNull(l.qty);
       if (!qn) e[`q${i}`] = t("v.positive");
-      else if (toBaseQty(qn, unitsSellingOf(l.p)) > eff(l.p)) e[`q${i}`] = `${t("sell.insufficient")} · ${formatQty(eff(l.p))} ${l.p.unit}`;
+      else if (toBaseQty(qn, factorOf(l)) > eff(l.p)) e[`q${i}`] = `${t("sell.insufficient")} · ${formatQty(eff(l.p))} ${l.p.unit}`;
       if (parseRwf(l.price) === null) e[`p${i}`] = t("v.invalid");
     });
     if (parseRwf(discount) === null || disc > gross) e.d = t("v.invalid");
@@ -277,7 +299,8 @@ export default function Sell() {
         creditOverrideReason: balance > 0 && overrideReason.trim().length >= 3 ? overrideReason.trim() : undefined,
         lines: lines.map((l) => {
           const natural = qtyOrNull(l.qty)!;                         // milli SELLING units as entered
-          return { productId: l.p.id, qty: toBaseQty(natural, unitsSellingOf(l.p)), unitPrice: parseRwf(l.price)!, sellingQty: natural };
+          return { productId: l.p.id, qty: toBaseQty(natural, factorOf(l)), unitPrice: parseRwf(l.price)!, sellingQty: natural,
+            sellingUnitId: l.unit?.id };
         }) };
       const deltas: Record<string, number> = {}; payload.lines.forEach((l) => (deltas[l.productId] = (deltas[l.productId] ?? 0) - l.qty));
       // Optimistic debt: the next sale on this device sees it, and the API either keeps it or the
@@ -364,29 +387,46 @@ export default function Sell() {
           </View>
 
           {lines.length ? lines.map((l, i) => (
-            <Dismiss key={l.p.id} active={!leaving.includes(l.p.id)}
-              onDone={() => { setLines((a) => a.filter((x) => x.p.id !== l.p.id)); setLeaving((v) => v.filter((id) => id !== l.p.id)); }}>
+            <Dismiss key={lineKey(l)} active={!leaving.includes(lineKey(l))}
+              onDone={() => { setLines((a) => a.filter((x) => lineKey(x) !== lineKey(l))); setLeaving((v) => v.filter((id) => id !== lineKey(l))); }}>
             <Appear index={i}>
             <Card style={{ gap: space.sm, padding: space.md }}>
               <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
                 <View style={{ flex: 1 }}>
-                  <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{l.p.name}</Text>
-                  <Text style={{ color: c.muted, fontSize: 11 }}>{t("sell.remaining")} {formatQty(eff(l.p))} {l.p.unit} · {formatRwf(l.p.selling_price)} / {sellingUnitOf(l.p)}</Text>
+                  <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{l.p.name}{l.unit && l.unit.qtyBase > 1 ? ` · ${l.unit.name}` : ""}</Text>
+                  <Text style={{ color: c.muted, fontSize: 11 }}>{t("sell.remaining")} {formatQty(eff(l.p))} {l.p.unit} · {formatRwf(unitPriceOf(l))} / {unitNameOf(l)}</Text>
                 </View>
-                <Button size="sm" kind="quiet" label={t("common.remove")} onPress={() => setLeaving((v) => [...v, l.p.id])} />
+                <Button size="sm" kind="quiet" label={t("common.remove")} onPress={() => setLeaving((v) => [...v, lineKey(l)])} />
               </View>
+              {packagesOf(l.p).length > 1 ? (
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                  {packagesOf(l.p).map((u) => {
+                    const active = (l.unit?.id ?? defaultUnitOf(l.p)?.id ?? null) === u.id;
+                    return (
+                      <Pressable key={u.id} testID={`sell-unit-${i}-${u.name}`} accessibilityRole="button" accessibilityLabel={u.name}
+                        onPress={() => update(i, { unit: u, price: String(u.price) })}
+                        style={({ pressed }: any) => ({ paddingVertical: 5, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1,
+                          borderColor: active ? c.accent : c.line, backgroundColor: active ? c.accentSoft : pressed ? c.pressed : c.surface })}>
+                        <Text style={{ color: active ? c.primaryStrong : c.ink, fontSize: 12, fontWeight: "700" }}>
+                          {u.name}{u.qtyBase > 1 ? ` ${u.qtyBase}` : ""} · {formatRwf(u.price)}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ) : null}
               <View style={{ flexDirection: "row", gap: space.sm, alignItems: "flex-start", flexWrap: "wrap" }}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexGrow: 1, flexBasis: 150 }}>
                   <Button size="sm" kind="secondary" label="−" onPress={() => step(i, -1)} />
-                  <View style={{ flex: 1 }}><Field testID={`sell-qty-${i}`} label={`${t("common.qty")} (${sellingUnitOf(l.p)})`} value={l.qty} keyboardType="decimal-pad" error={errs[`q${i}`]} onChangeText={(x) => update(i, { qty: x })} /></View>
+                  <View style={{ flex: 1 }}><Field testID={`sell-qty-${i}`} label={`${t("common.qty")} (${unitNameOf(l)})`} value={l.qty} keyboardType="decimal-pad" error={errs[`q${i}`]} onChangeText={(x) => update(i, { qty: x })} /></View>
                   <Button size="sm" kind="secondary" label="+" onPress={() => step(i, 1)} />
                 </View>
                 <View style={{ flexGrow: 1, flexBasis: 130 }}>
-                  <Field testID={`sell-price-${i}`} label={`${t("common.price")} / ${sellingUnitOf(l.p)}`} value={l.price} keyboardType="number-pad" error={errs[`p${i}`]} onChangeText={(x) => update(i, { price: x })} />
+                  <Field testID={`sell-price-${i}`} label={`${t("common.price")} / ${unitNameOf(l)}`} value={l.price} keyboardType="number-pad" error={errs[`p${i}`]} onChangeText={(x) => update(i, { price: x })} />
                 </View>
               </View>
               <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                <Text style={{ color: c.muted, fontSize: 12 }}>{t("sell.lineTotal")}{unitsSellingOf(l.p) !== 1 ? ` (${formatQty(toBaseQty(qtyOrNull(l.qty) ?? 0, unitsSellingOf(l.p)))} ${l.p.unit})` : ""}</Text>
+                <Text style={{ color: c.muted, fontSize: 12 }}>{t("sell.lineTotal")}{factorOf(l) !== 1 ? ` (${formatQty(toBaseQty(qtyOrNull(l.qty) ?? 0, factorOf(l)))} ${l.p.unit})` : ""}</Text>
                 <Text style={{ color: c.ink, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(amount(l))}</Text>
               </View>
             </Card>
@@ -575,20 +615,40 @@ export default function Sell() {
               </View>
               <View style={{ flex: 1, gap: 3 }}>
                 <Text style={{ color: c.muted, fontSize: 12 }}>{quick.code}</Text>
-                <Text style={{ color: c.ink, fontWeight: "700", fontSize: 15 }}>{formatRwf(quick.selling_price)} / {sellingUnitOf(quick)}</Text>
+                <Text style={{ color: c.ink, fontWeight: "700", fontSize: 15 }}>{formatRwf(quickUnit?.price ?? quick.selling_price)} / {quickUnit?.name ?? sellingUnitOf(quick)}</Text>
                 <Badge tone={quickStock <= 0 ? "danger" : quickStock <= quick.low_threshold ? "warn" : "neutral"}
                   label={`${t("sell.availableStock")}: ${formatQty(quickStock)} ${quick.unit}`} />
               </View>
             </View>
+            {packagesOf(quick).length > 1 ? (
+              <View style={{ gap: 6 }}>
+                <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("sell.sellAs")}</Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                  {packagesOf(quick).map((u) => {
+                    const active = quickUnit?.id === u.id;
+                    return (
+                      <Pressable key={u.id} testID={`sell-quick-unit-${u.name}`} accessibilityRole="button" accessibilityLabel={u.name}
+                        onPress={() => { setQuickUnitId(u.id); setQuickQty("1"); setQuickErr(null); }}
+                        style={({ pressed }: any) => ({ paddingVertical: 7, paddingHorizontal: space.md, borderRadius: 8, borderWidth: 1,
+                          borderColor: active ? c.accent : c.line, backgroundColor: active ? c.accentSoft : pressed ? c.pressed : c.surface })}>
+                        <Text style={{ color: active ? c.primaryStrong : c.ink, fontSize: 13, fontWeight: "700" }}>
+                          {u.name}{u.qtyBase > 1 ? ` ${u.qtyBase}` : ""} · {formatRwf(u.price)}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
             {quickFactor !== 1 ? (
               <Text style={{ color: c.inkSoft, fontSize: 12 }}>
-                {t("sell.packConversion").replace("{selling}", sellingUnitOf(quick)).replace("{n}", String(quickFactor)).replace("{base}", quick.unit)}
+                {t("sell.packConversion").replace("{selling}", quickUnit?.name ?? sellingUnitOf(quick)).replace("{n}", String(quickFactor)).replace("{base}", quick.unit)}
               </Text>
             ) : null}
             <View style={{ flexDirection: "row", alignItems: "flex-end", gap: space.sm }}>
               <QtyButton testID="sell-quick-minus" label="−" disabled={quickStock <= 0} onPress={() => { setQuickQty(stepSellingQty(quickQty, -1, quickStock, quickFactor)); setQuickErr(null); }} />
               <View style={{ flex: 1 }}>
-                <Field testID="sell-quick-qty" label={`${t("common.qty")} (${sellingUnitOf(quick)})`} value={quickQty} keyboardType="decimal-pad"
+                <Field testID="sell-quick-qty" label={`${t("common.qty")} (${quickUnit?.name ?? sellingUnitOf(quick)})`} value={quickQty} keyboardType="decimal-pad"
                   onChangeText={(x) => { setQuickQty(x); setQuickErr(null); }} error={quickError} />
               </View>
               <QtyButton testID="sell-quick-plus" label="+" disabled={quickStock <= 0} onPress={() => { setQuickQty(stepSellingQty(quickQty, 1, quickStock, quickFactor)); setQuickErr(null); }} />

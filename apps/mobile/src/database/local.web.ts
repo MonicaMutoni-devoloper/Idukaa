@@ -10,14 +10,14 @@
 // Concurrency: writes are serialized with the Web Locks API when available and re-read the latest
 // state under the lock, so two tabs cannot clobber each other's queued operations. Other tabs are
 // notified through BroadcastChannel and drop their read cache.
-import { lineAmount } from "@sms/shared";
+import { lineAmount, type SellingUnit } from "@sms/shared";
 import type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot } from "./local";
 
 export type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot };
 
 interface LocalSupplier { id: string; name: string; phone?: string | null }
 interface WebCustomer { id: string; shop_id: string | null; name: string; phone: string | null; address: string | null; notes: string | null; credit_limit: number; status: "active" | "blocked"; updated_at?: string | null; balance?: number; overdue?: number }
-interface WebProduct extends LocalProduct { barcode: string | null; active: number; purchase_unit: string | null; selling_unit: string | null; units_per_purchase: number; units_per_selling: number }
+interface WebProduct extends LocalProduct { barcode: string | null; active: number; purchase_unit: string | null; selling_unit: string | null; units_per_purchase: number; units_per_selling: number; selling_units: SellingUnit[] | null }
 interface State { kv: Record<string, string>; products: WebProduct[]; suppliers: LocalSupplier[]; customers: WebCustomer[]; outbox: OutboxRow[]; records: LocalRecord[]; seq: number }
 
 const IDB_NAME = "sms-local";
@@ -92,6 +92,8 @@ function normalizeProduct(p: WebProduct): WebProduct {
     selling_unit: p.selling_unit ?? null,
     units_per_purchase: Number.isInteger(p.units_per_purchase) && p.units_per_purchase > 0 ? p.units_per_purchase : 1,
     units_per_selling: Number.isInteger(p.units_per_selling) && p.units_per_selling > 0 ? p.units_per_selling : 1,
+    // Packages are plain JSON here (IndexedDB already stores structured values).
+    selling_units: Array.isArray(p.selling_units) ? p.selling_units : null,
   };
 }
 
@@ -272,7 +274,7 @@ export async function listRecords() {
     }));
 }
 
-export async function upsertLocalProduct(p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number }) {
+export async function upsertLocalProduct(p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number; sellingUnits?: SellingUnit[] }) {
   await mutate((s) => {
     const ex = s.products.find((x) => x.id === p.id);
     // COALESCE-like: an edit that omits the conversion config keeps the stored one (the server
@@ -288,10 +290,13 @@ export async function upsertLocalProduct(p: { id: string; code: string; barcode?
       ex.selling_price = p.sellingPrice; ex.low_threshold = p.lowStockThreshold;
       if (p.category) ex.category = p.category;
       Object.assign(ex, cfg(ex));
+      // Packages are locked on an existing product only for their SIZE; a price correction or a new
+      // package arrives through the same field, so the local copy follows the server verdict.
+      if (p.sellingUnits) ex.selling_units = p.sellingUnits;
     }
     // Opening stock is shown optimistically through pending_delta; the matching delta on the
     // product.upsert operation is released when the server verdict arrives.
-    else s.products.push(normalizeProduct({ id: p.id, code: p.code, barcode: p.barcode ?? null, name: p.name, category: p.category ?? null, unit: p.unit, selling_price: p.sellingPrice, low_threshold: p.lowStockThreshold, on_hand: 0, pending_delta: p.initialQty ?? 0, active: 1, ...cfg(undefined) }));
+    else s.products.push(normalizeProduct({ id: p.id, code: p.code, barcode: p.barcode ?? null, name: p.name, category: p.category ?? null, unit: p.unit, selling_price: p.sellingPrice, low_threshold: p.lowStockThreshold, on_hand: 0, pending_delta: p.initialQty ?? 0, active: 1, selling_units: p.sellingUnits ?? null, ...cfg(undefined) }));
   });
 }
 
@@ -378,7 +383,8 @@ export async function applyPull(changes: { entity: string; id: string; data: any
         const row: WebProduct = { id: p.id, code: p.code, barcode: p.barcode ?? null, name: p.name, category: p.category ?? null, unit: p.unit, selling_price: p.sellingPrice, low_threshold: p.lowStockThreshold, on_hand: p.onHand, active: p.active ? 1 : 0, pending_delta: ex?.pending_delta ?? 0,
           purchase_unit: p.purchaseUnit ?? null, selling_unit: p.sellingUnit ?? null,
           units_per_purchase: Number.isInteger(p.unitsPerPurchase) && p.unitsPerPurchase > 0 ? p.unitsPerPurchase : 1,
-          units_per_selling: Number.isInteger(p.unitsPerSelling) && p.unitsPerSelling > 0 ? p.unitsPerSelling : 1 };
+          units_per_selling: Number.isInteger(p.unitsPerSelling) && p.unitsPerSelling > 0 ? p.unitsPerSelling : 1,
+          selling_units: Array.isArray(p.sellingUnits) ? p.sellingUnits : null };
         if (ex) Object.assign(ex, row); else s.products.push(row);
       }
       if (c.entity === "supplier") {

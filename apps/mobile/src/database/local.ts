@@ -1,6 +1,6 @@
 import * as SQLite from "expo-sqlite";
 import { Paths } from "expo-file-system";
-import { lineAmount } from "@sms/shared";
+import { lineAmount, type SellingUnit } from "@sms/shared";
 
 /**
  * Local persistent store. Every operation is saved here in ONE SQLite transaction (with its optimistic stock delta)
@@ -50,6 +50,8 @@ export interface LocalProduct {
   // Unit configuration (nullable labels fall back to `unit`; factors default to 1 = simple setup).
   purchase_unit?: string | null; selling_unit?: string | null;
   units_per_purchase?: number; units_per_selling?: number;
+  /** Every package this product can be sold in. Stored as JSON; `selling_unit` stays the default. */
+  selling_units?: SellingUnit[] | null;
 }
 
 export async function initDb() {
@@ -78,6 +80,9 @@ export async function initDb() {
   if (!cols.includes("selling_unit")) await d.runAsync("ALTER TABLE products ADD COLUMN selling_unit TEXT");
   if (!cols.includes("units_per_purchase")) await d.runAsync("ALTER TABLE products ADD COLUMN units_per_purchase INTEGER NOT NULL DEFAULT 1");
   if (!cols.includes("units_per_selling")) await d.runAsync("ALTER TABLE products ADD COLUMN units_per_selling INTEGER NOT NULL DEFAULT 1");
+  // Multiple selling packages per product, kept as the JSON the server sent. Additive: a device that
+  // never syncs a product's packages keeps the legacy single-unit columns as its only source.
+  if (!cols.includes("selling_units")) await d.runAsync("ALTER TABLE products ADD COLUMN selling_units TEXT");
   // Shop-scoping arrived after the first offline installs. These columns let a device keep the
   // records and queued work it already holds when a different account/shop signs in, instead of
   // deleting them. Existing rows are attributed to the shop currently bound to this device, which
@@ -224,20 +229,22 @@ export const listRecords = async () =>
        FROM records r LEFT JOIN outbox o ON o.op_id = r.op_id
       WHERE r.shop_id = (SELECT v FROM kv WHERE k='local.shop')
       ORDER BY r.at, r.op_id`);
-export const upsertLocalProduct = async (p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number }) => {
+export const upsertLocalProduct = async (p: { id: string; code: string; barcode?: string | null; name: string; category?: string | null; unit: string; sellingPrice: number; lowStockThreshold: number; initialQty?: number; purchaseUnit?: string | null; sellingUnit?: string | null; unitsPerPurchase?: number; unitsPerSelling?: number; sellingUnits?: SellingUnit[] }) => {
   const d = await db();
   // Conversion config is part of the local product so offline sales/receipts convert on-device
   // exactly like the server will verify them. In SQLite, NOT NULL columns must not receive explicit
   // NULL values, so factors default to 1 for standard 1:1 products. COALESCE keeps an edit that
   // omits the config from wiping it (mirrors the server's unit_config_locked behaviour).
-  await d.runAsync(`INSERT INTO products(id,code,barcode,name,category,unit,selling_price,low_threshold,pending_delta,purchase_unit,selling_unit,units_per_purchase,units_per_selling)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+  await d.runAsync(`INSERT INTO products(id,code,barcode,name,category,unit,selling_price,low_threshold,pending_delta,purchase_unit,selling_unit,units_per_purchase,units_per_selling,selling_units)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET code=excluded.code,barcode=excluded.barcode,name=excluded.name,category=COALESCE(excluded.category,products.category),unit=excluded.unit,
       selling_price=excluded.selling_price,low_threshold=excluded.low_threshold,
       purchase_unit=COALESCE(excluded.purchase_unit,products.purchase_unit),selling_unit=COALESCE(excluded.selling_unit,products.selling_unit),
-      units_per_purchase=COALESCE(excluded.units_per_purchase,products.units_per_purchase),units_per_selling=COALESCE(excluded.units_per_selling,products.units_per_selling)`,
+      units_per_purchase=COALESCE(excluded.units_per_purchase,products.units_per_purchase),units_per_selling=COALESCE(excluded.units_per_selling,products.units_per_selling),
+      selling_units=COALESCE(excluded.selling_units,products.selling_units)`,
     [p.id, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold, p.initialQty ?? 0,
-     p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1]);
+     p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1,
+     p.sellingUnits ? JSON.stringify(p.sellingUnits) : null]);
 };
 export const upsertLocalSupplier = async (s: { id: string; name: string; phone?: string }) => (await db()).runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name", [s.id, s.name, s.phone ?? null]);
 
@@ -309,7 +316,7 @@ export async function applyPull(changes: { entity: string; id: string; data: any
   const d = await db();
   await d.withTransactionAsync(async () => {
     for (const c of changes) {
-      if (c.entity === "product") { const p = c.data; await d.runAsync("INSERT INTO products(id,code,barcode,name,category,unit,selling_price,low_threshold,on_hand,active,purchase_unit,selling_unit,units_per_purchase,units_per_selling) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET code=excluded.code,barcode=excluded.barcode,name=excluded.name,category=excluded.category,unit=excluded.unit,selling_price=excluded.selling_price,low_threshold=excluded.low_threshold,on_hand=excluded.on_hand,active=excluded.active,purchase_unit=excluded.purchase_unit,selling_unit=excluded.selling_unit,units_per_purchase=excluded.units_per_purchase,units_per_selling=excluded.units_per_selling", [p.id, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold, p.onHand, p.active ? 1 : 0, p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1]); }
+      if (c.entity === "product") { const p = c.data; await d.runAsync("INSERT INTO products(id,code,barcode,name,category,unit,selling_price,low_threshold,on_hand,active,purchase_unit,selling_unit,units_per_purchase,units_per_selling,selling_units) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET code=excluded.code,barcode=excluded.barcode,name=excluded.name,category=excluded.category,unit=excluded.unit,selling_price=excluded.selling_price,low_threshold=excluded.low_threshold,on_hand=excluded.on_hand,active=excluded.active,purchase_unit=excluded.purchase_unit,selling_unit=excluded.selling_unit,units_per_purchase=excluded.units_per_purchase,units_per_selling=excluded.units_per_selling,selling_units=COALESCE(excluded.selling_units,products.selling_units)", [p.id, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold, p.onHand, p.active ? 1 : 0, p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1, Array.isArray(p.sellingUnits) ? JSON.stringify(p.sellingUnits) : null]); }
       if (c.entity === "supplier") await d.runAsync("INSERT INTO suppliers(id,name,phone) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone", [c.data.id, c.data.name, c.data.phone ?? null]);
       if (c.entity === "customer") { const x = c.data; await d.runAsync(
         "INSERT INTO customers(id,shop_id,name,phone,address,notes,credit_limit,status,updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,address=excluded.address,notes=excluded.notes,credit_limit=excluded.credit_limit,status=excluded.status,updated_at=excluded.updated_at",
@@ -320,7 +327,19 @@ export async function applyPull(changes: { entity: string; id: string; data: any
     }
   });
 }
-export const listProducts = async (q = "") => (await db()).getAllAsync<LocalProduct>("SELECT * FROM products WHERE active=1 AND (name LIKE ? OR code LIKE ? OR COALESCE(barcode,'') LIKE ?) ORDER BY name LIMIT 300", [`%${q}%`, `%${q}%`, `%${q}%`]);
+export const listProducts = async (q = "") => (await db()).getAllAsync<LocalProduct & { selling_units: string | null }>(
+  "SELECT * FROM products WHERE active=1 AND (name LIKE ? OR code LIKE ? OR COALESCE(barcode,'') LIKE ?) ORDER BY name LIMIT 300",
+  [`%${q}%`, `%${q}%`, `%${q}%`]).then((rows) => rows.map((r) => ({ ...r, selling_units: parseUnits(r.selling_units) })));
+
+/** Packages are stored as JSON text; a corrupt or missing value means "no packages on file". */
+function parseUnits(raw: string | SellingUnit[] | null | undefined): SellingUnit[] | null {
+  if (!raw) return null;
+  if (Array.isArray(raw)) return raw;
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : null;
+  } catch { return null; }
+}
 export const listSuppliers = async () => (await db()).getAllAsync<{ id: string; name: string }>("SELECT id,name FROM suppliers ORDER BY name");
 export const listCustomers = async (q = "") => (await db()).getAllAsync<LocalCustomer>(
   "SELECT * FROM customers WHERE shop_id=(SELECT v FROM kv WHERE k='local.shop') AND (name LIKE ? OR COALESCE(phone,'') LIKE ?) ORDER BY name LIMIT 500", [`%${q}%`, `%${q}%`]);

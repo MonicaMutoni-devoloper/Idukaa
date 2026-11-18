@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { costPerBaseUnit, fromBaseQty, priceBelowCost, profitPerBaseUnit, toBaseQty } from "../src/index.ts";
+import { costPerBaseUnit, defaultSellingUnit, fromBaseQty, isBaseUnit, priceBelowCost, profitPerBaseUnit, sellingUnitById, toBaseQty } from "../src/index.ts";
 
 const u = (n: number) => n * 1000; // whole units -> milli-units
 
@@ -55,4 +55,38 @@ test("profit per base unit matches the spec's rice example", () => {
   // 1,400/kg selling, 1,200/kg cost -> 200 RWF profit per kg.
   assert.equal(profitPerBaseUnit(1_400, 1, 1_200), 200);
   assert.equal(profitPerBaseUnit(5_000, 12, 300), 116); // 416 floor - 300
+});
+const units = [
+  { id: "crate", name: "Crate", qtyBase: 12, price: 5_600 },
+  { id: "bottle", name: "Bottle", qtyBase: 1, price: 500 },
+  { id: "carton", name: "Carton", qtyBase: 24, price: 10_800 },
+];
+
+test("a product with several packages opens on the base-unit price", () => {
+  // Bottle is qtyBase 1, so it is the default even though the crate is listed first.
+  assert.equal(defaultSellingUnit(units)!.id, "bottle");
+  assert.equal(isBaseUnit(defaultSellingUnit(units)!), true);
+  assert.equal(isBaseUnit(units[0]!), false);
+});
+
+test("a product sold only in packages defaults to its first package", () => {
+  assert.equal(defaultSellingUnit([units[0]!, units[2]!])!.id, "crate");
+  assert.equal(defaultSellingUnit([]), null);
+});
+
+test("a chosen package resolves by id, and an unknown id resolves to nothing", () => {
+  assert.equal(sellingUnitById(units, "crate")!.price, 5_600);
+  assert.equal(sellingUnitById(units, "carton")!.qtyBase, 24);
+  assert.equal(sellingUnitById(units, "gone"), null);
+  assert.equal(sellingUnitById(units, null), null);
+});
+
+test("each package converts and prices on its own factor in the same sale", () => {
+  // 2 crates + 3 bottles: 24 base + 3 base, charged 2x5,600 + 3x500.
+  const crate = sellingUnitById(units, "crate")!;
+  const bottle = sellingUnitById(units, "bottle")!;
+  const base = toBaseQty(u(2), crate.qtyBase) + toBaseQty(u(3), bottle.qtyBase);
+  assert.equal(base, u(27));
+  const gross = Number(BigInt(u(2)) * BigInt(crate.price) / 1000n) + Number(BigInt(u(3)) * BigInt(bottle.price) / 1000n);
+  assert.equal(gross, 12_700);
 });

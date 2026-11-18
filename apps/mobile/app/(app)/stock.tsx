@@ -20,7 +20,7 @@
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
-import { costPerBaseUnit, formatQty, formatRwf, lineAmount, parseQty, priceBelowCost, profitPerBaseUnit, toBaseQty } from "@sms/shared";
+import { costPerBaseUnit, formatQty, formatRwf, lineAmount, parseQty, priceBelowCost, profitPerBaseUnit, toBaseQty, type SellingUnit } from "@sms/shared";
 import { Badge, Banner, Button, Card, DataTable, Empty, Field, KeyValue, Modal, Screen, Segmented, useWide } from "../../src/components/ui";
 import { DayField } from "../../src/components/date-range-picker";
 import { enqueue, kvGet, listProducts, listSuppliers, upsertLocalProduct, type LocalProduct } from "../../src/database/local";
@@ -52,6 +52,10 @@ export default function Stock() {
   const [adding, setAdding] = useState(false);
   const fEmpty = { code: "", barcode: "", name: "", category: "", unit: "pcs", price: "", low: "0", qty: "", cost: "", convert: false, purchaseUnit: "", perPurchase: "1", sellingUnit: "", perSelling: "1" };
   const [f, setF] = useState(fEmpty);
+  // Every package this product is sold in, beyond the single selling unit above (a crate, a carton).
+  // Reused by the edit form, which loads the product's own packages.
+  const [packages, setPackages] = useState<{ id: string; name: string; qty: string; price: string }[]>([]);
+  const [pkgErr, setPkgErr] = useState<string | null>(null);
   const [fErr, setFErr] = useState<Record<string, string | null>>({});
 
   // Add stock = a purchase received immediately against the SAME product. Edit = product details only.
@@ -123,6 +127,53 @@ export default function Stock() {
    * The optimistic pending_delta is released when the server verdict arrives, and the operation
    * id is created once, so a retried sync can never register the stock twice.
    */
+  /**
+   * Turn the package rows into the payload's `sellingUnits`. A half-filled row is a mistake worth
+   * stopping on: a package with no size or no price would be sold at whatever the fallback is.
+   */
+  function collectPackages(): SellingUnit[] | null {
+    const out: SellingUnit[] = [];
+    for (const r of packages) {
+      if (!r.name.trim() && !r.qty.trim() && !r.price.trim()) continue;
+      const qty = Number(r.qty.trim()); const price = parseRwf(r.price);
+      if (!r.name.trim() || !Number.isInteger(qty) || qty < 1 || price === null) { setPkgErr(t("stock.packageInvalid")); return null; }
+      out.push({ id: r.id || uuid(), name: r.name.trim(), qtyBase: qty, price });
+    }
+    const seen = new Set<string>();
+    for (const u of out) {
+      const key = u.name.toLowerCase();
+      if (seen.has(key)) { setPkgErr(t("stock.packageDuplicate")); return null; }
+      seen.add(key);
+    }
+    return out;
+  }
+
+  /** Rows of extra packages, shared by the add and edit forms. */
+  function packageEditor(unitLabel: string) {
+    return (
+      <View style={{ gap: space.sm }}>
+        <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("stock.packages")}</Text>
+        <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("stock.packagesHelp").replace("{unit}", unitLabel)}</Text>
+        {packages.map((row, i) => (
+          <View key={row.id} style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <Field containerStyle={{ flexBasis: 150 }} testID={`stock-pkg-name-${i}`} label={t("stock.packageName")} value={row.name}
+              onChangeText={(x) => { setPkgErr(null); setPackages((a) => a.map((r, j) => (j === i ? { ...r, name: x } : r))); }} />
+            <Field containerStyle={{ flexBasis: 110 }} testID={`stock-pkg-qty-${i}`} label={`${t("stock.packageQty")} (${unitLabel})`} value={row.qty} keyboardType="number-pad"
+              onChangeText={(x) => { setPkgErr(null); setPackages((a) => a.map((r, j) => (j === i ? { ...r, qty: x } : r))); }} />
+            <Field containerStyle={{ flexBasis: 120 }} testID={`stock-pkg-price-${i}`} label={t("stock.packagePrice")} value={row.price} keyboardType="number-pad"
+              onChangeText={(x) => { setPkgErr(null); setPackages((a) => a.map((r, j) => (j === i ? { ...r, price: x } : r))); }} />
+            <Button size="sm" kind="quiet" label={t("common.remove")} onPress={() => { setPkgErr(null); setPackages((a) => a.filter((_, j) => j !== i)); }} />
+          </View>
+        ))}
+        {pkgErr ? <Text style={{ color: c.danger, fontSize: 12 }}>{pkgErr}</Text> : null}
+        <View>
+          <Button size="sm" kind="secondary" testID="stock-pkg-add" label={t("stock.addPackage")}
+            onPress={() => { setPkgErr(null); setPackages((a) => [...a, { id: uuid(), name: "", qty: "", price: "" }]); }} />
+        </View>
+      </View>
+    );
+  }
+
   async function addProduct() {
     const price = parseRwf(f.price);
     const qty = qtyOrNull(f.qty);        // milli PURCHASE units when converting, else milli base units
@@ -156,10 +207,20 @@ export default function Stock() {
     const code = f.code.trim() || `SKU-${id.slice(0, 8).toUpperCase()}`; // optional field: generated when left empty
     const purchaseUnit = f.convert ? f.purchaseUnit.trim() : undefined;
     const sellingUnit = f.convert ? f.sellingUnit.trim() : undefined;
+    // The main form defines the DEFAULT package (the thing sold one at a time at `price`); any extra
+    // rows are further packages, each with its own size and price.
+    const extra = collectPackages();
+    if (extra === null) { setErr(t("stock.addInvalid")); return; }
+    const defaultPackage: SellingUnit = { id: uuid(), name: sellingUnit ?? f.unit.trim(), qtyBase: us, price: priceV };
+    if (extra.some((u) => u.name.toLowerCase() === defaultPackage.name.toLowerCase())) {
+      setPkgErr(t("stock.packageDuplicate")); setErr(t("stock.addInvalid")); return;
+    }
+    const sellingUnits: SellingUnit[] | undefined = f.convert || extra.length ? [defaultPackage, ...extra] : undefined;
     const payload = {
       productId: id, code, barcode, name: f.name.trim(), category: f.category.trim() || undefined,
       unit: f.unit.trim(), sellingPrice: priceV, lowStockThreshold: lowV,
       purchaseUnit, sellingUnit, unitsPerPurchase: up, unitsPerSelling: us,
+      sellingUnits,
       initialQty: baseInitial, initialUnitCost: baseCost,
     };
     const deltas = { [id]: baseInitial };
@@ -167,9 +228,9 @@ export default function Stock() {
       await enqueue(user.id, uuid(), "product.upsert", payload, deltas, () => upsertLocalProduct({
         id, code, barcode, name: payload.name, category: payload.category ?? null, unit: payload.unit,
         sellingPrice: priceV, lowStockThreshold: lowV, initialQty: baseInitial,
-        purchaseUnit, sellingUnit, unitsPerPurchase: up, unitsPerSelling: us,
+        purchaseUnit, sellingUnit, unitsPerPurchase: up, unitsPerSelling: us, sellingUnits,
       }));
-      setF({ ...fEmpty }); setFErr({}); setAdding(false); setMsg(t("stock.added"));
+      setF({ ...fEmpty }); setFErr({}); setPackages([]); setPkgErr(null); setAdding(false); setMsg(t("stock.added"));
       await refreshCounts(); void syncNow();
     } catch { setErr(t("common.error")); } finally { setBusy(false); }
   }
@@ -205,7 +266,8 @@ export default function Stock() {
   }
 
   function openEdit(p: LocalProduct) {
-    setStocking(null); setEErr(null); setEditing(p);
+    setStocking(null); setEErr(null); setEditing(p); setPkgErr(null);
+    setPackages((p.selling_units ?? []).map((u) => ({ id: u.id, name: u.name, qty: String(u.qtyBase), price: String(u.price) })));
     setE({ code: p.code, barcode: p.barcode ?? "", name: p.name, unit: p.unit, price: String(p.selling_price), low: formatQty(p.low_threshold) });
     setAvgCost({ id: p.id, value: null, loading: true });
     request<{ items: { id: string; avgCost?: number | null }[] }>("/reports/inventory")
@@ -263,13 +325,18 @@ export default function Stock() {
     if (!editing || eBusy) return;
     const price = parseRwf(e.price);
     if (!e.code.trim() || !e.name.trim() || price === null) { setEErr(t("stock.addInvalid")); return; }
-    setEErr(null); setEBusy(true);
+    setEErr(null);
+    const units = collectPackages();
+    if (units === null) { setEErr(t("stock.addInvalid")); return; }
+    setEBusy(true);
     const payload = {
       productId: editing.id, code: e.code.trim(), barcode: e.barcode.trim() || null, name: e.name.trim(),
       category: editing.category ?? undefined, unit: e.unit.trim() || "pcs", sellingPrice: price,
       lowStockThreshold: qtyOrNull(e.low) ?? 0,
-      // NOTE: no unit configuration here on purpose. The server locks conversion on an existing
-      // product (unit_config_locked) — changing it would reinterpret historical quantities.
+      // Packages may be renamed, repriced, added or withdrawn; their SIZE is locked by the server
+      // (unit_config_locked), because changing it would reinterpret every past sale.
+      sellingUnits: units.length ? units : undefined,
+      // NOTE: no purchase/selling conversion config here on purpose — it is locked at creation.
     };
     try {
       await enqueue(user.id, uuid(), "product.upsert", payload, {}, () => upsertLocalProduct({
@@ -277,8 +344,9 @@ export default function Stock() {
         unit: payload.unit, sellingPrice: price, lowStockThreshold: payload.lowStockThreshold,
         purchaseUnit: editing.purchase_unit, sellingUnit: editing.selling_unit,
         unitsPerPurchase: editing.units_per_purchase, unitsPerSelling: editing.units_per_selling,
+        sellingUnits: units.length ? units : undefined,
       }));
-      setEditing(null); setMsg(t("stock.productSaved"));
+      setEditing(null); setPackages([]); setMsg(t("stock.productSaved"));
       await refreshCounts(); void syncNow();
     } catch { setEErr(t("common.error")); } finally { setEBusy(false); }
   }
@@ -319,7 +387,7 @@ export default function Stock() {
   return (
     <Screen title={t("stock.title")} subtitle={t("stock.subtitle")} actions={
       <>
-        <Button testID="stock-add-toggle" kind="secondary" label={adding ? t("common.cancel") : t("stock.addProduct")} onPress={() => { setAdding(!adding); setErr(null); }} />
+        <Button testID="stock-add-toggle" kind="secondary" label={adding ? t("common.cancel") : t("stock.addProduct")} onPress={() => { setAdding(!adding); setErr(null); setPackages([]); setPkgErr(null); }} />
         {/* Counting is a manager operation, so the owner must have it too (owner ⊇ manager). */}
         <Button testID="stock-count-toggle" label={counting ? t("common.cancel") : t("stock.count")} onPress={() => { setCounting(!counting); setErr(null); }} />
       </>
@@ -427,6 +495,8 @@ export default function Stock() {
             <Field containerStyle={{ flexBasis: 170 }} testID="stock-low" label={`${t("stock.lowThreshold")} (${f.unit.trim()}) *`} value={f.low} keyboardType="decimal-pad"
               onChangeText={(x) => { setFErr({ ...fErr, low: null }); setErr(null); setF({ ...f, low: x }); }} error={fErr.low} hint={t("stock.thresholdHelp")} />
           </View>
+
+          {packageEditor(f.unit.trim())}
 
           <Card tone="muted" style={{ gap: 2, padding: space.md }}>
             {f.convert && convOkP ? (
@@ -609,6 +679,7 @@ export default function Stock() {
               <Field containerStyle={{ flexBasis: 130 }} testID="stock-edit-price" label={`${t("common.price")} / ${sellingUnitOf(editing)}`} value={e.price} keyboardType="number-pad" onChangeText={(x) => setE({ ...e, price: x })} />
               <Field containerStyle={{ flexBasis: 130 }} label={`${t("stock.lowThreshold")} (${editing.unit})`} value={e.low} keyboardType="decimal-pad" onChangeText={(x) => setE({ ...e, low: x })} />
             </View>
+            {packageEditor(editing.unit)}
             {editing.units_per_purchase !== 1 || editing.units_per_selling !== 1 ? (
               <Banner tone="warn" title={t("stock.unitConfigLockedTitle")}
                 text={t("stock.unitConfigLocked").replace("{purchase}", `${formatQty(toBaseQty(1000, editing.units_per_purchase ?? 1))} ${editing.unit}`).replace("{selling}", String(editing.units_per_selling ?? 1))} />

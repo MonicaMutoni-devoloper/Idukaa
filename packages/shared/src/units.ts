@@ -61,6 +61,34 @@ export function priceBelowCost(price: Rwf, unitsPerPrice: number, costPerBase: R
   return price < costPerBase * unitsPerPrice;
 }
 
+/**
+ * One way a product can be sold: a named package containing `qtyBase` base units at `price` per
+ * package. A product with units `[{Bottle, 1, 500}, {Crate, 12, 5600}]` can be sold either way in
+ * the same sale; the ledger still records base units, and the package chosen is only a pricing and
+ * entry convenience.
+ */
+export interface SellingUnit { id: string; name: string; qtyBase: number; price: Rwf }
+
+/**
+ * The unit a cashier gets by default: the one that IS the base unit (qtyBase 1) when the product has
+ * one, otherwise the first, so a product configured only as "crate of 12" still opens on the crate.
+ * Returns null for a product with no package rows (legacy rows before the units table existed).
+ */
+export function defaultSellingUnit<T extends { qtyBase: number }>(units: readonly T[]): T | null {
+  return units.find((u) => u.qtyBase === 1) ?? units[0] ?? null;
+}
+
+/** Look a chosen unit up by id; null when the id is unknown (a stale offline product, for example). */
+export function sellingUnitById<T extends { id: string }>(units: readonly T[], id: string | null | undefined): T | null {
+  if (!id) return null;
+  return units.find((u) => u.id === id) ?? null;
+}
+
+/** True when this package is the base unit itself (sold individually, not as a package). */
+export function isBaseUnit(unit: { qtyBase: number }): boolean {
+  return unit.qtyBase === 1;
+}
+
 /** Profit quoted per base unit: floor(price per pricing unit) - cost per base unit, in whole RWF. */
 export function profitPerBaseUnit(price: Rwf, unitsPerPrice: number, costPerBase: Rwf): Rwf {
   assertInt(price, "price"); assertInt(costPerBase, "costPerBase"); assertUnitsPer(unitsPerPrice);

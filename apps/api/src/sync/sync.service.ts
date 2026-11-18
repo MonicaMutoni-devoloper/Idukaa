@@ -8,6 +8,13 @@ import { emitShopChange } from "../realtime/hub";
 import type { AuthUser } from "../common/auth";
 
 type Kind = "conflict" | "rejected" | "pending_approval";
+/** A product's authoritative unit configuration, read under its row lock in `lock()`. */
+interface ProductConfig {
+  unitsPerPurchase: number;
+  unitsPerSelling: number;
+  /** Packages this product can be sold in, by id (empty for a product created before they existed). */
+  units: Map<string, { name: string; qtyBase: number }>;
+}
 class BizError extends Error { constructor(public kind: Kind, message: string) { super(message); } }
 
 // Operation roles live in `op-permissions.ts`: OWNER = every manager operation + owner-only routes.
@@ -122,13 +129,27 @@ export class SyncService {
       [shopId, customerId]);
     return Number(r?.owing ?? 0);
   }
-  private async lock(c: PoolClient, shopId: string, ids: string[]): Promise<Map<string, { unitsPerPurchase: number; unitsPerSelling: number }>> {
+  private async lock(c: PoolClient, shopId: string, ids: string[]): Promise<Map<string, ProductConfig>> {
     const uniq = [...new Set(ids)].sort();
     const { rows } = await c.query("SELECT id, units_per_purchase, units_per_selling FROM products WHERE id = ANY($1::uuid[]) AND shop_id=$2 ORDER BY id FOR UPDATE", [uniq, shopId]);
     if (rows.length !== uniq.length) throw new BizError("rejected", "unknown_product");
+    // The packages each product is sold in, locked with the product. A sale line naming one of them
+    // is converted with THAT package's factor, so a crate and a bottle can share a sale; a line
+    // naming an unknown package is refused rather than silently charged at the default factor.
+    const { rows: unitRows } = await c.query(
+      "SELECT id, product_id, name, qty_base FROM product_selling_units WHERE product_id = ANY($1::uuid[]) AND shop_id=$2 AND active ORDER BY sort_order, name",
+      [uniq, shopId]);
+    const units = new Map<string, Map<string, { name: string; qtyBase: number }>>();
+    for (const u of unitRows as any[]) {
+      const list = units.get(u.product_id) ?? new Map();
+      list.set(u.id, { name: u.name, qtyBase: Number(u.qty_base) });
+      units.set(u.product_id, list);
+    }
     // The unit configuration rides along with the row lock: every quantity conversion below is
     // validated against this authoritative server-side config, never against a client claim.
-    return new Map(rows.map((r: any) => [r.id, { unitsPerPurchase: Number(r.units_per_purchase), unitsPerSelling: Number(r.units_per_selling) }]));
+    return new Map(rows.map((r: any) => [r.id, {
+      unitsPerPurchase: Number(r.units_per_purchase), unitsPerSelling: Number(r.units_per_selling), units: units.get(r.id) ?? new Map(),
+    }]));
   }
   private async onHand(c: PoolClient, productId: string): Promise<number> {
     const { rows: [r] } = await c.query("SELECT COALESCE(SUM(qty),0)::bigint AS q FROM stock_movements WHERE product_id=$1", [productId]); return Number(r.q);
@@ -156,15 +177,20 @@ export class SyncService {
         // Price each line from the quantity the cashier entered. When the product sells in a unit
         // other than its base unit the natural quantity is mandatory and must convert back to the
         // base quantity exactly, so stock can never be deducted on one basis and charged on another.
-        const natural = p.lines.map((l) => {
-          const units = cfg.get(l.productId)!.unitsPerSelling;
+        const entered = p.lines.map((l) => {
+          const config = cfg.get(l.productId)!;
+          const chosen = l.sellingUnitId ? config.units.get(l.sellingUnitId) : undefined;
+          if (l.sellingUnitId && !chosen) throw new BizError("rejected", `unknown_selling_unit:${l.productId}`);
+          const factor = chosen?.qtyBase ?? config.unitsPerSelling;
+          const snapshot = { unitName: chosen?.name ?? null, unitsPerUnit: chosen?.qtyBase ?? null };
           if (l.sellingQty !== undefined) {
-            if (toBaseQty(l.sellingQty, units) !== l.qty) throw new BizError("rejected", `unit_conversion_mismatch:${l.productId}`);
-            return l.sellingQty;
+            if (toBaseQty(l.sellingQty, factor) !== l.qty) throw new BizError("rejected", `unit_conversion_mismatch:${l.productId}`);
+            return { natural: l.sellingQty, ...snapshot };
           }
-          if (units !== 1) throw new BizError("rejected", `selling_qty_required:${l.productId}`);
-          return l.qty;
+          if (factor !== 1) throw new BizError("rejected", `selling_qty_required:${l.productId}`);
+          return { natural: l.qty, ...snapshot };
         });
+        const natural = entered.map((e) => e.natural);
         const amounts = p.lines.map((l, i) => lineAmount(natural[i]!, l.unitPrice)); const gross = amounts.reduce((a, b) => a + b, 0);
         if (p.discount > gross) throw new BizError("rejected", "discount_exceeds_total");
         // Owner-set discount ceiling. Owners may exceed it (recorded in the audit trail); managers may not.
@@ -200,8 +226,8 @@ export class SyncService {
                  RETURNING id`,
                 [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod, p.customerId, p.dueAt ?? null]);
               for (const [i, l] of p.lines.entries()) {
-                await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered) VALUES ($1,$2,$3,$4,$5,$6)",
-                  [pending.id, l.productId, l.qty, l.unitPrice, amounts[i], natural[i]]);
+                await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered,unit_name,units_per_unit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                  [pending.id, l.productId, l.qty, l.unitPrice, amounts[i], natural[i], entered[i]!.unitName, entered[i]!.unitsPerUnit]);
               }
               await audit(c, { shopId, actorId: u.id, action: "sale.credit.approval_requested", entity: "sale", entityId: p.saleId,
                 newValue: { credit, limit, owing, customerId: p.customerId, reason: p.creditOverrideReason ?? null } });
@@ -217,7 +243,8 @@ export class SyncService {
           [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod, p.customerId ?? null, p.dueAt ?? null]);
         if (u.role !== "owner" && p.discount > 0) await audit(c, { shopId, actorId: u.id, action: "sale.discount", entity: "sale", entityId: p.saleId, newValue: { discount: p.discount, gross, limitPercent: max_discount_percent } });
         for (const [i, l] of p.lines.entries()) {
-          await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered) VALUES ($1,$2,$3,$4,$5,$6)", [p.saleId, l.productId, l.qty, l.unitPrice, amounts[i], natural[i]]);
+          await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered,unit_name,units_per_unit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            [p.saleId, l.productId, l.qty, l.unitPrice, amounts[i], natural[i], entered[i]!.unitName, entered[i]!.unitsPerUnit]);
           await this.mv(c, shopId, u.id, l.productId, "sale", -l.qty, null, "sale", p.saleId, p.soldAt);
         }
         return;
@@ -403,6 +430,31 @@ export class SyncService {
           ON CONFLICT (id) DO UPDATE SET code=$3,barcode=$4,name=$5,category=$6,unit=$7,selling_price=$8,low_stock_threshold=$9,updated_at=now()`,
           [p.productId, shopId, p.code, p.barcode ?? null, p.name, p.category ?? null, p.unit, p.sellingPrice, p.lowStockThreshold,
            p.purchaseUnit ?? null, p.sellingUnit ?? null, p.unitsPerPurchase ?? 1, p.unitsPerSelling ?? 1]);
+        // Selling packages: a new name may always be added, and a price may always be corrected, but
+        // the SIZE of an existing package can never change — every past sale counted that package as
+        // exactly that many base units, and changing it now would reinterpret them.
+        const packages = (p.sellingUnits ?? []).map((u, i) => ({ ...u, sort: i }));
+        if (packages.length) {
+          for (const u of packages) {
+            const { rows: [prev] } = await c.query(
+              "SELECT id, qty_base FROM product_selling_units WHERE product_id=$1 AND lower(name)=lower($2)", [p.productId, u.name]);
+            if (prev && Number(prev.qty_base) !== u.qtyBase) throw new BizError("rejected", `unit_config_locked:${u.name}`);
+            await c.query(
+              `INSERT INTO product_selling_units(id,shop_id,product_id,name,qty_base,price,sort_order,active)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,true)
+               ON CONFLICT (product_id,name) DO UPDATE SET price=$6, sort_order=$7, active=true, updated_at=now()`,
+              [u.id, shopId, p.productId, u.name, u.qtyBase, u.price, u.sort]);
+          }
+          // Packages no longer offered are deactivated, never deleted: receipts and reports keep the
+          // name they were sold under.
+          await c.query("UPDATE product_selling_units SET active=false, updated_at=now() WHERE product_id=$1 AND NOT (id = ANY($2::uuid[]))",
+            [p.productId, packages.map((u) => u.id)]);
+          // The legacy single-unit columns keep describing the DEFAULT package (the base unit itself
+          // when there is one), because reports and older clients still read them.
+          const def = packages.find((u) => u.qtyBase === 1) ?? packages[0]!;
+          await c.query("UPDATE products SET selling_unit=$2, units_per_selling=$3, updated_at=now() WHERE id=$1",
+            [p.productId, def.name, def.qtyBase]);
+        }
         const stock = { initialQty: p.initialQty ?? null, initialUnitCost: p.initialUnitCost ?? null, initialStockValue: p.initialQty ? lineAmount(p.initialQty, p.initialUnitCost ?? 0) : 0 };
         if (ex) {
           await audit(c, { shopId, actorId: u.id, action: "product.update", entity: "product", entityId: p.productId, oldValue: { name: ex.name, selling_price: ex.selling_price, code: ex.code }, newValue: { name: p.name, sellingPrice: p.sellingPrice, code: p.code } });
@@ -457,7 +509,11 @@ export class SyncService {
     const cur = checkpoint ? JSON.parse(checkpoint) : {}; const epoch = "1970-01-01T00:00:00.000000Z", nil = "00000000-0000-0000-0000-000000000000";
     const [pt, pid] = cur.p ?? [epoch, nil]; const [st, sid] = cur.s ?? [epoch, nil]; const [ct, cid] = cur.c ?? [epoch, nil];
     const ts = `to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
-    const products = await this.db.query(`SELECT p.*, ${ts} AS ts, COALESCE((SELECT SUM(qty) FROM stock_movements m WHERE m.product_id=p.id),0)::bigint AS on_hand
+    // The packages ride along with the product so an offline device can price a crate without a
+    // second request, and so a sale made on that device names a package the server knows.
+    const products = await this.db.query(`SELECT p.*, ${ts} AS ts, COALESCE((SELECT SUM(qty) FROM stock_movements m WHERE m.product_id=p.id),0)::bigint AS on_hand,
+        COALESCE((SELECT json_agg(json_build_object('id',u.id,'name',u.name,'qtyBase',u.qty_base,'price',u.price) ORDER BY u.sort_order, u.name)
+                    FROM product_selling_units u WHERE u.product_id=p.id AND u.active), '[]'::json) AS selling_units
       FROM products p WHERE shop_id=$1 AND (updated_at,id) > ($2::timestamptz,$3::uuid) ORDER BY updated_at,id LIMIT $4`, [user.shopId, pt, pid, limit]);
     const suppliers = await this.db.query(`SELECT s.*, ${ts} AS ts FROM suppliers s WHERE shop_id=$1 AND (updated_at,id) > ($2::timestamptz,$3::uuid) ORDER BY updated_at,id LIMIT $4`, [user.shopId, st, sid, limit]);
     const customers = await this.db.query(`SELECT c.*, ${ts} AS ts FROM customers c WHERE shop_id=$1 AND (updated_at,id) > ($2::timestamptz,$3::uuid) ORDER BY updated_at,id LIMIT $4`, [user.shopId, ct, cid, limit]);
@@ -468,7 +524,8 @@ export class SyncService {
       revision: await this.dashboardRevision(user.shopId!),
       changes: [
         ...products.map(p => ({ entity: "product", id: p.id, data: { id: p.id, code: p.code, barcode: p.barcode, name: p.name, category: p.category, unit: p.unit, sellingPrice: p.selling_price, lowStockThreshold: p.low_stock_threshold, onHand: p.on_hand, active: p.active,
-          purchaseUnit: p.purchase_unit, sellingUnit: p.selling_unit, unitsPerPurchase: p.units_per_purchase, unitsPerSelling: p.units_per_selling } })),
+          purchaseUnit: p.purchase_unit, sellingUnit: p.selling_unit, unitsPerPurchase: p.units_per_purchase, unitsPerSelling: p.units_per_selling,
+          sellingUnits: (p.selling_units ?? []).map((u: any) => ({ id: u.id, name: u.name, qtyBase: Number(u.qtyBase), price: Number(u.price) })) } })),
         ...suppliers.map(s => ({ entity: "supplier", id: s.id, data: { id: s.id, name: s.name, phone: s.phone } })),
         ...customers.map(c => ({ entity: "customer", id: c.id, data: { id: c.id, name: c.name, phone: c.phone, address: c.address, notes: c.notes, creditLimit: Number(c.credit_limit), status: c.status } })),
       ],

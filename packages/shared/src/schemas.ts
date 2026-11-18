@@ -28,6 +28,10 @@ export const SaleOp = z.object({
       // natural quantity the cashier entered (milli selling units) when the product sells in a
       // unit other than its base unit; the server verifies qty === toBaseQty(sellingQty).
       qty, unitPrice: int.nonnegative(), sellingQty: qty.optional(),
+      // Which package the cashier chose (crate, carton, bottle...). Optional: a line without it is
+      // converted with the product's default selling unit, exactly as before this existed. The
+      // server looks the package up in its own table, so the factor is never taken from the client.
+      sellingUnitId: id.optional(),
     })).min(1),
   }),
 });
@@ -105,7 +109,15 @@ export const ProductOp = z.object({
     sellingUnit: z.string().min(1).max(20).optional(),
     unitsPerPurchase: int.min(1).max(1_000_000).optional(), // BASE units per purchase unit (1 bag = 25 kg -> 25)
     unitsPerSelling: int.min(1).max(1_000_000).optional(),   // BASE units per selling unit
+    // Every way this product is sold, each with its own package size and price. Sent at creation
+    // only: like the single-unit configuration, the set is locked once the product has stock.
+    sellingUnits: z.array(z.object({
+      id, name: z.string().trim().min(1).max(24),
+      qtyBase: int.min(1).max(1_000_000), price: int.nonnegative(),
+    })).max(8).optional(),
   })
+    .refine(v => !v.sellingUnits || new Set(v.sellingUnits.map(u => u.name.toLowerCase())).size === v.sellingUnits.length,
+      { message: "selling_unit_names_must_be_unique" })
     .refine(v => (v.initialQty === undefined) === (v.initialUnitCost === undefined), { message: "initial_stock_incomplete" })
     .refine(v => (v.unitsPerPurchase ?? 1) === 1 || !!v.purchaseUnit, { message: "purchase_unit_required" })
     .refine(v => (v.unitsPerSelling ?? 1) === 1 || !!v.sellingUnit, { message: "selling_unit_required" }),
