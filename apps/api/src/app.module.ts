@@ -33,6 +33,7 @@ import { SubscriptionsController } from "./subscriptions/subscriptions.controlle
 import { ShopMembershipsController } from "./shop/memberships.controller";
 import { CustomersController } from "./customers/customers.controller";
 import { AlertsController } from "./alerts/alerts.controller";
+import { AlertsService } from "./alerts/alerts.service";
 
 @Module({
   imports: [
@@ -42,7 +43,7 @@ import { AlertsController } from "./alerts/alerts.controller";
   controllers: [HealthController, AppVersionController, AuthController, AdminController, NotificationsController, SyncController, ReportsController, ProfitabilityController, AuditsController, PurchasesController, SalesController, ShopController, StaffController, ApplicationsController, AdminApplicationsController, StaffInvitationsController, SubscriptionsController, ShopMembershipsController, CustomersController, AlertsController],
   providers: [
     Db, SyncService, AuthService, EmailVerificationService, MailService, NotificationService, FinanceService, OnboardingService,
-    LoginLockout,
+    LoginLockout, AlertsService,
     { provide: APP_GUARD, useClass: ThrottlerGuard }, { provide: APP_GUARD, useClass: AuthGuard },
     // Global error handling (ZodError -> 400, no leaked internals) lives in the module so the
     // integration tests — which build AppModule without main.ts's bootstrap — see identical behaviour.

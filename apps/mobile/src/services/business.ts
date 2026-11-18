@@ -33,13 +33,41 @@ export interface Statement {
   payments: { id: string; at: string; amount: number; method: string; reference: string }[];
   adjustments: { id: string; at: string; amount: number; reason: string }[];
 }
+export type AlertStatusGroup = "open" | "investigating" | "action_required" | "escalated" | "resolved";
+export type AlertSeverityLevel = "critical" | "high" | "medium" | "low";
+export type AlertResolutionCategory = "approved_activity" | "human_error" | "suspicious_activity" | "false_positive" | "other";
+
 export interface Alert {
-  id: string; dedupeKey: string; category: string; severity: "info" | "warning" | "critical"; title: string;
-  explanation: string; entityType: string | null; entityId: string | null; evidence: Record<string, unknown>;
-  status: "open" | "investigating" | "resolved" | "legitimate"; notes: string;
-  firstSeenAt: string; lastSeenAt: string; resolvedAt: string | null;
-  events?: { id: number; action: string; note: string | null; at: string; actor: string | null }[];
+  id: string; dedupeKey: string; category: string; severity: "info" | "warning" | "critical";
+  severityLevel: AlertSeverityLevel; title: string; explanation: string;
+  entityType: string | null; entityId: string | null; evidence: Record<string, unknown>;
+  status: string; statusGroup: AlertStatusGroup; notes: string;
+  assignedTo: string | null; assignedToName: string | null; assignedAt: string | null;
+  resolutionCategory: AlertResolutionCategory | null; resolutionNote: string | null; correctiveAction: string | null;
+  escalatedTo: string | null; escalatedToName: string | null; escalatedAt: string | null; approvedByName: string | null;
+  firstSeenAt: string; lastSeenAt: string; resolvedAt: string | null; resolvedByName: string | null;
 }
+export interface AlertSummary {
+  total: number; open: number; investigating: number; actionRequired: number; escalated: number;
+  resolved: number; criticalOpen: number;
+}
+export interface AlertEvent {
+  id: number; action: string; note: string | null; at: string; actor: string | null;
+  previous_status: string | null; new_status: string | null; details: Record<string, unknown> | null;
+}
+export interface AlertDetail extends Alert {
+  resolution: { category: AlertResolutionCategory | null; note: string | null; correctiveAction: string | null;
+    approvedByName: string | null; escalatedToName: string | null; escalatedAt: string | null };
+  supporting: { kind: string; fields: { label: string; value: string | number | null }[];
+    related: { label: string; id: string; at?: string | null }[] };
+  events: AlertEvent[];
+  actions: Record<"investigate" | "assign" | "note" | "escalate" | "resolve" | "reopen", boolean>;
+}
+export interface AlertFilters {
+  status?: string; severity?: string; category?: string; employee?: string;
+  from?: string; to?: string; search?: string;
+}
+export interface AlertStaff { id: string; name: string; role: "owner" | "manager" }
 
 export const getMemberships = () => request<ShopMembership[]>("/shop/memberships");
 export const switchShop = (shopId: string) => request<{ ok: true; shopId: string; shopName: string; role: "owner" | "manager" }>("/shop/switch", { method: "POST", body: { shopId } });
@@ -73,14 +101,20 @@ export const getPendingCreditSales = () => request<PendingCreditSale[]>("/sales/
 export const decideCreditSale = (id: string, approve: boolean, reason: string) =>
   request<{ ok: true; saleId: string; status: string }>(`/sales/${id}/${approve ? "approve-credit" : "reject-credit"}`, { method: "POST", body: { reason } });
 
-export const getAlerts = (status?: string, severity?: string) => {
+export const getAlerts = (f: AlertFilters = {}) => {
   const q = new URLSearchParams();
-  if (status) q.set("status", status);
-  if (severity) q.set("severity", severity);
+  for (const [k, v] of Object.entries(f)) if (v) q.set(k, v);
   const query = q.toString();
-  return request<Alert[]>(`/alerts${query ? `?${query}` : ""}`);
+  return request<{ alerts: Alert[]; summary: AlertSummary }>(`/alerts${query ? `?${query}` : ""}`);
 };
-export const getAlert = (id: string) => request<Alert>(`/alerts/${id}`);
+export const getAlert = (id: string) => request<AlertDetail>(`/alerts/${id}`);
+export const getAlertStaff = () => request<AlertStaff[]>("/alerts/staff");
 export const detectAlerts = () => request<{ ok: true; evaluatedAt: string; findings: number; created: number; updated: number; sufficientHistory: boolean }>("/alerts/detect", { method: "POST", body: {} });
-export const changeAlertStatus = (id: string, status: "investigating" | "resolved" | "legitimate", note: string) =>
-  request<Alert>(`/alerts/${id}/status`, { method: "POST", body: { status, note } });
+export type AlertAction = "investigate" | "assign" | "note" | "escalate" | "resolve" | "reopen";
+export const actOnAlert = (id: string, body: {
+  action: AlertAction; note: string; assignedTo?: string | null; category?: AlertResolutionCategory | null;
+  correctiveAction?: string | null; escalateTo?: string | null; approvedBy?: string | null;
+}) => request<Alert>(`/alerts/${id}/actions`, { method: "POST", body });
+export const getAlertSettings = () => request<{ thresholds: Record<string, number>; defaults: Record<string, number> }>("/alerts/settings");
+export const saveAlertSettings = (thresholds: Record<string, number>) =>
+  request<{ thresholds: Record<string, number> }>("/alerts/settings", { method: "PUT", body: thresholds });

@@ -1,86 +1,144 @@
-import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Post, Query } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Post, Put, Query } from "@nestjs/common";
 import { z } from "zod";
+import { AlertActions, ResolutionCategories } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { Me, Roles, type AuthUser } from "../common/auth";
 import { audit } from "../audits/audit";
+import { AlertsService, DEFAULT_THRESHOLDS, type AlertThresholds } from "./alerts.service";
 
-const StatusChange = z.object({
+const ActionBody = z.object({
+  action: z.enum(AlertActions),
+  note: z.string().trim().min(3).max(2000),
+  assignedTo: z.string().uuid().nullable().optional(),
+  category: z.enum(ResolutionCategories).nullable().optional(),
+  correctiveAction: z.string().trim().max(1000).nullable().optional(),
+  escalateTo: z.string().uuid().nullable().optional(),
+  approvedBy: z.string().uuid().nullable().optional(),
+});
+
+/** A device running the previous build still posts a bare status; it is translated, never trusted. */
+const LegacyStatus = z.object({
   status: z.enum(["investigating", "resolved", "legitimate"]),
   note: z.string().trim().min(3).max(1000),
 });
 
+const ThresholdsBody = z.record(z.string(), z.number().min(0).max(1_000_000)).refine((v) => {
+  for (const k of Object.keys(v)) if (!(k in DEFAULT_THRESHOLDS)) return false;
+  return true;
+}, { message: "unknown_threshold" });
+
 interface Finding {
-  key: string; category: string; severity: "info" | "warning" | "critical";
+  key: string; category: string; severity: "info" | "warning" | "critical"; level: "critical" | "high" | "medium" | "low";
   title: string; explanation: string; entityType?: string; entityId?: string; evidence: unknown;
 }
 
 /**
- * Explainable, rule-based monitoring. Every alert carries the numbers that caused it and is
- * upserted by a stable key, so reopening the screen does not create duplicates. These are review
- * prompts, never accusations: the wording and suggested action say "investigate".
+ * Explainable, rule-based monitoring. Every alert carries the numbers that caused it and is upserted
+ * by a stable key, so reopening the screen does not create duplicates. These are review prompts,
+ * never accusations: the wording says "review" and the resolution workflow decides what happened.
  */
-@Controller("alerts") @Roles("owner")
+@Controller("alerts") @Roles("owner", "manager")
 export class AlertsController {
-  constructor(private db: Db) {}
+  constructor(private db: Db, private alerts: AlertsService) {}
 
   @Get()
   async list(@Me() u: AuthUser, @Query() q: any) {
     if (!u.shopId) throw new BadRequestException("shop_required");
-    const status = typeof q.status === "string" && q.status ? q.status : null;
-    const severity = typeof q.severity === "string" && q.severity ? q.severity : null;
-    const rows = await this.db.query(
-      `SELECT a.*, us.full_name AS resolved_by_name
-         FROM business_alerts a LEFT JOIN users us ON us.id=a.resolved_by
-        WHERE a.shop_id=$1 AND ($2::text IS NULL OR a.status=$2) AND ($3::text IS NULL OR a.severity=$3)
-        ORDER BY CASE a.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
-                 a.last_seen_at DESC LIMIT 200`, [u.shopId, status, severity]);
-    return rows.map(this.shape);
+    const pick = (k: string) => (typeof q[k] === "string" && q[k] ? q[k] : null);
+    return this.alerts.list(u.shopId, {
+      status: pick("status"), severity: pick("severity"), category: pick("category"),
+      employee: pick("employee"), from: pick("from"), to: pick("to"), search: pick("search"),
+    });
+  }
+
+  /** People who can be assigned an investigation in this shop. */
+  @Get("staff")
+  async staff(@Me() u: AuthUser) {
+    if (!u.shopId) throw new BadRequestException("shop_required");
+    return this.alerts.staff(u.shopId);
+  }
+
+  @Get("settings")
+  async settings(@Me() u: AuthUser) {
+    if (!u.shopId) throw new BadRequestException("shop_required");
+    return { thresholds: await this.alerts.thresholds(u.shopId), defaults: DEFAULT_THRESHOLDS };
+  }
+
+  @Put("settings") @Roles("owner")
+  async saveSettings(@Me() u: AuthUser, @Body() body: unknown) {
+    if (!u.shopId) throw new BadRequestException("shop_required");
+    const b = ThresholdsBody.safeParse(body);
+    if (!b.success) throw new BadRequestException(b.error.issues[0]?.message ?? "invalid_thresholds");
+    return { thresholds: await this.alerts.saveThresholds(u, b.data as Partial<AlertThresholds>) };
   }
 
   @Get(":id")
   async get(@Me() u: AuthUser, @Param("id") id: string) {
     if (!z.string().uuid().safeParse(id).success) throw new NotFoundException("alert_not_found");
-    const [row] = await this.db.query("SELECT * FROM business_alerts WHERE id=$1 AND shop_id=$2", [id, u.shopId]);
-    if (!row) throw new NotFoundException("alert_not_found");
-    const events = await this.db.query(
-      `SELECT e.id, e.action, e.note, e.at, us.full_name AS actor
-         FROM alert_events e LEFT JOIN users us ON us.id=e.actor_id
-        WHERE e.alert_id=$1 ORDER BY e.id`, [id]);
-    return { ...this.shape(row), events };
+    if (!u.shopId) throw new BadRequestException("shop_required");
+    return this.alerts.get(u.shopId, id);
   }
 
-  /** Evaluate the configured rules now. There is no background scheduler by design: the owner sees
-   *  when detection ran, and an unchanged finding updates its last_seen_at instead of duplicating. */
+  /** Start/assign/investigate/note/escalate/resolve/reopen — every path writes an event and an audit row. */
+  @Post(":id/actions")
+  async act(@Me() u: AuthUser, @Param("id") id: string, @Body() body: unknown) {
+    if (!u.shopId) throw new BadRequestException("shop_required");
+    if (!z.string().uuid().safeParse(id).success) throw new NotFoundException("alert_not_found");
+    const b = ActionBody.safeParse(body);
+    if (!b.success) throw new BadRequestException(b.error.issues[0]?.message ?? "invalid_action");
+    return this.alerts.act(u, id, b.data);
+  }
+
+  /** @deprecated kept for devices on the previous build; translated to the same audited workflow. */
+  @Post(":id/status")
+  async legacyStatus(@Me() u: AuthUser, @Param("id") id: string, @Body() body: unknown) {
+    if (!u.shopId) throw new BadRequestException("shop_required");
+    if (!z.string().uuid().safeParse(id).success) throw new NotFoundException("alert_not_found");
+    const b = LegacyStatus.safeParse(body);
+    if (!b.success) throw new BadRequestException(b.error.issues[0]?.message);
+    if (b.data.status === "investigating") return this.alerts.act(u, id, { action: "investigate", note: b.data.note });
+    // Both old closing statuses are recorded as a closure with the closest existing category; the
+    // note the user typed is kept verbatim, so the decision remains explainable.
+    return this.alerts.act(u, id, { action: "resolve", category: "other", note: b.data.note });
+  }
+
+  /**
+   * Evaluate the configured rules now. There is no background scheduler by design: the owner sees
+   * when detection ran, and an unchanged finding updates its last_seen_at instead of duplicating.
+   */
   @Post("detect")
   async detect(@Me() u: AuthUser) {
     if (!u.shopId) throw new BadRequestException("shop_required");
-    const findings = await this.detectAll(u.shopId);
+    const th = await this.alerts.thresholds(u.shopId);
+    const findings = await this.detectAll(u.shopId, th);
     let created = 0, updated = 0;
     for (const f of findings) {
       const [before] = await this.db.query(
         "SELECT id, status FROM business_alerts WHERE shop_id=$1 AND dedupe_key=$2", [u.shopId, f.key]);
       const [row] = await this.db.query(
-        `INSERT INTO business_alerts(shop_id,dedupe_key,category,severity,title,explanation,entity_type,entity_id,evidence)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        `INSERT INTO business_alerts(shop_id,dedupe_key,category,severity,severity_level,title,explanation,entity_type,entity_id,evidence)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          ON CONFLICT (shop_id,dedupe_key) DO UPDATE SET
-           severity=EXCLUDED.severity, title=EXCLUDED.title, explanation=EXCLUDED.explanation,
-           evidence=EXCLUDED.evidence, last_seen_at=now(), updated_at=now(),
+           severity=EXCLUDED.severity, severity_level=EXCLUDED.severity_level, title=EXCLUDED.title,
+           explanation=EXCLUDED.explanation, evidence=EXCLUDED.evidence, last_seen_at=now(), updated_at=now(),
            status=CASE WHEN business_alerts.status IN ('resolved','legitimate') THEN 'open' ELSE business_alerts.status END,
            resolved_at=CASE WHEN business_alerts.status IN ('resolved','legitimate') THEN NULL ELSE business_alerts.resolved_at END,
            resolved_by=CASE WHEN business_alerts.status IN ('resolved','legitimate') THEN NULL ELSE business_alerts.resolved_by END
          RETURNING id, (xmax=0) AS inserted`,
-        [u.shopId, f.key, f.category, f.severity, f.title, f.explanation, f.entityType ?? null, f.entityId ?? null, JSON.stringify(f.evidence)]);
+        [u.shopId, f.key, f.category, f.severity, f.level, f.title, f.explanation,
+          f.entityType ?? null, f.entityId ?? null, JSON.stringify(f.evidence)]);
       if (row?.inserted) {
         created += 1;
-        await this.db.query("INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note) VALUES ($1,$2,$3,'detected',$4)",
+        await this.db.query("INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note,new_status) VALUES ($1,$2,$3,'detected',$4,'open')",
           [row.id, u.shopId, u.id, f.explanation]);
       } else {
         updated += 1;
         // A recurrence after a closed investigation is a new event, but stays on the same alert so
-        // the earlier decision and notes are not lost.
+        // the earlier decision, notes and resolution are not lost.
         if (before && ["resolved", "legitimate"].includes(before.status)) {
-          await this.db.query("INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note) VALUES ($1,$2,$3,'reopened',$4)",
-            [row.id, u.shopId, u.id, f.explanation]);
+          await this.db.query(
+            "INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note,previous_status,new_status,details) VALUES ($1,$2,$3,'reopened',$4,$5,'open',$6)",
+            [row.id, u.shopId, u.id, f.explanation, before.status, JSON.stringify({ automatic: true, reason: "recurrence" })]);
         }
       }
     }
@@ -90,43 +148,15 @@ export class AlertsController {
       sufficientHistory: await this.hasHistory(u.shopId) };
   }
 
-  @Post(":id/status")
-  async change(@Me() u: AuthUser, @Param("id") id: string, @Body() body: unknown) {
-    if (!z.string().uuid().safeParse(id).success) throw new NotFoundException("alert_not_found");
-    const b = StatusChange.safeParse(body);
-    if (!b.success) throw new BadRequestException(b.error.issues[0]?.message);
-    return this.db.tx(async (c) => {
-      const { rows: [old] } = await c.query("SELECT * FROM business_alerts WHERE id=$1 AND shop_id=$2 FOR UPDATE", [id, u.shopId]);
-      if (!old) throw new NotFoundException("alert_not_found");
-      const resolved = b.data.status === "resolved" || b.data.status === "legitimate";
-      const { rows: [row] } = await c.query(
-        `UPDATE business_alerts SET status=$2, notes=trim(notes || E'\n' || $3), assigned_to=$4::uuid,
-                resolved_at=CASE WHEN $5::boolean THEN now() ELSE NULL END,
-                resolved_by=CASE WHEN $5::boolean THEN $4::uuid ELSE NULL END, updated_at=now()
-          WHERE id=$1 RETURNING *`, [id, b.data.status, b.data.note, u.id, resolved]);
-      await c.query("INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note) VALUES ($1,$2,$3,$4,$5)",
-        [id, u.shopId, u.id, b.data.status, b.data.note]);
-      await audit(c, { shopId: u.shopId, actorId: u.id, action: `anomaly.${b.data.status}`, entity: "business_alert", entityId: id,
-        oldValue: { status: old.status }, newValue: { status: b.data.status }, reason: b.data.note });
-      return this.shape(row);
-    });
-  }
-
-  private shape(r: any) {
-    return { id: r.id, dedupeKey: r.dedupe_key, category: r.category, severity: r.severity, title: r.title,
-      explanation: r.explanation, entityType: r.entity_type, entityId: r.entity_id, evidence: r.evidence,
-      status: r.status, notes: r.notes, firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at,
-      resolvedAt: r.resolved_at, resolvedByName: r.resolved_by_name ?? null };
-  }
-
   private async hasHistory(shopId: string): Promise<boolean> {
     const [r] = await this.db.query("SELECT count(*)::int n FROM sales WHERE shop_id=$1 AND status='posted' AND sold_at >= now()-interval '21 days'", [shopId]);
     return Number(r.n) >= 5;
   }
 
-  private async detectAll(shopId: string): Promise<Finding[]> {
+  private async detectAll(shopId: string, th: AlertThresholds): Promise<Finding[]> {
     const out: Finding[] = [];
     const day = new Date().toISOString().slice(0, 10);
+    const lookback = Math.max(1, Math.round(th.lookbackDays));
 
     // A. Daily sale quantity vs the previous 28-day average, per product.
     const stock = await this.db.query(
@@ -144,11 +174,12 @@ export class AlertsController {
          LEFT JOIN daily b ON b.product_id=r.product_id AND b.d < r.d AND b.d >= r.d - 28
         WHERE r.rn=1 AND r.d >= current_date - 1
         GROUP BY r.product_id,p.name,p.unit,r.d,r.q
-       HAVING r.q >= 10000 AND COALESCE(AVG(b.q),0) > 0 AND r.q >= COALESCE(AVG(b.q),0) * 3`,
-      [shopId]);
+       HAVING r.q >= 10000 AND COALESCE(AVG(b.q),0) > 0 AND r.q >= COALESCE(AVG(b.q),0) * $2`,
+      [shopId, th.stockMultiple]);
     for (const r of stock) {
+      const ratio = Number(r.baseline) > 0 ? Number(r.q) / Number(r.baseline) : 0;
       out.push({ key: `stock:${r.product_id}:${r.day}`, category: "stock_reduction",
-        severity: Number(r.q) >= Number(r.baseline) * 5 ? "critical" : "warning",
+        severity: ratio >= 5 ? "critical" : "warning", level: ratio >= 5 ? "critical" : "high",
         title: `Unusual stock reduction: ${r.name}`,
         explanation: `${Number(r.q) / 1000} ${r.unit} left stock on ${r.day}; the 28-day daily average was ${(Number(r.baseline) / 1000).toFixed(1)}. Review the recorded sales and stock movements before drawing a conclusion.`,
         entityType: "product", entityId: r.product_id,
@@ -166,17 +197,38 @@ export class AlertsController {
            FROM sales WHERE shop_id=$1 AND status='posted' AND sold_at >= now()-interval '37 days' AND sold_at < now()-interval '7 days'
        )
        SELECT s.*, u.full_name AS cashier, base.avg_pct FROM s JOIN users u ON u.id=s.user_id CROSS JOIN base
-        WHERE s.pct >= 0.20 AND base.avg_pct IS NOT NULL AND s.pct >= base.avg_pct * 2`,
-      [shopId]);
+        WHERE s.pct >= $2 AND base.avg_pct IS NOT NULL AND s.pct >= base.avg_pct * $3`,
+      [shopId, th.discountPercentMin / 100, th.discountBaselineMultiple]);
     for (const r of discounts) {
-      out.push({ key: `discount:${r.id}`, category: "discount", severity: Number(r.pct) >= 0.35 ? "critical" : "warning",
+      const pct = Number(r.pct) * 100;
+      out.push({ key: `discount:${r.id}`, category: "discount",
+        severity: pct >= th.discountCriticalPercent ? "critical" : "warning",
+        level: pct >= th.discountCriticalPercent ? "critical" : pct >= 30 ? "high" : "medium",
         title: `Unusual discount on a sale`,
-        explanation: `${(Number(r.pct) * 100).toFixed(1)}% discount (${Number(r.discount)} RWF) on a ${Number(r.gross_amount)} RWF sale. The recent average was ${(Number(r.avg_pct ?? 0) * 100).toFixed(1)}%. Confirm whether this was an approved promotion.`,
+        explanation: `${pct.toFixed(1)}% discount (${Number(r.discount)} RWF) on a ${Number(r.gross_amount)} RWF sale. The recent average was ${(Number(r.avg_pct ?? 0) * 100).toFixed(1)}%. Confirm whether this was an approved promotion.`,
         entityType: "sale", entityId: r.id,
-        evidence: { saleId: r.id, cashier: r.cashier, gross: Number(r.gross_amount), discount: Number(r.discount), percent: Number((r.pct * 100).toFixed(1)), baselinePercent: Number(((r.avg_pct ?? 0) * 100).toFixed(1)) } });
+        evidence: { saleId: r.id, cashier: r.cashier, gross: Number(r.gross_amount), discount: Number(r.discount), percent: Number(pct.toFixed(1)), baselinePercent: Number(((r.avg_pct ?? 0) * 100).toFixed(1)) } });
     }
 
-    // C. Gross margin below 5% for a product with meaningful recent sales.
+    // B2. The same cashier repeatedly discounting heavily: a pattern, not one sale.
+    const repeat = await this.db.query(
+      `SELECT s.user_id, u.full_name AS cashier, count(*)::int n, round(SUM(s.discount)::numeric) AS total_discount
+         FROM sales s JOIN users u ON u.id=s.user_id
+        WHERE s.shop_id=$1 AND s.status='posted' AND s.sold_at >= now()-interval '1 day' * $2
+          AND s.gross_amount > 0 AND s.discount::numeric / s.gross_amount >= $3
+        GROUP BY s.user_id, u.full_name HAVING count(*) >= $4`,
+      [shopId, lookback, th.repeatedDiscountPercent / 100, th.repeatedDiscountCount]);
+    for (const r of repeat) {
+      out.push({ key: `discountrepeat:${r.user_id}:${day.slice(0, 7)}`, category: "discount",
+        severity: Number(r.n) >= th.repeatedDiscountCount * 2 ? "critical" : "warning",
+        level: Number(r.n) >= th.repeatedDiscountCount * 2 ? "high" : "medium",
+        title: `Repeated large discounts by ${r.cashier}`,
+        explanation: `${r.n} sales in the last ${lookback} days carried a discount of at least ${th.repeatedDiscountPercent}%, totalling ${Number(r.total_discount)} RWF. Check whether each one was approved; this is a pattern to review, not proof of misconduct.`,
+        entityType: "user", entityId: r.user_id,
+        evidence: { cashier: r.cashier, sales: Number(r.n), totalDiscount: Number(r.total_discount) } });
+    }
+
+    // C. Gross margin below the shop's floor for a product with meaningful recent sales.
     const margins = await this.db.query(
       `WITH revenue AS (
          SELECT sl.product_id, SUM(sl.line_amount)::numeric gross, SUM(sl.qty)::numeric units
@@ -191,10 +243,11 @@ export class AlertsController {
               CASE WHEN r.gross > 0 THEN (r.gross - (r.units*c.avg_cost/1000.0)) / r.gross ELSE NULL END margin
          FROM revenue r JOIN products p ON p.id=r.product_id JOIN cost c ON c.product_id=r.product_id
         WHERE c.avg_cost IS NOT NULL AND r.gross > 0
-          AND (r.gross - (r.units*c.avg_cost/1000.0)) / r.gross < 0.05`,
-      [shopId]);
+          AND (r.gross - (r.units*c.avg_cost/1000.0)) / r.gross < $2`,
+      [shopId, th.marginMinPercent / 100]);
     for (const r of margins) {
-      out.push({ key: `margin:${r.product_id}:${day.slice(0, 7)}`, category: "margin", severity: Number(r.margin) < 0 ? "critical" : "warning",
+      out.push({ key: `margin:${r.product_id}:${day.slice(0, 7)}`, category: "margin",
+        severity: Number(r.margin) < 0 ? "critical" : "warning", level: Number(r.margin) < 0 ? "critical" : "medium",
         title: `Profit margin deterioration: ${r.name}`,
         explanation: `The 30-day gross margin is ${(Number(r.margin) * 100).toFixed(1)}%. Recent purchase cost averages ${Number(r.avg_cost)} RWF per ${r.unit}. Review prices, discounts and supply costs.`,
         entityType: "product", entityId: r.product_id,
@@ -207,9 +260,10 @@ export class AlertsController {
               string_agg(DISTINCT a.reason, ', ') reasons
          FROM adjustments a JOIN products p ON p.id=a.product_id
         WHERE a.shop_id=$1 AND a.status='approved' AND COALESCE(a.decided_at, now()) >= now()-interval '7 days'
-        GROUP BY 1,2 HAVING count(*) >= 3`, [shopId]);
+        GROUP BY 1,2 HAVING count(*) >= $2`, [shopId, th.adjustmentCountMin]);
     for (const r of adjustments) {
       out.push({ key: `adjust:${r.product_id}:${day}`, category: "adjustments", severity: Number(r.n) >= 5 ? "critical" : "warning",
+        level: Number(r.n) >= 5 ? "high" : "medium",
         title: `Repeated stock adjustments: ${r.name}`,
         explanation: `${r.n} approved manual corrections changed ${Number(r.qty) / 1000} units in seven days (${r.reasons}). Check whether the recorded reasons support the corrections.`,
         entityType: "product", entityId: r.product_id,
@@ -224,10 +278,12 @@ export class AlertsController {
           GROUP BY 1
        ), base AS (SELECT AVG(amount) avg_amount FROM daily WHERE d < current_date - 6)
        SELECT d.d::text AS "day", d.amount, base.avg_amount FROM daily d CROSS JOIN base
-        WHERE d.d >= current_date - 6 AND d.amount >= 10000 AND base.avg_amount > 0 AND d.amount >= base.avg_amount * 3
-        ORDER BY d.d DESC`, [shopId]);
+        WHERE d.d >= current_date - 6 AND d.amount >= $2 AND base.avg_amount > 0 AND d.amount >= base.avg_amount * $3
+        ORDER BY d.d DESC`, [shopId, th.expenseMinAmount, th.expenseMultiple]);
     for (const r of expenses) {
-      out.push({ key: `expense:${r.day}`, category: "expense", severity: Number(r.amount) >= Number(r.avg_amount ?? 0) * 6 ? "critical" : "warning",
+      const ratio = Number(r.avg_amount) > 0 ? Number(r.amount) / Number(r.avg_amount) : 0;
+      out.push({ key: `expense:${r.day}`, category: "expense", severity: ratio >= 6 ? "critical" : "warning",
+        level: ratio >= 6 ? "high" : "medium",
         title: "Unusually high daily expenses",
         explanation: `Expenses on ${r.day} were ${Number(r.amount)} RWF against a 30-day daily average of ${Math.round(Number(r.avg_amount ?? 0))} RWF. Review the individual entries and receipts.`,
         evidence: { day: r.day, amount: Number(r.amount), baseline: Math.round(Number(r.avg_amount ?? 0)) } });
@@ -249,13 +305,27 @@ export class AlertsController {
     for (const r of credit) {
       const balance = Number(r.balance); if (balance <= 0) continue;
       const ratio = Number(r.credit_limit) > 0 ? balance / Number(r.credit_limit) : 0;
-      if (ratio < 0.8 && Number(r.overdue) <= 0) continue;
+      if (ratio * 100 < th.creditUsedPercent && Number(r.overdue) <= 0) continue;
       out.push({ key: `credit:${r.id}:${day}`, category: "credit_risk",
         severity: ratio >= 1 || Number(r.overdue) >= balance * 0.5 ? "critical" : "warning",
+        level: ratio >= 1 ? "critical" : ratio >= 0.9 ? "high" : "medium",
         title: `Customer credit risk: ${r.name}`,
         explanation: `Outstanding balance is ${balance} RWF${Number(r.credit_limit) > 0 ? ` against a ${Number(r.credit_limit)} RWF limit (${(ratio * 100).toFixed(0)}%)` : ""}${Number(r.overdue) > 0 ? `; ${Number(r.overdue)} RWF is overdue` : ""}. Review the account and arrange a repayment plan.`,
         entityType: "customer", entityId: r.id,
         evidence: { customer: r.name, balance, limit: Number(r.credit_limit), overdue: Number(r.overdue), usedPercent: Math.round(ratio * 100) } });
+    }
+
+    // G. Sales that were reversed (voided): each one needs a reason on record.
+    const reversed = await this.db.query(
+      `SELECT count(*)::int n, COALESCE(SUM(gross_amount),0)::bigint amount
+         FROM sales WHERE shop_id=$1 AND status='reversed' AND sold_at >= now()-interval '1 day' * $2`,
+      [shopId, lookback]);
+    if (Number(reversed[0]?.n ?? 0) >= th.voidedSalesMin) {
+      out.push({ key: `reversed:${day.slice(0, 7)}`, category: "reversed_sale",
+        severity: "warning", level: "high",
+        title: "Repeated reversed sales",
+        explanation: `${Number(reversed[0].n)} sales worth ${Number(reversed[0].amount)} RWF were reversed in the last ${lookback} days. Confirm each reversal has a recorded reason and was authorised.`,
+        evidence: { reversedSales: Number(reversed[0].n), amount: Number(reversed[0].amount), windowDays: lookback } });
     }
 
     return out;
