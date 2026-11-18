@@ -53,9 +53,10 @@ jobs:
       - name: Mobile i18n tests
         run: npm run test:mobile
 
-      # Full API integration suite (44 tests: sync, security, finance, onboarding) against
-      # the sms_test service above. The onboarding file rebuilds apps/api/dist with plain
-      # tsc inside its before() hook (Nest DI needs emitDecoratorMetadata, which tsx/esbuild
-      # never emits); apps/api/dist is gitignored, so nothing pre-existing is relied on.
+      # Full API integration suite (sync, security, finance, costing, alerts, onboarding)
+      # against the sms_test service above. Files that boot the real Nest app rebuild
+      # apps/api/dist with plain tsc inside their before() hook (Nest DI needs
+      # emitDecoratorMetadata, which tsx/esbuild never emits); apps/api/dist is gitignored,
+      # so nothing pre-existing is relied on.
       - name: API integration tests (PostgreSQL)
         run: npm run test:api
