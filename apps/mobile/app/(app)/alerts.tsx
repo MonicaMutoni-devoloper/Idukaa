@@ -5,13 +5,18 @@ import { Badge, Banner, Button, Card, Empty, Field, KeyValue, Modal, Screen, Seg
 import { DayField } from "../../src/components/date-range-picker";
 import { useT, type Key } from "../../src/localization";
 import {
-  actOnAlert, detectAlerts, getAlert, getAlertStaff, getAlerts, getAlertSettings, saveAlertSettings,
+  detectAlerts, getAlertStaff, getAlertSettings, saveAlertSettings,
   type Alert, type AlertDetail, type AlertFilters, type AlertStaff, type AlertStatusGroup, type AlertSummary,
 } from "../../src/services/business";
+import { loadAlertCached, loadAlertsCached, actOnAlertQueued, type AlertSource } from "../../src/services/alert-cache";
 import { useSession } from "../../src/services/api";
+import { useSync } from "../../src/synchronization/engine";
 import { radius, space, type, useTheme } from "../../src/theme/tokens";
 
 type StatusFilter = "all" | AlertStatusGroup;
+/** An alert with this device's queued decisions applied (the outbox is the only pending state). */
+type Row = Alert & { pending: boolean; pendingCount: number; conflicted: boolean };
+type Selected = AlertDetail & { pending: boolean; pendingCount: number; conflicted: boolean };
 
 const LEVEL_TONE = (s: string) => (s === "critical" ? "danger" : s === "high" ? "warn" : s === "medium" ? "info" : "neutral");
 const STATUS_TONE = (s: string) =>
@@ -39,8 +44,15 @@ const THRESHOLD_KEYS = [
 export default function Alerts() {
   const t = useT(); const c = useTheme(); const toast = useToasts((s) => s.push);
   const user = useSession((s) => s.user)!;
-  const [rows, setRows] = useState<Alert[]>([]);
+  const [rows, setRows] = useState<Row[]>([]);
   const [summary, setSummary] = useState<AlertSummary | null>(null);
+  const [source, setSource] = useState<AlertSource>("server");
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [conflictCount, setConflictCount] = useState(0);
+  // A sync verdict, a reconnect or a new queued decision changes what the overlay should show.
+  const recordsVersion = useSync((s) => s.recordsVersion);
+  const online = useSync((s) => s.online);
   const [staff, setStaff] = useState<AlertStaff[]>([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState<StatusFilter>("open");
@@ -51,7 +63,7 @@ export default function Alerts() {
   const [from, setFrom] = useState(""); const [to, setTo] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [detecting, setDetecting] = useState(false);
-  const [selected, setSelected] = useState<AlertDetail | null>(null);
+  const [selected, setSelected] = useState<Selected | null>(null);
   const [opening, setOpening] = useState(false);
   const [action, setAction] = useState<AlertAction>("investigate");
   const [note, setNote] = useState("");
@@ -72,13 +84,15 @@ export default function Alerts() {
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const r = await getAlerts(filters);
+      const r = await loadAlertsCached(filters);
       setRows(r.alerts); setSummary(r.summary);
+      setSource(r.source); setSavedAt(r.savedAt);
+      setPendingCount(r.pending); setConflictCount(r.conflicts);
     } catch (e: any) {
       setError(e?.status === 403 ? t("alerts.forbidden") : t("common.error"));
     } finally { setLoading(false); }
   }, [filters, t]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); }, [load, recordsVersion, online]);
   useEffect(() => { void getAlertStaff().then(setStaff).catch(() => setStaff([])); }, []);
   useEffect(() => {
     if (user.role !== "owner") return;
@@ -100,10 +114,10 @@ export default function Alerts() {
   async function open(alert: Alert) {
     setOpening(true); setError(null);
     try {
-      const d = await getAlert(alert.id);
-      setSelected(d); setNote(""); setCorrectiveAction(""); setResolutionCategory(null);
-      setAssignee(d.assignedTo ?? null); setEscalateTo(d.escalatedTo ?? null);
-      const first = (Object.keys(d.actions) as AlertAction[]).find((a) => d.actions[a]);
+      const d = await loadAlertCached(alert.id);
+      setSelected(d.alert); setNote(""); setCorrectiveAction(""); setResolutionCategory(null);
+      setAssignee(d.alert.assignedTo ?? null); setEscalateTo(d.alert.escalatedTo ?? null);
+      const first = (Object.keys(d.alert.actions) as AlertAction[]).find((a) => d.alert.actions[a]);
       setAction(first ?? "note");
     } catch { setError(t("common.error")); }
     finally { setOpening(false); }
@@ -114,16 +128,19 @@ export default function Alerts() {
     if (action === "resolve" && !resolutionCategory) return;
     setBusy(true);
     try {
-      await actOnAlert(selected.id, {
+      // Durable on this device first; the expected version means a decision made elsewhere wins.
+      await actOnAlertQueued(selected.id, {
         action, note: note.trim(),
         category: action === "resolve" ? resolutionCategory : undefined,
         correctiveAction: action === "resolve" ? (correctiveAction.trim() || null) : undefined,
         assignedTo: action === "assign" ? assignee : undefined,
         escalateTo: action === "escalate" ? escalateTo : undefined,
+        expectedUpdatedAt: selected.updatedAt ?? null,
       });
-      const fresh = await getAlert(selected.id);
-      setSelected(fresh); setNote(""); setCorrectiveAction(""); setResolutionCategory(null);
-      toast(t("alerts.saved"));
+      const fresh = await loadAlertCached(selected.id).catch(() => null);
+      if (fresh) setSelected(fresh.alert);
+      setNote(""); setCorrectiveAction(""); setResolutionCategory(null);
+      toast(t("alerts.queued"));
       await load();
     } catch (e: any) {
       const msg = String(e?.message ?? e ?? "");
@@ -165,6 +182,11 @@ export default function Alerts() {
         <Button testID="alerts-detect" label={t("alerts.detect")} loading={detecting} onPress={() => void detect()} />
       </View>}>
       {error ? <Banner tone={error === t("alerts.insufficient") ? "warn" : "danger"} text={error} /> : null}
+      {source === "cache" ? (
+        <Banner tone="warn" text={`${t("alerts.offline")}${savedAt ? ` · ${t("alerts.cachedAt").replace("{when}", new Date(savedAt).toLocaleString())}` : ""}`} />
+      ) : null}
+      {pendingCount > 0 ? <Banner tone="warn" text={t("alerts.pendingBanner").replace("{count}", String(pendingCount))} /> : null}
+      {conflictCount > 0 ? <Banner tone="danger" text={t("alerts.conflictBanner").replace("{count}", String(conflictCount))} /> : null}
 
       {summary ? (
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
@@ -237,6 +259,8 @@ export default function Alerts() {
               <Badge tone={LEVEL_TONE(alert.severityLevel)} dot label={t(`alerts.${alert.severityLevel}` as Key)} />
               <Text style={{ flex: 1, minWidth: 140, color: c.ink, fontWeight: "800", fontSize: 15 }}>{alert.title}</Text>
               <Badge tone={STATUS_TONE(alert.statusGroup)} label={t(`alerts.${alert.statusGroup}` as Key)} />
+              {alert.pending ? <Badge tone="info" label={t("alerts.pendingTag")} /> : null}
+              {alert.conflicted ? <Badge tone="danger" label={t("alerts.conflictTag")} /> : null}
             </View>
             <Text style={{ color: c.inkSoft, fontSize: 13, lineHeight: 19 }}>{alert.explanation}</Text>
             <View style={{ flexDirection: "row", justifyContent: "space-between", gap: space.sm, flexWrap: "wrap", alignItems: "center" }}>
@@ -256,6 +280,8 @@ export default function Alerts() {
         footer={<Button kind="secondary" label={t("common.close")} onPress={() => setSelected(null)} />}>
         {selected ? (
           <View style={{ gap: space.md }}>
+            {selected.conflicted ? <Banner tone="danger" text={t("alerts.conflictBanner").replace("{count}", String(1))} /> : null}
+            {selected.pending ? <Banner tone="warn" text={t("alerts.pendingBanner").replace("{count}", String(selected.pendingCount))} /> : null}
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" }}>
               <Badge tone={LEVEL_TONE(selected.severityLevel)} label={t(`alerts.${selected.severityLevel}` as Key)} />
               <Badge label={t(CATEGORY_KEY[selected.category] ?? "alerts.category")} />
@@ -341,7 +367,7 @@ export default function Alerts() {
               <Field testID="alert-note" label={action === "reopen" ? t("alerts.reason") : t("alerts.note")} value={note} onChangeText={setNote}
                 hint={t("alerts.noteHint")} multiline />
               <Button testID="alert-submit" label={t("common.save")} loading={busy}
-                disabled={note.trim().length < 3 || (action === "resolve" && !resolutionCategory) || (action === "assign" && !assignee)}
+                disabled={note.trim().length < 3 || (action === "resolve" && !resolutionCategory) || (action === "assign" && !assignee) || selected.pending}
                 onPress={() => void submit()} />
             </View>
 

@@ -195,7 +195,7 @@ export async function bindShop(shopId: string | null) {
 }
 
 /** Persist operation + optimistic stock deltas atomically. deltas: productId -> signed milli-units. */
-export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>, recordAt?: string) {
+export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>, recordAt?: string, options: { record?: boolean } = {}) {
   const d = await db();
   const now = new Date().toISOString();
   const shopId = (await d.getFirstAsync<{ v: string }>("SELECT v FROM kv WHERE k='local.shop'"))?.v ?? null;
@@ -204,7 +204,9 @@ export async function enqueue(userId: string, opId: string, type: string, payloa
     for (const [pid, q] of Object.entries(deltas)) await d.runAsync("UPDATE products SET pending_delta = pending_delta + ? WHERE id=?", [q, pid]);
     // The reportable record is committed in the same transaction as the outbox row: if the app dies
     // now, either both exist or neither does — a sale can never be shown as saved without being countable.
-    await d.runAsync("INSERT OR IGNORE INTO records(op_id,shop_id,type,at,data,actor,created_at) VALUES (?,?,?,?,?,NULL,?)",
+    // An alert investigation step is queued work, not a sale or expense: it stays out of the
+    // local reportable records so the dashboard and report figures never count a decision as trade.
+    if (options.record !== false) await d.runAsync("INSERT OR IGNORE INTO records(op_id,shop_id,type,at,data,actor,created_at) VALUES (?,?,?,?,?,NULL,?)",
       [opId, shopId, type, recordAt ?? now, JSON.stringify(payload), now]);
     await local?.();
   });
@@ -246,6 +248,9 @@ export const dueOps = async (userId: string, shopId: string | null, limit = 50) 
   // reconciles this outbox row without the manager re-entering the sale.
   "SELECT * FROM outbox WHERE user_id=? AND COALESCE(shop_id,'')=? AND status IN ('pending','retry','pending_approval') AND next_attempt_at<=? ORDER BY seq LIMIT ?",
   [userId, shopId ?? "", Date.now(), limit]);
+/** Queued alert investigation steps, oldest first — the source of the offline optimistic state. */
+export const alertOps = async (userId: string, shopId: string | null) => (await db()).getAllAsync<OutboxRow>(
+  "SELECT * FROM outbox WHERE user_id=? AND COALESCE(shop_id,'')=? AND type='alert.action' ORDER BY seq", [userId, shopId ?? ""]);
 export const listOutbox = async (userId: string, shopId: string | null) => (await db()).getAllAsync<OutboxRow>(
   "SELECT * FROM outbox WHERE user_id=? AND COALESCE(shop_id,'')=? ORDER BY seq DESC LIMIT 200", [userId, shopId ?? ""]);
 export const outboxCounts = async (userId: string, shopId: string | null) => {

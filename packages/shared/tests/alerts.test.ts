@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  canTransition, categoriesForRole, displayStatus, isClosed, mayPerform, severityLevel,
+  Operation, canTransition, categoriesForRole, displayStatus, isClosed, mayPerform, severityLevel,
 } from "../src/index.ts";
 
 test("the workflow moves forward and refuses invented jumps", () => {
@@ -31,6 +31,26 @@ test("managers investigate and close ordinary cases, but do not reopen or approv
   assert.deepEqual(categoriesForRole("manager"), ["human_error", "false_positive", "other", "suspicious_activity"]);
   assert.equal(categoriesForRole("manager").includes("approved_activity"), false);
   assert.equal(categoriesForRole("owner").includes("approved_activity"), true);
+});
+
+test("an investigation step is a valid queued operation, and its version travels with it", () => {
+  const base = { opId: "8f14e45f-ea4f-4c1e-9c6a-1f0b2c3d4e5f", deviceId: "phone-1", createdAt: "2026-11-18T07:00:00.000Z" };
+  const parsed = Operation.safeParse({
+    ...base, type: "alert.action",
+    payload: {
+      alertId: "11111111-2222-4333-8444-555555555555", action: "resolve", note: "Checked the till roll.",
+      category: "human_error", expectedUpdatedAt: "2026-11-18T06:59:00.000Z",
+    },
+  });
+  assert.equal(parsed.success, true);
+  if (parsed.success) assert.equal(parsed.data.type, "alert.action");
+
+  // A one-word note is not an investigation record; the server would refuse it anyway.
+  const short = Operation.safeParse({ ...base, type: "alert.action", payload: { alertId: "x", action: "note", note: "ok" } });
+  assert.equal(short.success, false);
+  // Invented actions, versions that are not timestamps and other alert shapes are rejected at the edge.
+  assert.equal(Operation.safeParse({ ...base, type: "alert.action", payload: { alertId: "x", action: "delete", note: "Valid note" } }).success, false);
+  assert.equal(Operation.safeParse({ ...base, type: "alert.action", payload: { alertId: "x", action: "note", note: "Valid note", expectedUpdatedAt: "yesterday" } }).success, false);
 });
 
 test("old severities map onto the four review levels", () => {

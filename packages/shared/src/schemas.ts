@@ -139,7 +139,29 @@ export const CreditPaymentOp = z.object({
   }),
 });
 
-export const Operation = z.discriminatedUnion("type", [SaleOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp, CustomerOp, CreditPaymentOp]).and(
+/**
+ * An alert investigation step recorded while the device had no connection. It carries the
+ * `updatedAt` the reviewer was looking at, so the server can refuse to apply a decision to an alert
+ * that changed on another device in the meantime instead of silently overwriting it. The operation
+ * id makes a replayed batch harmless: the same decision is applied at most once.
+ */
+export const AlertActionOp = z.object({
+  type: z.literal("alert.action"),
+  payload: z.object({
+    alertId: id,
+    action: z.enum(["investigate", "assign", "note", "escalate", "resolve", "reopen"]),
+    note: z.string().trim().min(3).max(2000),
+    /** The alert version this decision was made against; null only for legacy queues. */
+    expectedUpdatedAt: iso.nullable().optional(),
+    assignedTo: id.nullable().optional(),
+    category: z.enum(["approved_activity", "human_error", "suspicious_activity", "false_positive", "other"]).nullable().optional(),
+    correctiveAction: z.string().trim().max(1000).nullable().optional(),
+    escalateTo: id.nullable().optional(),
+    approvedBy: id.nullable().optional(),
+  }),
+});
+
+export const Operation = z.discriminatedUnion("type", [SaleOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp, CustomerOp, CreditPaymentOp, AlertActionOp]).and(
   z.object({ opId: id, deviceId: z.string().min(1).max(64), createdAt: iso }),
 );
 export type OperationT = z.infer<typeof Operation>;

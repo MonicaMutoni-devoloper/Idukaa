@@ -46,6 +46,8 @@ export interface Alert {
   resolutionCategory: AlertResolutionCategory | null; resolutionNote: string | null; correctiveAction: string | null;
   escalatedTo: string | null; escalatedToName: string | null; escalatedAt: string | null; approvedByName: string | null;
   firstSeenAt: string; lastSeenAt: string; resolvedAt: string | null; resolvedByName: string | null;
+  /** Server version of this alert; a queued decision records it so a stale one is refused. */
+  updatedAt: string;
 }
 export interface AlertSummary {
   total: number; open: number; investigating: number; actionRequired: number; escalated: number;
@@ -114,6 +116,8 @@ export type AlertAction = "investigate" | "assign" | "note" | "escalate" | "reso
 export const actOnAlert = (id: string, body: {
   action: AlertAction; note: string; assignedTo?: string | null; category?: AlertResolutionCategory | null;
   correctiveAction?: string | null; escalateTo?: string | null; approvedBy?: string | null;
+  /** The alert's `updatedAt` when the reviewer opened it; the server refuses the action if it moved. */
+  expectedUpdatedAt?: string | null;
 }) => request<Alert>(`/alerts/${id}/actions`, { method: "POST", body });
 export const getAlertSettings = () => request<{ thresholds: Record<string, number>; defaults: Record<string, number> }>("/alerts/settings");
 export const saveAlertSettings = (thresholds: Record<string, number>) =>

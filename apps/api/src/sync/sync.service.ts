@@ -1,9 +1,10 @@
-import { Injectable } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { PoolClient } from "pg";
 import { Operation, lineAmount, normalizeRwandaPhone, priceBelowCost, toBaseQty, type OperationT, type OpResult } from "@sms/shared";
 import { Db } from "../db/db.service";
 import { audit } from "../audits/audit";
 import { canRunOp } from "./op-permissions";
+import { AlertConflictError, AlertsService } from "../alerts/alerts.service";
 import { emitShopChange } from "../realtime/hub";
 import type { AuthUser } from "../common/auth";
 
@@ -24,7 +25,7 @@ const NEG_ONLY = ["damage", "expiry", "supplier_return", "theft", "disposal", "s
 
 @Injectable()
 export class SyncService {
-  constructor(private db: Db) {}
+  constructor(private db: Db, private alerts: AlertsService) {}
 
   /**
    * Product operations queued by an older build used the separate `openingQty`/`openingUnitCost`
@@ -422,6 +423,28 @@ export class SyncService {
         const { rows: [ex] } = await c.query("SELECT shop_id FROM suppliers WHERE id=$1", [p.supplierId]);
         if (ex && ex.shop_id !== shopId) throw new BizError("rejected", "unknown_supplier");
         await c.query("INSERT INTO suppliers(id,shop_id,name,phone) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO UPDATE SET name=$3, phone=$4, updated_at=now()", [p.supplierId, shopId, p.name, p.phone ?? null]);
+        return;
+      }
+      /**
+       * An investigation step taken offline. It goes through the same workflow rules as the HTTP
+       * route, inside this operation's transaction, and is refused rather than applied when the
+       * alert changed on the server after the reviewer opened it (another device's decision wins).
+       */
+      case "alert.action": {
+        const p = op.payload;
+        try {
+          await this.alerts.actInTx(c, u, p.alertId, {
+            action: p.action, note: p.note, assignedTo: p.assignedTo ?? null,
+            category: p.category ?? null, correctiveAction: p.correctiveAction ?? null,
+            escalateTo: p.escalateTo ?? null, approvedBy: p.approvedBy ?? null,
+            expectedUpdatedAt: p.expectedUpdatedAt ?? null,
+          });
+        } catch (e: any) {
+          if (e instanceof AlertConflictError) throw new BizError("conflict", e.code);
+          if (e instanceof ForbiddenException || e instanceof BadRequestException) throw new BizError("rejected", String(e.message));
+          if (e instanceof NotFoundException) throw new BizError("rejected", "alert_not_found");
+          throw e;
+        }
         return;
       }
     }

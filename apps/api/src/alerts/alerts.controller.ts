@@ -14,6 +14,8 @@ const ActionBody = z.object({
   correctiveAction: z.string().trim().max(1000).nullable().optional(),
   escalateTo: z.string().uuid().nullable().optional(),
   approvedBy: z.string().uuid().nullable().optional(),
+  /** The version the reviewer saw; a newer server copy wins and the action is refused with 409. */
+  expectedUpdatedAt: z.string().datetime().nullable().optional(),
 });
 
 /** A device running the previous build still posts a bare status; it is translated, never trusted. */

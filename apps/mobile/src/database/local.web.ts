@@ -235,7 +235,7 @@ export async function bindShop(shopId: string | null) {
 }
 
 /** Persist operation + optimistic stock deltas atomically. deltas: productId -> signed milli-units. */
-export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>, recordAt?: string) {
+export async function enqueue(userId: string, opId: string, type: string, payload: unknown, deltas: Record<string, number> = {}, local?: () => Promise<unknown>, recordAt?: string, options: { record?: boolean } = {}) {
   const now = new Date().toISOString();
   await mutate((s) => {
     const shopId = s.kv["local.shop"] ?? null;
@@ -246,7 +246,8 @@ export async function enqueue(userId: string, opId: string, type: string, payloa
     });
     for (const [pid, q] of Object.entries(deltas)) { const p = s.products.find((p) => p.id === pid); if (p) p.pending_delta += q; }
     // Same single write as the outbox row: the reportable record and the queued operation commit together.
-    if (!s.records.some((r) => r.op_id === opId)) {
+    // An alert investigation step is queued work, not a sale/expense, so it never enters the reports.
+    if (options.record !== false && !s.records.some((r) => r.op_id === opId)) {
       s.records.push({ op_id: opId, shop_id: shopId, type, at: recordAt ?? now, data: JSON.stringify(payload), actor: null, created_at: now, status: "pending" });
     }
   });
@@ -308,6 +309,12 @@ export const dueOps = async (userId: string, shopId: string | null, limit = 50) 
     .sort((a, b) => a.seq - b.seq)
     .slice(0, limit)
     .map((r) => ({ ...r }));
+
+/** Queued alert investigation steps, oldest first — the source of the offline optimistic state. */
+export const alertOps = async (userId: string, shopId: string | null) =>
+  (await readState()).outbox
+    .filter((r) => r.type === "alert.action" && r.user_id === userId && (r.shop_id ?? null) === shopId)
+    .sort((a, b) => a.seq - b.seq).map((r) => ({ ...r }));
 
 export const listOutbox = async (userId: string, shopId: string | null) =>
   (await readState()).outbox.filter((r) => r.user_id === userId && (r.shop_id ?? null) === shopId)

@@ -24,6 +24,7 @@
     "test:sell": "node --test tests/sell-quick-add.test.mts",
     "test:period": "node --test tests/overview-period.test.mts",
     "test:offline": "node --test tests/offline-policy.test.mts tests/offline-retention.test.mts",
+    "test:alerts": "node --test tests/alert-queue.test.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { PoolClient } from "pg";
 import {
   canTransition, categoriesForRole, displayStatus, mayPerform, severityLevel,
@@ -49,6 +49,21 @@ export interface AlertFilters {
 }
 
 const CLOSED = "'resolved','legitimate'";
+
+/**
+ * The alert a reviewer was looking at is no longer the alert on the server. Raised inside the
+ * transaction so nothing is written; the sync layer turns it into a `conflict` verdict for the
+ * outbox, and the HTTP route into 409. Never silently overwrite a decision made on another device.
+ */
+export class AlertConflictError extends Error {
+  constructor(public code: string) { super(code); this.name = "AlertConflictError"; }
+}
+
+const iso = (value: unknown): string | null => {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
 
 @Injectable()
 export class AlertsService {
@@ -174,11 +189,37 @@ export class AlertsService {
   async act(user: AuthUser, id: string, input: {
     action: AlertAction; note: string; assignedTo?: string | null; category?: ResolutionCategory | null;
     correctiveAction?: string | null; escalateTo?: string | null; approvedBy?: string | null;
+    expectedUpdatedAt?: string | null;
+  }) {
+    try {
+      return await this.db.tx((c) => this.actInTx(c, user, id, input));
+    } catch (e) {
+      // A stale version is the only failure that means "read it again", not "your request was bad".
+      if (e instanceof AlertConflictError) throw new ConflictException(e.code);
+      throw e;
+    }
+  }
+
+  /**
+   * The workflow, inside a caller-owned transaction. The sync queue uses this so an offline action
+   * commits (or rolls back) together with its operation row and audit entry.
+   *
+   * `expectedUpdatedAt` is the version the reviewer saw. If the alert has changed since — another
+   * device resolved it, detection saw it again, a manager reassigned it — the action is refused as
+   * a conflict instead of overwriting that newer decision.
+   */
+  async actInTx(c: PoolClient, user: AuthUser, id: string, input: {
+    action: AlertAction; note: string; assignedTo?: string | null; category?: ResolutionCategory | null;
+    correctiveAction?: string | null; escalateTo?: string | null; approvedBy?: string | null;
+    expectedUpdatedAt?: string | null;
   }) {
     const shopId = user.shopId!;
-    return this.db.tx(async (c) => {
+    {
       const { rows: [a] } = await c.query("SELECT * FROM business_alerts WHERE id=$1 AND shop_id=$2 FOR UPDATE", [id, shopId]);
       if (!a) throw new NotFoundException("alert_not_found");
+      if (input.expectedUpdatedAt && iso(a.updated_at) !== iso(input.expectedUpdatedAt)) {
+        throw new AlertConflictError("alert_changed_on_server");
+      }
       if (!mayPerform(user.role, input.action)) throw new ForbiddenException(`alert_action_forbidden:${input.action}`);
 
       const now = new Date().toISOString();
@@ -285,7 +326,7 @@ export class AlertsService {
         newValue: { status: next, ...details }, reason: input.note,
       });
       return this.shape(row);
-    });
+    }
   }
 
   private assertTransition(from: string, to: string) {
@@ -413,6 +454,8 @@ export class AlertsService {
       approvedByName: r.approved_name ?? null,
       firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at, resolvedAt: r.resolved_at,
       resolvedByName: r.resolved_name ?? null,
+      /** Version used by the app to detect that another device changed this alert first. */
+      updatedAt: iso(r.updated_at),
     };
   }
 }

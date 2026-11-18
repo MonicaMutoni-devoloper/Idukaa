@@ -29,6 +29,10 @@ export const OP_ROLES: Record<OperationT["type"], Role[]> = {
   // Registering the person taking goods on credit is part of selling, so both shop roles can do
   // it; the credit line itself stays owner-controlled (the API stores 0 for a manager).
   "customer.upsert": ["manager", "owner"],
+  // Which alert steps a role may take (reopen, approving an exception) is decided by the shared
+  // workflow rules inside the operation, not by this coarse gate: a manager queues an investigation
+  // step, and the server still refuses an owner-only decision with `alert_action_forbidden`.
+  "alert.action": ["manager", "owner"],
 };
 
 /** Does this role have this operation? Unknown roles (e.g. `system_admin`) have none. */
