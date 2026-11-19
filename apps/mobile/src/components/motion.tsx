@@ -70,14 +70,23 @@ export function useCountUp(value: number, duration = motion.count): number {
 }
 
 /** Height/opacity transition for expandable sections, measured from real content. */
-export function Disclosure({ title, description, children, initiallyOpen = false, testID }: {
+export function Disclosure({ title, description, children, initiallyOpen = false, testID, open: controlledOpen, onOpenChange, compact = false }: {
   title: string; description?: string; children: ReactNode; initiallyOpen?: boolean; testID?: string;
+  /** Controlled expansion, for sections whose open state must survive a data refresh. */
+  open?: boolean; onOpenChange?: (open: boolean) => void;
+  /** A quieter inline treatment for secondary disclosures, without the card shell. */
+  compact?: boolean;
 }) {
   const c = useTheme();
   const reduced = useReducedMotion();
-  const [open, setOpen] = useState(initiallyOpen);
+  const [internalOpen, setInternalOpen] = useState(initiallyOpen);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = (next: boolean) => {
+    if (controlledOpen === undefined) setInternalOpen(next);
+    onOpenChange?.(next);
+  };
   const [measured, setMeasured] = useState(0);
-  const progress = useRef(new Animated.Value(initiallyOpen ? 1 : 0)).current;
+  const progress = useRef(new Animated.Value((controlledOpen ?? initiallyOpen) ? 1 : 0)).current;
 
   useEffect(() => {
     if (reduced) { progress.setValue(open ? 1 : 0); return; }
@@ -89,20 +98,29 @@ export function Disclosure({ title, description, children, initiallyOpen = false
   }, [open, progress, reduced]);
 
   return (
-    <View style={{ borderWidth: 1, borderColor: c.line, borderRadius: radius.md, backgroundColor: c.surface, overflow: "hidden" }}>
+    <View style={{
+      borderWidth: compact ? 0 : 1, borderColor: c.line, borderRadius: compact ? 0 : radius.md,
+      backgroundColor: compact ? "transparent" : c.surface, overflow: "hidden",
+    }}>
       <Pressable testID={testID} accessibilityRole="button" accessibilityState={{ expanded: open }} aria-expanded={open} accessibilityLabel={title}
-        onPress={() => setOpen((v) => !v)}
+        onPress={() => setOpen(!open)}
+        onKeyDown={Platform.OS === "web" ? ((e: any) => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          e.preventDefault();
+          if (!e.repeat) setOpen(!open);
+        }) : undefined}
         style={({ hovered, pressed, focused }: any) => ({
-          paddingVertical: space.md, paddingHorizontal: space.lg, flexDirection: "row", alignItems: "center", gap: space.md,
-          backgroundColor: hovered || pressed ? c.surfaceMuted : c.surface,
-          ...(focused ? { borderWidth: 1, borderColor: c.focus, borderRadius: radius.md } : {}),
+          paddingVertical: compact ? 7 : space.md, paddingHorizontal: compact ? 0 : space.lg,
+          flexDirection: "row", alignItems: "center", gap: space.md,
+          backgroundColor: hovered || pressed ? c.surfaceMuted : "transparent",
+          ...(focused ? { borderWidth: 1, borderColor: c.focus, borderRadius: compact ? radius.sm : radius.md } : {}),
         })}>
-        <View style={{ flex: 1, gap: 2 }}>
-          <Text style={{ color: c.ink, ...type.h3 }}>{title}</Text>
+        <View style={{ flex: 1, gap: compact ? 0 : 2 }}>
+          <Text style={compact ? { color: c.muted, fontSize: 12, lineHeight: 17, fontWeight: "600" } : { color: c.ink, ...type.h3 }}>{title}</Text>
           {description ? <Text style={{ color: c.muted, ...type.small }}>{description}</Text> : null}
         </View>
         <Animated.View style={{ transform: [{ rotate: progress.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "180deg"] }) }] }}>
-          <Icon name="chevronDown" size={16} color={c.muted} />
+          <Icon name="chevronDown" size={compact ? 14 : 16} color={c.muted} />
         </Animated.View>
       </Pressable>
       <Animated.View pointerEvents={open ? "auto" : "none"} accessibilityElementsHidden={!open}

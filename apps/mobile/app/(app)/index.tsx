@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Pressable, Text, useWindowDimensions, View, type DimensionValue } from "react-native";
 import { useRouter } from "expo-router";
 import { formatQty, formatRwf } from "@sms/shared";
 import { Badge, Banner, Button, Card, Empty, ErrorState, Screen, Segmented, Skeleton, useWide } from "../../src/components/ui";
 import { Icon, type IconName } from "../../src/components/icons";
 import { PeriodSelector } from "../../src/components/date-range-picker";
 import { OfflineReadinessStrip } from "../../src/components/offline-download";
-import { BarList, CompareBars, ProductRanking, StockHealthBar, TrendBars } from "../../src/components/charts";
+import { CompareBars, ProductRanking, StockHealthBar, TrendBars } from "../../src/components/charts";
 import { Appear, Disclosure } from "../../src/components/motion";
 import { useT, type Key } from "../../src/localization";
 import { kvGet, kvSet, listRecords } from "../../src/database";
@@ -184,6 +184,129 @@ function FigureRow({ label, value, note }: { label: string; value: string; note?
     </View>
   );
 }
+
+/** One compact secondary figure. Same width and minimum height keep every group visually even. */
+function FigureCard({ label, value, hint, note, tone, emphasis, width, testID }: {
+  label: string; value: string; hint?: string; note?: string;
+  tone?: "danger" | "success"; emphasis?: boolean; width: DimensionValue; testID?: string;
+}) {
+  const c = useTheme();
+  const valueColor = tone === "danger" ? c.danger : tone === "success" ? c.success : c.ink;
+  return (
+    <View testID={testID} accessibilityLabel={`${label}: ${value}${hint ? `. ${hint}` : ""}${note ? `. ${note}` : ""}`}
+      style={{
+        width, minHeight: 116, padding: space.md, gap: space.xs, justifyContent: "space-between",
+        backgroundColor: c.surface, borderWidth: 1, borderColor: emphasis ? c.primary : c.line, borderRadius: radius.sm,
+      }}>
+      <Text style={{ color: emphasis ? c.primaryStrong : c.muted, fontSize: 11, lineHeight: 15, fontWeight: "700", letterSpacing: 0.35, textTransform: "uppercase" }}>
+        {label}
+      </Text>
+      <View style={{ gap: 2 }}>
+        <Text testID={testID ? `${testID}-value` : undefined}
+          style={{ color: valueColor, fontSize: emphasis ? 22 : 18, lineHeight: emphasis ? 28 : 23, fontWeight: "800", fontVariant: ["tabular-nums"] }}>
+          {value}
+        </Text>
+        {hint ? <Text style={{ color: c.muted, fontSize: 11, lineHeight: 15 }}>{hint}</Text> : null}
+        {note ? <Text style={{ color: c.inkSoft, fontSize: 11, lineHeight: 15, fontWeight: "600" }}>{note}</Text> : null}
+      </View>
+    </View>
+  );
+}
+
+function FigureGroup({ title, children, divided }: { title: string; children: ReactNode; divided?: boolean }) {
+  const c = useTheme();
+  return (
+    <View style={{ gap: space.sm, borderTopWidth: divided ? 1 : 0, borderTopColor: c.line, paddingTop: divided ? space.lg : 0 }}>
+      <Text style={{ color: c.inkSoft, fontSize: 12, lineHeight: 16, fontWeight: "700", letterSpacing: 0.2 }}>{title}</Text>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "stretch" }}>{children}</View>
+    </View>
+  );
+}
+
+/** Owner-only secondary figures. Collapsed by default; the open state lives in Home so refreshes keep it. */
+function MoreFigures({ fin, ops, expenses, methodNote, open, onOpenChange }: {
+  fin: Financials; ops: Operations; expenses: { category: string; amount: number; unpaid: number }[];
+  methodNote: string; open: boolean; onOpenChange: (open: boolean) => void;
+}) {
+  const c = useTheme();
+  const t = useT();
+  const { width } = useWindowDimensions();
+  const columns = width >= 900 ? 3 : width >= 520 ? 2 : 1;
+  const cardWidth = columns === 3 ? "31.5%" : columns === 2 ? "48.2%" : "100%";
+  const stockLoss = fin.stockLosses ?? fin.stockLossValue ?? 0;
+  const resultAfterLosses = fin.operatingResultAfterStockLosses ?? fin.operatingProfit;
+  // Keep the existing explanation verbatim; break its sentences into readable lines rather than
+  // introducing a second, potentially divergent definition of the accounting rules.
+  const definitions = t("fin.calculationNote").split(". ")
+    .map((line, i, all) => i < all.length - 1 ? `${line}.` : line)
+    .filter(Boolean);
+
+  return (
+    <Disclosure title={t("dash.moreFigures")} description={t("dash.moreFiguresHint")}
+      testID="dash-financial-detail" open={open} onOpenChange={onOpenChange}>
+      <View style={{ padding: space.lg, paddingTop: space.md, gap: space.lg }}>
+        <FigureGroup title={t("dash.financialPerformance")}>
+          <FigureCard width={cardWidth} testID="dash-figure-cogs" label={t("fin.cogs")} value={formatRwf(fin.cogs)} hint={t("fin.cogsHint")} />
+          <FigureCard width={cardWidth} testID="dash-figure-expenses" label={t("fin.expenses")} value={formatRwf(fin.operatingExpenses)}
+            note={`${t("fin.outstanding")}: ${formatRwf(fin.outstandingExpenses)}`} />
+          <FigureCard width={cardWidth} testID="dash-figure-operating-profit" label={t("fin.operating")} value={formatRwf(fin.operatingProfit)}
+            hint={t("fin.operatingHint")} emphasis tone={fin.operatingProfit < 0 ? "danger" : undefined} />
+          <FigureCard width={cardWidth} testID="dash-figure-stock-losses" label={t("fin.stockLoss")} value={formatRwf(stockLoss)}
+            hint={t("fin.stockLossHint")} tone={stockLoss > 0 ? "danger" : undefined} />
+          <FigureCard width={cardWidth} testID="dash-figure-result-after-losses" label={t("fin.resultAfterLosses")} value={formatRwf(resultAfterLosses)}
+            hint={t("fin.resultAfterLossesHint")} tone={resultAfterLosses < 0 ? "danger" : undefined} />
+        </FigureGroup>
+
+        <FigureGroup title={t("dash.cashAndInventory")} divided>
+          <FigureCard width={cardWidth} testID="dash-figure-collected" label={t("fin.salesCollected")} value={formatRwf(ops.cashCollected)} hint={t("fin.salesCollectedHint")} />
+          <FigureCard width={cardWidth} testID="dash-figure-credit-repayments" label={t("fin.creditRepayments")} value={formatRwf(ops.creditRepayments ?? 0)}
+            hint={t("fin.creditRepaymentsHint")} note={methodNote || undefined} />
+          <FigureCard width={cardWidth} testID="dash-figure-purchases" label={t("fin.purchases")} value={formatRwf(fin.inventoryPurchases)}
+            note={`${t("dash.supplierPayables")}: ${formatRwf(ops.supplierPayables)}`} />
+          <FigureCard width={cardWidth} testID="dash-figure-inventory-value" label={t("fin.invValue")}
+            value={ops.inventoryValue !== null ? formatRwf(ops.inventoryValue) : "—"} hint={t("dash.inventoryHint")} />
+        </FigureGroup>
+
+        <FigureGroup title={t("dash.salesAdjustments")} divided>
+          <FigureCard width={cardWidth} testID="dash-figure-discounts" label={t("dash.discounts")} value={formatRwf(fin.discounts)}
+            note={`${t("dash.returns")}: ${formatRwf(fin.salesReturns)}`} />
+        </FigureGroup>
+
+        <View style={{ borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.lg, gap: space.sm }}>
+          <Text style={{ color: c.inkSoft, fontSize: 12, lineHeight: 16, fontWeight: "700", letterSpacing: 0.2 }}>{t("dash.expensesByCategory")}</Text>
+          {expenses.length ? (
+            <View style={{ borderWidth: 1, borderColor: c.line, borderRadius: radius.sm, overflow: "hidden" }}>
+              {expenses.map((e, i) => (
+                <View key={e.category} style={{
+                  flexDirection: "row", alignItems: "center", gap: space.md, paddingVertical: 9, paddingHorizontal: space.md,
+                  borderTopWidth: i ? 1 : 0, borderTopColor: c.line, backgroundColor: c.surface,
+                }}>
+                  <Text style={{ flex: 1, color: c.inkSoft, fontSize: 13 }}>{e.category}</Text>
+                  <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(e.amount)}</Text>
+                </View>
+              ))}
+            </View>
+          ) : (
+            <View style={{ borderWidth: 1, borderColor: c.line, borderRadius: radius.sm, padding: space.md, backgroundColor: c.surfaceMuted }}>
+              <Text style={{ color: c.muted, fontSize: 12, lineHeight: 17 }}>{t("dash.noExpensesThisPeriod")}</Text>
+            </View>
+          )}
+        </View>
+
+        <Disclosure title={t("fin.howCalculated")} compact>
+          <View style={{ gap: 6, paddingBottom: space.sm }}>
+            {definitions.map((line, i) => (
+              <View key={`${i}-${line.slice(0, 18)}`} style={{ flexDirection: "row", alignItems: "flex-start", gap: 7 }}>
+                <View style={{ width: 4, height: 4, borderRadius: 2, marginTop: 7, backgroundColor: c.lineStrong }} />
+                <Text style={{ flex: 1, color: c.muted, fontSize: 12, lineHeight: 18 }}>{line}</Text>
+              </View>
+            ))}
+          </View>
+        </Disclosure>
+      </View>
+    </Disclosure>
+  );
+}
 export default function Home() {
   const t = useT();
   const c = useTheme();
@@ -210,6 +333,8 @@ export default function Home() {
   // Distinguishes "the server rejected the session" from "the server could not be reached".
   const [authIssue, setAuthIssue] = useState(false);
   const [trendMetric, setTrendMetric] = useState<TrendMetric>("sales");
+  // Owned here, not inside the disclosure, so an ordinary figures refresh cannot fold it away.
+  const [moreFiguresOpen, setMoreFiguresOpen] = useState(false);
   // The shop's own name, from the profile snapshot the offline download already keeps. No extra
   // request: a shop whose download has not run yet simply shows the period line alone.
   const [savedShopName, setSavedShopName] = useState<string | null>(null);
@@ -594,6 +719,22 @@ export default function Home() {
 
           {fin?.costBasisIncomplete ? <Banner tone="warn" text={t("fin.provisional")} /> : null}
 
+          {/* Secondary figures sit directly under the headline KPIs and stay folded by default. */}
+          {finVisible && fin ? (
+            <MoreFigures fin={fin} ops={ops} expenses={data.expensesByCategory} methodNote={methodNote}
+              open={moreFiguresOpen} onOpenChange={setMoreFiguresOpen} />
+          ) : (
+            <Disclosure title={t("dash.moreFigures")} description={t("dash.moreFiguresOpsHint")}>
+              <View style={{ padding: space.lg, paddingTop: space.md }}>
+                <FigureRow label={t("dash.transactions")} value={String(ops.transactions)} />
+                <FigureRow label={t("dash.unitsSold")} value={formatQty(ops.unitsSold)} />
+                <FigureRow label={t("dash.avgSale")} value={formatRwf(ops.averageTransaction)} />
+                <FigureRow label={t("dash.productsReceived")} value={formatQty(ops.unitsReceived)}
+                  note={`${ops.deliveries} ${t("dash.deliveries")} · ${ops.productsReceived} ${t("dash.products")}`} />
+              </View>
+            </Disclosure>
+          )}
+
           {/* Four actions, one row, no duplicate routes. */}
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
             <QuickAction testID="home-action-sell" primary icon="cart" label={t("nav.sell")} onPress={() => router.push("/sell")} />
@@ -679,46 +820,6 @@ export default function Home() {
               <Button testID="dash-activity-toggle" size="sm" kind="secondary" label={t("dash.viewAllActivity")} onPress={() => router.push("/reports" as any)} />
             ) : null}
           </Card>
-
-          {/* Everything an owner still needs, folded away instead of competing with the headline. */}
-          {finVisible && fin ? (
-            <Disclosure title={t("dash.moreFigures")} description={t("dash.moreFiguresHint")} testID="dash-financial-detail">
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md, padding: space.lg, paddingTop: space.md }}>
-                <View style={{ flexGrow: 1, flexBasis: 260, minWidth: 0 }}>
-                  <FigureRow label={t("fin.cogs")} value={formatRwf(fin.cogs)} />
-                  <FigureRow label={t("fin.expenses")} value={formatRwf(fin.operatingExpenses)}
-                    note={`${t("fin.outstanding")}: ${formatRwf(fin.outstandingExpenses)}`} />
-                  <FigureRow label={t("fin.operating")} value={formatRwf(fin.operatingProfit)} />
-                  <FigureRow label={t("fin.stockLoss")} value={formatRwf(fin.stockLosses ?? fin.stockLossValue ?? 0)} />
-                  <FigureRow label={t("fin.resultAfterLosses")} value={formatRwf(fin.operatingResultAfterStockLosses ?? fin.operatingProfit)} />
-                </View>
-                <View style={{ flexGrow: 1, flexBasis: 260, minWidth: 0 }}>
-                  <FigureRow label={t("fin.salesCollected")} value={formatRwf(ops.cashCollected)} note={t("fin.salesCollectedHint")} />
-                  <FigureRow label={t("fin.creditRepayments")} value={formatRwf(ops.creditRepayments ?? 0)} note={methodNote || t("fin.creditRepaymentsHint")} />
-                  <FigureRow label={t("fin.purchases")} value={formatRwf(fin.inventoryPurchases)} note={`${t("dash.supplierPayables")}: ${formatRwf(ops.supplierPayables)}`} />
-                  <FigureRow label={t("fin.invValue")} value={ops.inventoryValue !== null ? formatRwf(ops.inventoryValue) : "—"} note={t("dash.inventoryHint")} />
-                  <FigureRow label={t("dash.discounts")} value={formatRwf(fin.discounts)} note={`${t("dash.returns")}: ${formatRwf(fin.salesReturns)}`} />
-                </View>
-                <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18, flexBasis: "100%" }}>{t("fin.calculationNote")}</Text>
-                {data.expensesByCategory.length ? (
-                  <View style={{ flexBasis: "100%", gap: space.sm, marginTop: space.xs }}>
-                    <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("dash.expensesByCategory")}</Text>
-                    <BarList items={data.expensesByCategory.map((e) => ({ key: e.category, label: e.category, value: e.amount }))} emptyLabel={t("common.empty")} />
-                  </View>
-                ) : null}
-              </View>
-            </Disclosure>
-          ) : (
-            <Disclosure title={t("dash.moreFigures")} description={t("dash.moreFiguresHint")}>
-              <View style={{ padding: space.lg, paddingTop: space.md }}>
-                <FigureRow label={t("dash.transactions")} value={String(ops.transactions)} />
-                <FigureRow label={t("dash.unitsSold")} value={formatQty(ops.unitsSold)} />
-                <FigureRow label={t("dash.avgSale")} value={formatRwf(ops.averageTransaction)} />
-                <FigureRow label={t("dash.productsReceived")} value={formatQty(ops.unitsReceived)}
-                  note={`${ops.deliveries} ${t("dash.deliveries")} · ${ops.productsReceived} ${t("dash.products")}`} />
-              </View>
-            </Disclosure>
-          )}
 
           {finVisible && fin ? (
             <Disclosure title={t("dash.moreCharts")} description={t("dash.moreChartsHint")}>
