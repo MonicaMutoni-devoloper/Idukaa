@@ -54,6 +54,8 @@ export interface Correction {
   settlementNote: string | null;
   settledAt: string | null;
   updatedAt: string | null;
+  /** Server authority for this user: only a shop owner may decide or settle. */
+  canDecide?: boolean;
   actions: { approve: boolean; reject: boolean; requestInfo: boolean; settleRefund: boolean };
   /** Device-only state for a queued request that has not reached the server yet. */
   displayStatus?: CorrectionDisplayStatus;

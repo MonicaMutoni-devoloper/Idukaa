@@ -38,6 +38,18 @@ const int = (v: string) => {
   return Number.isFinite(n) ? Math.round(n) : 0;
 };
 
+/** Translate the API's 403 reason instead of calling every refusal "not the owner". */
+function refusalKey(e: any): Key {
+  const code = String(e?.body?.message ?? e?.body?.error ?? "");
+  if (code === "subscription_inactive") return "corr.subscriptionInactive";
+  if (code === "shop_suspended") return "corr.shopSuspended";
+  if (code === "shop_access_denied" || code === "shop_membership_missing") return "corr.shopAccessDenied";
+  if (code === "role_not_allowed") return "corr.ownerOnly";
+  if (e?.status === 403) return "corr.ownerOnly";
+  if (e?.status === 404) return "corr.notFound";
+  return "common.error";
+}
+
 export default function Corrections() {
   const t = useT(); const c = useTheme(); const toast = useToasts((s) => s.push);
   const router = useRouter();
@@ -85,7 +97,7 @@ export default function Corrections() {
       const r = await loadCorrections();
       setRows(r.corrections); setSource(r.source); setSavedAt(r.savedAt);
     } catch (e: any) {
-      setError(e?.status === 403 ? t("corr.ownerOnly") : t("common.error"));
+      setError(t(refusalKey(e)));
     } finally { setLoading(false); }
   }, [t]);
   useEffect(() => { void load(); }, [load, recordsVersion, online]);
@@ -126,7 +138,7 @@ export default function Corrections() {
     } catch (e: any) {
       const queued = rows.find((x) => x.id === id && x.pendingSync);
       if (queued) setSelected({ ...queued, events: [], correctedSale: null } as CorrectionDetail);
-      else setError(e?.status === 404 ? t("corr.ownerOnly") : t("common.error"));
+      else setError(t(refusalKey(e)));
     } finally { setDetailLoading(false); }
   };
 
@@ -184,12 +196,13 @@ export default function Corrections() {
       toast(t(decisionOpen === "approve" ? "corr.approved" : decisionOpen === "reject" ? "corr.rejected" : decisionOpen === "info" ? "corr.infoSent" : "corr.refundSaved"));
       await load();
     } catch (e: any) {
-      setError(e?.body?.message ? String(e.body.message) : t("common.error"));
+      setError(e?.status === 403 || e?.status === 404 ? t(refusalKey(e)) : e?.body?.message ? String(e.body.message) : t("common.error"));
     } finally { setDecisionBusy(false); }
   };
 
   const selectedDisplay = selected?.displayStatus ?? selected?.status ?? "pending_approval";
-  const owner = user.role === "owner";
+  // The server knows the active shop membership; a cached session role may predate a promotion.
+  const canDecide = selected?.canDecide ?? user.role === "owner";
 
   return (
     <Screen title={t("corr.title")} subtitle={t("corr.subtitle")} actions={
@@ -400,7 +413,7 @@ export default function Corrections() {
               </View>
             ) : null}
 
-            {owner && !selected.pendingSync ? (
+            {canDecide && !selected.pendingSync ? (
               <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap", borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.md }}>
                 {selected.actions.approve ? <Button testID="corr-approve" label={t("corr.approve")} disabled={!online} onPress={() => { setDecisionNote(""); setDecisionOpen("approve"); }} /> : null}
                 {selected.actions.reject ? <Button testID="corr-reject" kind="dangerQuiet" label={t("corr.reject")} disabled={!online} onPress={() => { setDecisionNote(""); setDecisionOpen("reject"); }} /> : null}
@@ -408,7 +421,7 @@ export default function Corrections() {
                 {selected.actions.settleRefund ? <Button testID="corr-refund" kind="secondary" label={t("corr.settleRefund")} disabled={!online} onPress={() => { setRefundAmount(""); setDecisionNote(""); setDecisionOpen("refund"); }} /> : null}
               </View>
             ) : null}
-            {!owner ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.ownerOnly")}</Text> : null}
+            {!canDecide ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.ownerOnly")}</Text> : null}
 
             <View style={{ gap: 5 }}>
               <Text style={{ color: c.ink, fontWeight: "700" }}>{t("corr.timeline")}</Text>

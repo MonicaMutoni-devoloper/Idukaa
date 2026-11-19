@@ -85,6 +85,7 @@ The original sale's own audit entry (`sale.correction.reversal`) is separate and
 
 - `@Roles("owner", "manager")` guards the whole controller.
 - Approval, rejection, information requests and settlement additionally require `owner`.
+- The owner check uses the active shop membership role, so a stale cached account role cannot demote a real owner or promote a manager.
 - Approval is an online API call, not a sync operation. A device can queue a request but can never approve it locally.
 - The server derives the shop from the authenticated session. It ignores any shop ID, owner ID or approval reference supplied by the client.
 - A manager can request a correction for their own shop; the owner approval route is the only path to financial effect.

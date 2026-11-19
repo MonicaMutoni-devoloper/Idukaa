@@ -222,7 +222,7 @@ export class CorrectionsService {
     return { correctionId: input.correctionId, duplicate: false, status: "pending_approval", originalFingerprint: fp };
   }
 
-  async list(shopId: string) {
+  async list(shopId: string, canDecide = false) {
     const rows = await this.db.query(
       `SELECT sc.*, ru.full_name AS requested_name, ou.full_name AS owner_name,
               s.sold_at, s.user_id AS cashier_id, cu.full_name AS cashier_name
@@ -236,10 +236,10 @@ export class CorrectionsService {
                  sc.requested_at DESC, sc.id DESC LIMIT 200`,
       [shopId],
     );
-    return { corrections: rows.map((r) => this.shape(r)) };
+    return { corrections: rows.map((r) => this.shape(r, canDecide)), canDecide };
   }
 
-  async get(shopId: string, id: string) {
+  async get(shopId: string, id: string, canDecide = false) {
     const [row] = await this.db.query(
       `SELECT sc.*, ru.full_name AS requested_name, ou.full_name AS owner_name,
               s.sold_at, s.user_id AS cashier_id, cu.full_name AS cashier_name
@@ -267,7 +267,7 @@ export class CorrectionsService {
       ))[0]
       : null;
     return {
-      ...this.shape(row),
+      ...this.shape(row, canDecide),
       events,
       correctedSale: corrected ? {
         id: corrected.id, status: corrected.status, at: iso(corrected.sold_at),
@@ -497,7 +497,7 @@ export class CorrectionsService {
 
       if (corr.alert_id) await this.linkAlert(c, u, corr.alert_id, id, correctedSaleId, status, note ?? corr.reason);
     });
-    return this.get(shopId, id);
+    return this.get(shopId, id, true);
   }
 
   async reject(u: AuthUser, id: string, note: string) {
@@ -531,7 +531,7 @@ export class CorrectionsService {
         );
       }
     });
-    return this.get(shopId, id);
+    return this.get(shopId, id, true);
   }
 
   /** A request for more evidence does not change the proposal or the sale. */
@@ -553,7 +553,7 @@ export class CorrectionsService {
         entity: "sale_correction", entityId: id, reason: note.trim(),
       });
     });
-    return this.get(shopId, id);
+    return this.get(shopId, id, true);
   }
 
   /**
@@ -598,7 +598,7 @@ export class CorrectionsService {
         reason: note.trim(),
       });
     });
-    return this.get(shopId, id);
+    return this.get(shopId, id, true);
   }
 
   private assertCorrectable(sale: any) {
@@ -679,7 +679,7 @@ export class CorrectionsService {
     });
   }
 
-  private shape(r: any) {
+  private shape(r: any, canDecide = false) {
     const snapshot = r.original_snapshot as any;
     const proposed = r.proposed as any;
     const originalCollected = Number(r.original_collected);
@@ -736,6 +736,8 @@ export class CorrectionsService {
       settlementNote: r.settlement_note ?? null,
       settledAt: iso(r.settled_at),
       updatedAt: iso(r.updated_at),
+      /** Authority, not workflow state: only the shop owner may authorise or settle. */
+      canDecide,
       actions: {
         approve: r.status === "pending_approval",
         reject: r.status === "pending_approval",

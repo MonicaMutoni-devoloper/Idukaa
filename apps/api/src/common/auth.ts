@@ -6,6 +6,13 @@ import { Db } from "../db/db.service";
 import { authLog } from "./auth-log";
 
 export interface AuthUser { id: string; role: Role; shopId: string | null; subscriptionStatus?: string | null }
+/**
+ * The role that applies to the user's active shop. Membership is authoritative; users.role is only
+ * the denormalized copy used when the account has no shop (system administration).
+ */
+export function activeShopRole(u: { shop_id?: string | null; role: Role; membership_role?: Role | null }): Role {
+  return u.shop_id ? (u.membership_role ?? u.role) : u.role;
+}
 export const Roles = (...r: Role[]) => SetMetadata("roles", r);
 export const Public = () => SetMetadata("public", true);
 export const Me = createParamDecorator((_d, ctx: ExecutionContext): AuthUser => ctx.switchToHttp().getRequest().user);
@@ -35,6 +42,7 @@ export class AuthGuard implements CanActivate {
               s.subscription_required,
               (SELECT ss.status FROM shop_subscriptions ss WHERE ss.shop_id=u.shop_id ORDER BY ss.created_at DESC LIMIT 1) AS subscription_status,
               (SELECT ss.ends_at FROM shop_subscriptions ss WHERE ss.shop_id=u.shop_id ORDER BY ss.created_at DESC LIMIT 1) AS subscription_ends_at,
+              (SELECT m.role FROM shop_memberships m WHERE m.user_id=u.id AND m.shop_id=u.shop_id AND m.status='active') AS membership_role,
               EXISTS(SELECT 1 FROM shop_memberships m WHERE m.user_id=u.id AND m.shop_id=u.shop_id AND m.status='active') AS has_membership
          FROM users u LEFT JOIN shops s ON s.id = u.shop_id WHERE u.id=$1`, [p.sub]);
     if (!u || !u.active || u.account_status !== "active") {
@@ -72,11 +80,15 @@ export class AuthGuard implements CanActivate {
       authLog(req, "guard.rejected", "subscription_inactive", { userId: u.id, shopId: u.shop_id, status: u.subscription_status ?? "missing" });
       throw new ForbiddenException("subscription_inactive");
     }
-    req.user = { id: u.id, role: u.role, shopId: u.shop_id,
+    // The active membership is the authority for the current shop. users.role mirrors it when the
+    // user switches shops, but a stale or manually-edited copy must never demote a real owner (or
+    // promote a manager) in the API.
+    const role = activeShopRole(u);
+    req.user = { id: u.id, role, shopId: u.shop_id,
       subscriptionStatus: subscriptionActive ? "active" : (u.subscription_status ?? null) } satisfies AuthUser;
     const need = this.ref.getAllAndOverride<Role[]>("roles", [ctx.getHandler(), ctx.getClass()]);
-    if (need && !need.includes(u.role)) {
-      authLog(req, "guard.rejected", "role_not_allowed", { userId: u.id, role: u.role });
+    if (need && !need.includes(role)) {
+      authLog(req, "guard.rejected", "role_not_allowed", { userId: u.id, role });
       throw new ForbiddenException("role_not_allowed");
     }
     return true;

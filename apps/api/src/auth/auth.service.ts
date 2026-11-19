@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import QRCode from "qrcode";
 import { randomUUID } from "node:crypto";
 import { Db } from "../db/db.service";
+import { activeShopRole } from "../common/auth";
 import { audit } from "../audits/audit";
 import { NotificationService } from "../notifications/notifications.service";
 import { MailService } from "../mail/mail.service";
@@ -56,7 +57,7 @@ const resetUrl = (token: string) => {
 };
 
 const sessionUser = (u: any): SessionUser => ({
-  id: u.id, name: u.full_name, role: u.role, shopId: u.shop_id ?? null, shopName: u.shop_name ?? null,
+  id: u.id, name: u.full_name, role: activeShopRole(u), shopId: u.shop_id ?? null, shopName: u.shop_name ?? null,
 });
 
 /**
@@ -114,7 +115,10 @@ export class AuthService {
     // Checked before the lookup so a locked address cannot be used to probe which accounts exist.
     this.lockout?.assertAllowed(email);
     const [u] = await this.db.query(
-      "SELECT u.*, s.name AS shop_name FROM users u LEFT JOIN shops s ON s.id=u.shop_id WHERE lower(u.email)=lower($1)",
+      `SELECT u.*, s.name AS shop_name,
+              (SELECT m.role FROM shop_memberships m
+                WHERE m.user_id=u.id AND m.shop_id=u.shop_id AND m.status='active') AS membership_role
+         FROM users u LEFT JOIN shops s ON s.id=u.shop_id WHERE lower(u.email)=lower($1)`,
       [email],
     );
     const okPassword = !!u && (await bcrypt.compare(password, u.password_hash));
@@ -240,7 +244,10 @@ export class AuthService {
         throw new UnauthorizedException("refresh_expired");
       }
       const [u] = await this.db.query(
-        "SELECT u.*, s.name AS shop_name FROM users u LEFT JOIN shops s ON s.id=u.shop_id WHERE u.id=$1",
+        `SELECT u.*, s.name AS shop_name,
+                (SELECT m.role FROM shop_memberships m
+                  WHERE m.user_id=u.id AND m.shop_id=u.shop_id AND m.status='active') AS membership_role
+           FROM users u LEFT JOIN shops s ON s.id=u.shop_id WHERE u.id=$1`,
         [row.user_id],
       );
       if (!u || !u.active || u.account_status !== "active") throw new UnauthorizedException("session_revoked");
@@ -315,11 +322,14 @@ export class AuthService {
 
   async me(userId: string) {
     const [row] = await this.db.query(
-      `SELECT u.id, u.email, u.full_name, u.role, u.shop_id, u.totp_enabled_at, s.name AS shop_name
+      `SELECT u.id, u.email, u.full_name, u.role, u.shop_id, u.totp_enabled_at, s.name AS shop_name,
+              (SELECT m.role FROM shop_memberships m
+                WHERE m.user_id=u.id AND m.shop_id=u.shop_id AND m.status='active') AS membership_role
        FROM users u LEFT JOIN shops s ON s.id=u.shop_id WHERE u.id=$1`, [userId]);
     if (!row) throw new UnauthorizedException("session_expired");
     return {
-      id: row.id, email: row.email, name: row.full_name, role: row.role, shopId: row.shop_id, shopName: row.shop_name ?? null,
+      id: row.id, email: row.email, name: row.full_name, role: activeShopRole(row),
+      shopId: row.shop_id, shopName: row.shop_name ?? null,
       twoFactorEnabled: !!row.totp_enabled_at,
     };
   }

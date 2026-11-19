@@ -14,9 +14,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { OP_ROLES, canRunOp } from "../src/sync/op-permissions";
+import { activeShopRole } from "../src/common/auth";
 
 const MANAGER_OPS = Object.entries(OP_ROLES).filter(([, roles]) => roles.includes("manager"));
 const ALL_OPS = Object.keys(OP_ROLES) as (keyof typeof OP_ROLES)[];
+
+test("the active shop membership decides the role, not a stale users.role copy", () => {
+  assert.equal(activeShopRole({ shop_id: "shop-1", role: "manager", membership_role: "owner" }), "owner");
+  assert.equal(activeShopRole({ shop_id: "shop-1", role: "owner", membership_role: "manager" }), "manager");
+  assert.equal(activeShopRole({ shop_id: null, role: "system_admin" }), "system_admin");
+  assert.equal(activeShopRole({ shop_id: "shop-1", role: "owner" }), "owner", "legacy fallback");
+});
 
 test("the owner can perform every operation a manager can, and every operation at all", () => {
   for (const [type, roles] of MANAGER_OPS) {

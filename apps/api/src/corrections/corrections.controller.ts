@@ -43,7 +43,7 @@ export class CorrectionsController {
   @Get()
   async list(@Me() u: AuthUser) {
     if (!u.shopId) throw new BadRequestException("shop_required");
-    return this.corrections.list(u.shopId);
+    return this.corrections.list(u.shopId, u.role === "owner");
   }
 
   /** The sale, its immutable snapshot and whether this user may start a correction. */
@@ -58,7 +58,7 @@ export class CorrectionsController {
   async get(@Me() u: AuthUser, @Param("id") id: string) {
     if (!uuid.safeParse(id).success) throw new NotFoundException("correction_not_found");
     if (!u.shopId) throw new BadRequestException("shop_required");
-    return this.corrections.get(u.shopId, id);
+    return this.corrections.get(u.shopId, id, u.role === "owner");
   }
 
   /**
