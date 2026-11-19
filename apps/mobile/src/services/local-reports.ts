@@ -426,6 +426,10 @@ export function computeLocalSummary(input: LocalSummaryInput): LocalSummaryPaylo
     const purchases = recs.purchases.filter((p) => inRange(p.at, a, b));
     const receipts = purchases.filter((p) => p.receiveNow);
 
+    const salesReturns = recs.adjustments
+      .filter((adj) => adj.reason === "sale_return" && inRange(adj.at, a, b))
+      .reduce((s, adj) => s + Math.max(0, num(adj.refundAmount)), 0);
+
     let grossSales = 0, discounts = 0, cashCollected = 0, receivables = 0, unitsSold = 0;
     for (const s of sales) {
       const gross = s.lines.reduce((sum, l) => sum + lineAmount(l.sellingQty ?? l.qty, l.unitPrice), 0);
@@ -469,7 +473,7 @@ export function computeLocalSummary(input: LocalSummaryInput): LocalSummaryPaylo
     }
 
     const base = summarize({
-      grossSales, discounts, salesReturns: 0, cogs,
+      grossSales, discounts, salesReturns, cogs,
       operatingExpenses, expensesPaid, cashCollected,
       inventoryPurchases: purchases.reduce((s, p) =>
         s + p.lines.reduce((t, l) => t + lineAmount(l.qty, l.unitCost), 0), 0),

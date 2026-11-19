@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { z } from "zod";
 import {
-  TARGET_GROSS_MARGIN_BPS, periodCosts, priceBelowCost, replayLedger, summarize, valueAt,
+  TARGET_GROSS_MARGIN_BPS, allocateLineDiscounts, periodCosts, priceBelowCost, replayLedger, summarize, valueAt,
   type ExpenseChange, type Movement, type PeriodSummary, type ProductFinanceRow,
 } from "@sms/shared";
 import { Db } from "../db/db.service";
@@ -148,16 +148,36 @@ export class FinanceService {
     const mv = moves ?? await this.movements(shopId);
     const products = await this.db.query<any>(
       "SELECT id, name, code, unit, selling_unit, selling_price, low_stock_threshold, units_per_selling FROM products WHERE shop_id=$1 AND active ORDER BY name", [shopId]);
-
-    // Revenue per product, net of a proportional share of the sale-level discount (numeric rounding,
-    // so a product's share never exceeds its line). Groups in SQL — never loads all transactions.
-    const revRows = await this.db.query<any>(
-      `SELECT sl.product_id AS id, COALESCE(SUM(sl.qty),0)::bigint AS units,
-              COALESCE(SUM(GREATEST(0, sl.line_amount - ROUND(s.discount::numeric * sl.line_amount / NULLIF(s.gross_amount,0)))),0)::bigint AS net
-       FROM sale_lines sl JOIN sales s ON s.id = sl.sale_id
-       WHERE s.shop_id=$1 AND s.status='posted' AND s.sold_at>=$2 AND s.sold_at<$3
-       GROUP BY sl.product_id`, [shopId, from, to]);
-    const revenue = new Map(revRows.map((r: any) => [r.id, { units: Number(r.units), net: Number(r.net) }]));
+    // Revenue per product, net of each product's EXACT share of the sale-level discount. The shared
+    // `allocateLineDiscounts()` (largest-remainder, integer RWF) is the single source of truth used
+    // by the sale detail view and the offline reports; product profitability must use it too, so a
+    // product's revenue reconciles with the headline net sales to the franc.
+    const saleRows = await this.db.query<any>(
+      `SELECT s.id AS sale_id, sl.product_id AS id, sl.qty, sl.line_amount, s.discount
+         FROM sale_lines sl JOIN sales s ON s.id = sl.sale_id
+        WHERE s.shop_id=$1 AND s.status='posted' AND s.sold_at>=$2 AND s.sold_at<$3
+        ORDER BY s.id, sl.id`, [shopId, from, to]);
+    const revenue = new Map<string, { units: number; net: number }>();
+    // Group the sale's lines so the discount is allocated across the lines of ONE sale, never across
+    // the whole period (which would change every product's share).
+    const bySale = new Map<string, any[]>();
+    for (const r of saleRows) {
+      const list = bySale.get(String(r.sale_id)) ?? [];
+      list.push(r);
+      bySale.set(String(r.sale_id), list);
+    }
+    for (const lines of bySale.values()) {
+      const amounts = lines.map((r: any) => Number(r.line_amount));
+      const gross = amounts.reduce((s: number, a: number) => s + a, 0);
+      const discount = Math.min(Number(lines[0]?.discount ?? 0), gross);
+      const shares = allocateLineDiscounts(amounts, discount);
+      lines.forEach((r: any, i: number) => {
+        const cur = revenue.get(String(r.id)) ?? { units: 0, net: 0 };
+        cur.units += Number(r.qty);
+        cur.net += Number(r.line_amount) - (shares[i] ?? 0);
+        revenue.set(String(r.id), cur);
+      });
+    }
     // Refunds and returned units reduce the product's period revenue/units, matching the headline
     // salesReturns line. Returned resalable goods also reduce COGS through the ledger replay below.
     const retRows = await this.db.query<any>(

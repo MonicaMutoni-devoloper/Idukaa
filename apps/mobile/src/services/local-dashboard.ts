@@ -115,7 +115,7 @@ interface Repayment { id: string; at: string; customerId: string; amount: number
 interface Expense { id: string; at: string; category: string; amount: number; paid: boolean }
 interface PurchaseLine { productId: string; qty: number; unitCost: number }
 interface Purchase { id: string; at: string; receivedAt: string; receiveNow: boolean; paid: number; lines: PurchaseLine[]; seq?: number }
-interface Adjustment { id: string; at: string; productId: string; qty: number; reason: string; status: string }
+interface Adjustment { id: string; at: string; productId: string; qty: number; reason: string; status: string; refundAmount?: number; seq?: number }
 interface RecordSet {
   sales: Sale[]; expenses: Expense[]; purchases: Purchase[]; adjustments: Adjustment[]; repayments: Repayment[];
   openings: { productId: string; at: string; qty: number; unitCost: number; seq?: number }[];
@@ -221,6 +221,7 @@ export function parseRecords(records: LocalRecord[]): RecordSet {
         out.adjustments.push({
           id: String(p.adjustmentId ?? r.op_id), at, productId: String(p.productId ?? ""),
           qty: num(p.qty), reason: String(p.reason ?? "other"), status: r.status,
+          refundAmount: num(p.refundAmount), seq: order,
         });
         break;
       case "product.upsert": {
@@ -250,6 +251,23 @@ export function buildLedger(recs: RecordSet): Map<string, Movement[]> {
     for (const l of p.lines) add(l.productId, { type: "receipt", qty: l.qty, unitCost: l.unitCost, occurredAt: p.receivedAt, seq: p.seq });
   }
   for (const s of recs.sales) for (const l of s.lines) add(l.productId, { type: "sale", qty: -l.qty, occurredAt: s.at, seq: s.seq });
+  // Offline adjustments are provisional: they are included so a manager sees the effect of a return,
+  // damage or expiry immediately, but every one of them still needs the server's approval before it
+  // becomes a confirmed stock movement. The movement type mirrors the server's ADJ_TYPE mapping.
+  for (const a of recs.adjustments) {
+    if (!a.productId) continue;
+    let type: Movement["type"];
+    switch (a.reason) {
+      case "damage": type = "damage"; break;
+      case "expiry": type = "expiry"; break;
+      case "supplier_return": type = "supplier_return"; break;
+      case "sale_return": type = "sale_return"; break;
+      default: type = "adjustment"; break;
+    }
+    // sale_return restores stock; its cost is the original sale cost, which this device may not
+    // hold, so leave unitCost undefined and let the replay use the running average as a provisional value.
+    add(a.productId, { type, qty: a.qty, occurredAt: a.at, seq: a.seq });
+  }
   for (const [productId, list] of m) m.set(productId, ledgerOrder(list));
   return m;
 }
@@ -322,10 +340,15 @@ export function computeLocalDashboard(input: LocalDashboardInput): LocalDashboar
       - recs.repayments.filter((p) => p.at < b).reduce((s, p) => s + p.amount, 0);
     const operatingExpenses = expenses.reduce((s, e) => s + e.amount, 0);
     const expensesPaid = expenses.filter((e) => e.paid).reduce((s, e) => s + e.amount, 0);
+    // Sale returns recorded on this device (adjustment.request reason sale_return) reduce net sales
+    // in their return period, like the server. They are provisional until the server confirms them.
+    const salesReturns = recs.adjustments
+      .filter((adj) => adj.reason === "sale_return" && inRange(adj.at, a, b))
+      .reduce((s, adj) => s + Math.max(0, num(adj.refundAmount)), 0);
     const products = new Set(receipts.flatMap((p) => p.lines.map((l) => l.productId)));
     const value = receipts.reduce((s, p) => s + p.lines.reduce((t, l) => t + lineAmount(l.qty, l.unitCost), 0), 0);
     const base = summarize({
-      grossSales, discounts, salesReturns: 0,
+      grossSales, discounts, salesReturns,
       cogs: financials ? cogsIn(a, b) : 0,
       operatingExpenses, expensesPaid, cashCollected: paid,
       inventoryPurchases: purchases.reduce((s, p) => s + purchaseTotal(p), 0),
@@ -384,6 +407,12 @@ export function computeLocalDashboard(input: LocalDashboardInput): LocalDashboar
     const k = bucketKey(s.at);
     netByBucket.set(k, (netByBucket.get(k) ?? 0) + saleGross(s) - Math.min(s.discount, saleGross(s)));
     txByBucket.set(k, (txByBucket.get(k) ?? 0) + 1);
+  }
+  // Sale returns reduce net sales in their return period, including in the trend.
+  for (const adj of recs.adjustments) {
+    if (adj.reason !== "sale_return" || !inRange(adj.at, from, to)) continue;
+    const k = bucketKey(adj.at);
+    netByBucket.set(k, (netByBucket.get(k) ?? 0) - Math.max(0, num(adj.refundAmount)));
   }
   const expByBucket = new Map<string, number>();
   for (const e of recs.expenses) {

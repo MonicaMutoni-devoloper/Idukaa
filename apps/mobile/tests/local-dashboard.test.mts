@@ -214,3 +214,32 @@ test("discounts are split across lines exactly, so product revenue adds up to ne
   assert.equal(r.data.operations.netSales, 2700);
   assert.equal(total, 2700, "no franc lost or duplicated by the discount split");
 });
+
+test("an offline sale return reduces net sales and COGS in its period", () => {
+  const records = [
+    purchase("op1", "2026-11-02T08:00:00.000Z"),
+    sale("op2", "2026-11-03T09:00:00.000Z", { discount: 0, amountPaid: 2000 }, "synced"),
+    rec("op3", "adjustment.request", "2026-11-03T10:00:00.000Z", {
+      adjustmentId: "adj1", productId: "p1", qty: 1000, reason: "sale_return", refundAmount: 1000,
+    }, "pending_approval"),
+  ];
+  const r = run(records, [product({ on_hand: 9000 })]);
+  assert.equal(r.data.operations.netSales, 1000, "2,000 sold less the 1,000 refunded");
+  assert.equal(r.data.financials?.cogs, 500, "the returned unit reverses its 500 cost");
+  assert.equal(r.data.financials?.grossProfit, 500);
+  assert.equal(r.data.operations.inventoryValue, 4500, "9 units back on hand at 500");
+});
+
+test("an offline damage adjustment quarantines stock as a loss, not as cost of sales", () => {
+  const records = [
+    purchase("op1", "2026-11-02T08:00:00.000Z"),
+    rec("op2", "adjustment.request", "2026-11-03T09:00:00.000Z", {
+      adjustmentId: "adj1", productId: "p1", qty: -1000, reason: "damage",
+    }, "pending_approval"),
+  ];
+  const r = run(records, [product({ on_hand: 9000 })]);
+  assert.equal(r.data.operations.netSales, 0);
+  assert.equal(r.data.financials?.cogs, 0);
+  assert.equal(r.data.financials?.stockLosses, 500, "one damaged unit at the 500 moving average");
+  assert.equal(r.data.operations.inventoryValue, 4500);
+});
