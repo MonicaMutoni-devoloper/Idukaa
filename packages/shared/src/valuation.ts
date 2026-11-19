@@ -34,6 +34,13 @@ export interface Movement {
    * a replay has a sequence, the historical `occurredAt` ordering is kept.
    */
   seq?: number;
+  /**
+   * Reporting-only marker for a movement whose sale was reversed by a correction. The original sale
+   * and the correction's stock-return leg must not contribute COGS in a later period: the corrected
+   * sale is the one posted sale that carries the corrected revenue and cost. Inventory replay still
+   * includes the movement; only period COGS skips it.
+   */
+  cogsExcluded?: boolean;
 }
 
 export interface ValuationResult {
@@ -162,6 +169,7 @@ export function periodCosts(movements: Movement[], from: string, to: string): { 
   sorted.forEach((m, i) => {
     if (m.occurredAt < from || m.occurredAt >= to) return;
     const cost = r.perMovementCost[i] ?? 0;
+    if (m.cogsExcluded) return;
     if (m.type === "sale") cogs += cost;
     else if (m.type === "sale_return") cogs -= cost;
     else if (m.qty < 0 && m.type !== "supplier_return" && m.type !== "transfer_out") lossValue += cost;

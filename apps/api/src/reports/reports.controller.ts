@@ -446,17 +446,23 @@ export class ReportsController {
               s.gross_amount, s.discount, s.amount_paid, s.payment_method, s.status,
               to_char(s.reversed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS reversed_at,
               s.reversal_reason, s.cancellation_id, s.cancellation_approval_ref,
+              s.reversal_id, s.correction_id, s.corrects_sale_id,
               to_char(s.dispatched_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS dispatched_at,
               us.full_name AS cashier
        FROM sales s JOIN users us ON us.id=s.user_id
        WHERE s.id=$1 AND s.shop_id=$2`, [id, u.shopId]);
     if (!sale) throw new NotFoundException("sale_not_found");
     const lines = await this.db.query(
-      `SELECT sl.product_id, p.name, p.code, p.unit, sl.qty, sl.unit_price, sl.line_amount
+      `SELECT sl.product_id, p.name, p.code, p.unit, p.selling_unit, sl.qty, sl.unit_price,
+              sl.line_amount, sl.qty_entered
        FROM sale_lines sl JOIN products p ON p.id=sl.product_id
        WHERE sl.sale_id=$1 ORDER BY sl.id`, [id]);
     // Exact integer split of the sale-level discount across lines, so line nets always sum to the sale net.
     const shares = allocateLineDiscounts(lines.map((l: any) => Number(l.line_amount)), Number(sale.discount));
+    const [correction] = await this.db.query(
+      `SELECT id, status, corrected_sale_id, reversal_id
+         FROM sale_corrections WHERE shop_id=$1 AND sale_id=$2
+        ORDER BY requested_at DESC, id DESC LIMIT 1`, [u.shopId, id]);
     return {
       sale: {
         id: sale.id, at: sale.at, cashier: sale.cashier, paymentMethod: sale.payment_method, status: sale.status,
@@ -465,12 +471,18 @@ export class ReportsController {
         balance: Number(sale.gross_amount) - Number(sale.discount) - Number(sale.amount_paid),
         reversedAt: sale.reversed_at ?? null, reversalReason: sale.reversal_reason ?? null,
         cancellationId: sale.cancellation_id ?? null, approvalRef: sale.cancellation_approval_ref ?? null,
-        dispatchedAt: sale.dispatched_at ?? null,
+        dispatchedAt: sale.dispatched_at ?? null, reversalId: sale.reversal_id ?? null,
+        correctionId: sale.correction_id ?? null, correctsSaleId: sale.corrects_sale_id ?? null,
       },
+      correction: correction ? {
+        id: correction.id, status: correction.status,
+        correctedSaleId: correction.corrected_sale_id ?? null, reversalId: correction.reversal_id ?? null,
+      } : null,
       returns: await this.returns.listForSale(u.shopId!, id),
       lines: lines.map((l: any, i: number) => ({
-        productId: l.product_id, name: l.name, code: l.code, unit: l.unit,
-        qty: Number(l.qty), unitPrice: Number(l.unit_price), lineAmount: Number(l.line_amount),
+        productId: l.product_id, name: l.name, code: l.code, unit: l.unit, sellingUnit: l.selling_unit ?? null,
+        qty: Number(l.qty), qtyEntered: l.qty_entered === null ? Number(l.qty) : Number(l.qty_entered),
+        unitPrice: Number(l.unit_price), lineAmount: Number(l.line_amount),
         discount: shares[i] ?? 0, net: Number(l.line_amount) - (shares[i] ?? 0),
       })),
     };
@@ -485,7 +497,7 @@ export class ReportsController {
     const offset = Math.max(0, Number(q.offset) || 0);
     const p = [u.shopId, from, to, limit, offset];
     const kind = q.kind;
-    if (kind === "sales") return this.db.query(`SELECT s.id, s.sold_at AT TIME ZONE 'UTC' AS at, s.gross_amount, s.discount, s.amount_paid, s.payment_method, s.status, s.customer_id, s.due_at, c.name AS customer, us.full_name AS by,
+    if (kind === "sales") return this.db.query(`SELECT s.id, s.sold_at AT TIME ZONE 'UTC' AS at, s.gross_amount, s.discount, s.amount_paid, s.payment_method, s.status, s.customer_id, s.due_at, s.correction_id, s.corrects_sale_id, c.name AS customer, us.full_name AS by,
         (SELECT COALESCE(SUM(sl.qty),0)::bigint FROM sale_lines sl WHERE sl.sale_id=s.id) AS units,
         (SELECT COALESCE(string_agg(pr.name, ', ' ORDER BY pr.name), '') FROM sale_lines sl JOIN products pr ON pr.id=sl.product_id WHERE sl.sale_id=s.id) AS products,
         (SELECT COALESCE(json_agg(json_build_object(

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Text, View } from "react-native";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { formatQty, formatRwf, kigaliDay } from "@sms/shared";
 import {
-  Badge, Banner, Button, ConfirmDialog, Field, KeyValue, Loading, Modal, Screen, Segmented,
+  Badge, Banner, Button, Card, ConfirmDialog, Field, KeyValue, Loading, Modal, Screen, Segmented,
 } from "../../src/components/ui";
 import { DayRangeField } from "../../src/components/date-range-picker";
 import {
@@ -35,7 +35,13 @@ type Choice = ReportPeriod | "custom";
 
 interface SaleLine { productId: string; name: string; code: string; unit: string; qty: number; unitPrice: number; lineAmount: number; discount?: number; net?: number }
 interface SaleDetail {
-  sale: { id: string; at: string; cashier: string; paymentMethod: string; status: string; grossAmount: number; discount: number; amountPaid: number; net: number; balance: number; reversedAt: string | null; reversalReason: string | null };
+  sale: {
+    id: string; at: string; cashier: string; paymentMethod: string; status: string; grossAmount: number;
+    discount: number; amountPaid: number; net: number; balance: number; reversedAt: string | null;
+    reversalReason: string | null; reversalId?: string | null; correctionId?: string | null;
+    correctsSaleId?: string | null;
+  };
+  correction?: { id: string; status: string; correctedSaleId: string | null; reversalId: string | null } | null;
   lines: SaleLine[];
 }
 
@@ -70,6 +76,7 @@ export default function Reports() {
   const businessVersion = useSync((s) => s.businessVersion);
   const shopId = user?.shopId ?? null;
   const params = useLocalSearchParams<{ kind?: string; from?: string; to?: string }>();
+  const router = useRouter();
 
   const paramOverride = useMemo(
     () => (params.from && params.to && params.from < params.to ? { from: params.from, to: params.to } : null),
@@ -348,6 +355,12 @@ export default function Reports() {
       <Modal open={detailOpen} onClose={() => setDetailOpen(false)} title={t("reports.saleDetail")}
         description={detail ? receiptNo(detail.sale.id) : undefined} width={560} scroll
         footer={<>
+          {detail && (user?.role === "owner" || user?.role === "manager") && detail.sale.status === "posted" ? (
+            <Button testID={`correct-${detail.sale.id}`} kind="secondary" label={t("corr.action")} onPress={() => {
+              setDetailOpen(false);
+              router.push(`/corrections?saleId=${encodeURIComponent(detail.sale.id)}` as any);
+            }} />
+          ) : null}
           {detail && user?.role === "owner" && detail.sale.status === "posted" ? (
             <Button testID={`void-${detail.sale.id}`} kind="danger" label={t("reports.void")} onPress={() => {
               const sale = detail.sale;
@@ -362,7 +375,17 @@ export default function Reports() {
             <View style={{ flexDirection: "row", gap: space.md, flexWrap: "wrap" }}>
               <Badge tone={detail.sale.status === "reversed" ? "danger" : "ok"} label={t(detail.sale.status === "reversed" ? "reports.reversed" : "reports.posted")} />
               <Badge tone="neutral" label={t(`sell.${detail.sale.paymentMethod}` as any)} />
+              {detail.sale.correctsSaleId ? <Badge tone="info" label={t("corr.correctedSale")} /> : null}
+              {detail.correction ? <Badge tone={detail.correction.status === "completed" ? "ok" : "warn"} label={t(`corr.status.${detail.correction.status}` as any)} /> : null}
             </View>
+            {detail.correction || detail.sale.correctsSaleId ? (
+              <Card tone="info" style={{ padding: space.md, gap: 2 }}>
+                <Text style={{ color: c.ink, fontWeight: "700", marginBottom: 3 }}>{t("corr.relationship")}</Text>
+                <KeyValue label={t("corr.originalSale")} value={receiptNo(detail.sale.correctsSaleId ?? detail.sale.id)} />
+                <KeyValue label={t("corr.reversal")} value={detail.sale.reversalId ? receiptNo(detail.sale.reversalId) : detail.correction?.reversalId ? receiptNo(detail.correction.reversalId) : "—"} />
+                <KeyValue label={t("corr.correctedSale")} value={detail.sale.correctsSaleId ? receiptNo(detail.sale.id) : detail.correction?.correctedSaleId ? receiptNo(detail.correction.correctedSaleId) : t("corr.pendingStatus")} />
+              </Card>
+            ) : null}
             <View style={{ gap: 2 }}>
               <KeyValue label={t("common.date")} value={new Date(detail.sale.at).toLocaleString(undefined, { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })} />
               <KeyValue label={t("reports.cashier")} value={detail.sale.cashier} />

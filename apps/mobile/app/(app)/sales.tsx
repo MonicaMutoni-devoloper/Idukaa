@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Switch, Text, View } from "react-native";
 import { formatQty, formatRwf } from "@sms/shared";
+import { useRouter } from "expo-router";
 import { Badge, Banner, Button, Card, Empty, Field, Loading, Modal, Screen, Segmented, useToasts } from "../../src/components/ui";
 import { useT } from "../../src/localization";
 import { enqueue, listProducts, type LocalProduct } from "../../src/database";
@@ -36,7 +37,7 @@ const day = 86_400_000;
 const conditionTone = (c: Condition) => (c === "resalable" ? "ok" : c === "damaged" ? "danger" : c === "expired" ? "warn" : "neutral") as "ok" | "danger" | "warn" | "neutral";
 
 export default function Sales() {
-  const t = useT(); const c = useTheme(); const user = useSession((s) => s.user)!; const toast = useToasts((s) => s.push);
+  const t = useT(); const c = useTheme(); const router = useRouter(); const user = useSession((s) => s.user)!; const toast = useToasts((s) => s.push);
   const recordsVersion = useSync((s) => s.recordsVersion);
   const [tab, setTab] = useState<Tab>("sales");
   const [sales, setSales] = useState<Sale[]>([]);
@@ -281,6 +282,7 @@ export default function Sales() {
                 {sale.status === "posted" ? (
                   <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
                     {sale.return_status !== "full" ? <Button kind="secondary" size="sm" label={t("sales.return")} onPress={() => void openReturn(sale)} /> : null}
+                    {(user.role === "owner" || user.role === "manager") ? <Button kind="secondary" size="sm" label={t("corr.action")} onPress={() => router.push(`/corrections?saleId=${encodeURIComponent(sale.id)}` as any)} /> : null}
                     {user.role === "owner" ? <Button kind="dangerQuiet" size="sm" label={t("sales.cancel")} onPress={() => openCancel(sale)} /> : null}
                   </View>
                 ) : null}

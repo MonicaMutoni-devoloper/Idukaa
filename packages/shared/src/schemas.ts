@@ -182,6 +182,33 @@ export const ReturnOp = z.object({
 });
 
 /**
+ * A request to correct a posted sale. It is deliberately only a REQUEST: a manager can record it
+ * offline, but it has no stock, money or report effect until an owner approves it online. The
+ * original sale is never included as mutable data; `saleId` is only a reference and the server
+ * takes its own immutable snapshot.
+ */
+export const CorrectionRequestOp = z.object({
+  type: z.literal("correction.request"),
+  payload: z.object({
+    correctionId: id,
+    saleId: id,
+    reason: z.string().trim().min(3).max(1000),
+    /** Text evidence/reference from the existing investigation; this app has no file attachments. */
+    evidence: z.string().trim().max(4000).optional(),
+    /** Whether the goods are still in the shop or have already been handed to the customer. */
+    fulfillment: z.enum(["not_handed_over", "handed_over"]),
+    discount: int.nonnegative(),
+    amountPaid: int.nonnegative(),
+    lines: z.array(z.object({
+      productId: id,
+      qty, unitPrice: int.nonnegative(), sellingQty: qty.optional(),
+    })).min(1).max(100),
+    /** The discount alert this correction came from, when started from an investigation. */
+    alertId: id.nullable().optional(),
+  }),
+});
+
+/**
  * A selling-price change is its own operation: it never purchases stock, never moves the ledger and
  * never rewrites a completed sale. `expectedPrice` is the price the device displayed; when the
  * server already has a different current price the change is refused as a conflict instead of
@@ -198,7 +225,7 @@ export const PriceOp = z.object({
   }),
 });
 
-export const Operation = z.discriminatedUnion("type", [SaleOp, ReturnOp, PriceOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp, CustomerOp, CreditPaymentOp, AlertActionOp]).and(
+export const Operation = z.discriminatedUnion("type", [SaleOp, ReturnOp, PriceOp, PurchaseOp, ReceiptOp, ExpenseOp, ExpenseUpdateOp, CountOp, AdjustmentOp, ProductOp, SupplierOp, CustomerOp, CreditPaymentOp, AlertActionOp, CorrectionRequestOp]).and(
   z.object({ opId: id, deviceId: z.string().min(1).max(64), createdAt: iso }),
 );
 export type OperationT = z.infer<typeof Operation>;

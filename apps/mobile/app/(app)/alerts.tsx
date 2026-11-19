@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import { useRouter } from "expo-router";
 import { categoriesForRole, type AlertAction, type ResolutionCategory as AlertResolutionCategory } from "@sms/shared";
 import { Badge, Banner, Button, Card, Empty, Field, KeyValue, Modal, Screen, Segmented, Skeleton, useToasts } from "../../src/components/ui";
 import { DayField } from "../../src/components/date-range-picker";
@@ -34,7 +35,8 @@ const EVENT_KEY: Record<string, Key> = {
   detected: "alerts.event.detected", investigate: "alerts.event.investigate", assign: "alerts.event.assign",
   note: "alerts.event.note", escalate: "alerts.event.escalate", escalated: "alerts.event.escalate",
   resolve: "alerts.event.resolve", resolved: "alerts.event.resolve", reopen: "alerts.event.reopen",
-  reopened: "alerts.event.reopened",
+  reopened: "alerts.event.reopened", correction_completed: "alerts.event.correction_completed",
+  correction_rejected: "alerts.event.correction_rejected",
 };
 const THRESHOLD_KEYS = [
   "discountPercentMin", "repeatedDiscountCount", "adjustmentCountMin", "expenseMultiple",
@@ -42,7 +44,7 @@ const THRESHOLD_KEYS = [
 ] as const;
 
 export default function Alerts() {
-  const t = useT(); const c = useTheme(); const toast = useToasts((s) => s.push);
+  const t = useT(); const c = useTheme(); const router = useRouter(); const toast = useToasts((s) => s.push);
   const user = useSession((s) => s.user)!;
   const [rows, setRows] = useState<Row[]>([]);
   const [summary, setSummary] = useState<AlertSummary | null>(null);
@@ -277,7 +279,16 @@ export default function Alerts() {
 
       {/* Details: what was detected, the records behind it, the investigation so far, and the actions. */}
       <Modal open={!!selected} onClose={() => setSelected(null)} title={selected?.title ?? ""} width={760} scroll
-        footer={<Button kind="secondary" label={t("common.close")} onPress={() => setSelected(null)} />}>
+        footer={<>
+          {selected?.entityType === "sale" && selected.entityId && (user.role === "owner" || user.role === "manager") ? (
+            <Button testID="alert-correct" kind="secondary" label={t("corr.action")} onPress={() => {
+              const saleId = selected.entityId!; const alertId = selected.id;
+              setSelected(null);
+              router.push(`/corrections?saleId=${encodeURIComponent(saleId)}&alertId=${encodeURIComponent(alertId)}` as any);
+            }} />
+          ) : null}
+          <Button kind="secondary" label={t("common.close")} onPress={() => setSelected(null)} />
+        </>}>
         {selected ? (
           <View style={{ gap: space.md }}>
             {selected.conflicted ? <Banner tone="danger" text={t("alerts.conflictBanner").replace("{count}", String(1))} /> : null}

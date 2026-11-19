@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { PoolClient } from "pg";
 import { Operation, currentAverageCost, lineAmount, normalizeRwandaPhone, priceBelowCost, toBaseQty, type Movement, type OperationT, type OpResult } from "@sms/shared";
 import { Db } from "../db/db.service";
@@ -7,6 +7,9 @@ import { canRunOp } from "./op-permissions";
 import { AlertConflictError, AlertsService } from "../alerts/alerts.service";
 import { ReturnsService } from "../returns/returns.service";
 import { PriceConflictError, PricingService } from "../returns/pricing.service";
+import { SalesReversalService } from "../sales/reversal.service";
+import { SalePostingError, SalePostingService } from "../sales/sale-posting.service";
+import { CorrectionsService } from "../corrections/corrections.service";
 import { emitShopChange } from "../realtime/hub";
 import type { AuthUser } from "../common/auth";
 
@@ -29,10 +32,14 @@ const NEG_ONLY = ["damage", "expiry", "supplier_return", "theft", "disposal", "s
 export class SyncService {
   private returns: ReturnsService;
   private pricing: PricingService;
-  constructor(private db: Db, private alerts: AlertsService, returns?: ReturnsService, pricing?: PricingService) {
+  private posting: SalePostingService;
+  private corrections: CorrectionsService;
+  constructor(private db: Db, private alerts: AlertsService, returns?: ReturnsService, pricing?: PricingService, posting?: SalePostingService, corrections?: CorrectionsService) {
     // The optional services keep the service constructible in narrow tests; Nest always injects them.
     this.returns = returns ?? new ReturnsService(db);
     this.pricing = pricing ?? new PricingService(db);
+    this.posting = posting ?? new SalePostingService(this.pricing);
+    this.corrections = corrections ?? new CorrectionsService(db, this.posting, new SalesReversalService());
   }
 
   /**
@@ -183,88 +190,15 @@ export class SyncService {
   private async apply(c: PoolClient, u: AuthUser, shopId: string, op: OperationT): Promise<OpResult["status"] | void> {
     switch (op.type) {
       case "sale.create": {
-        // A scheduled price that has come due is promoted before this sale is posted, so the price
-        // a cashier sees when the sale is committed is the price recorded on its lines.
-        await this.pricing.applyDuePrices(c, shopId);
-        const p = op.payload; const cfg = await this.lock(c, shopId, p.lines.map(l => l.productId));
-        const need = new Map<string, number>(); p.lines.forEach(l => need.set(l.productId, (need.get(l.productId) ?? 0) + l.qty));
-        for (const [pid, q] of need) { const have = await this.onHand(c, pid); if (have < q) throw new BizError("conflict", `insufficient_stock:${pid}:have=${have}:need=${q}`); }
-        // Price each line from the quantity the cashier entered. When the product sells in a unit
-        // other than its base unit the natural quantity is mandatory and must convert back to the
-        // base quantity exactly, so stock can never be deducted on one basis and charged on another.
-        const natural = p.lines.map((l) => {
-          const units = cfg.get(l.productId)!.unitsPerSelling;
-          if (l.sellingQty !== undefined) {
-            if (toBaseQty(l.sellingQty, units) !== l.qty) throw new BizError("rejected", `unit_conversion_mismatch:${l.productId}`);
-            return l.sellingQty;
-          }
-          if (units !== 1) throw new BizError("rejected", `selling_qty_required:${l.productId}`);
-          return l.qty;
-        });
-        const amounts = p.lines.map((l, i) => lineAmount(natural[i]!, l.unitPrice)); const gross = amounts.reduce((a, b) => a + b, 0);
-        if (p.discount > gross) throw new BizError("rejected", "discount_exceeds_total");
-        // Owner-set discount ceiling. Owners may exceed it (recorded in the audit trail); managers may not.
-        const { max_discount_percent } = await this.policy(c, shopId);
-        const maxDiscount = Number((BigInt(gross) * BigInt(max_discount_percent)) / 100n);
-        if (u.role !== "owner" && p.discount > maxDiscount) throw new BizError("rejected", `discount_above_limit:${max_discount_percent}%`);
-        if (p.amountPaid > gross - p.discount) throw new BizError("rejected", "paid_exceeds_total");
-        const net = gross - p.discount;
-        const credit = net - p.amountPaid;
-        let customer: any = null;
-        if (p.customerId) {
-          const { rows: [cu] } = await c.query(
-            "SELECT id, credit_limit, status FROM customers WHERE id=$1 AND shop_id=$2 FOR UPDATE", [p.customerId, shopId]);
-          if (!cu) throw new BizError("rejected", "unknown_customer");
-          if (cu.status !== "active") throw new BizError("rejected", "customer_blocked");
-          customer = cu;
+        // Posting lives in SalePostingService so a correction re-uses the exact same stock locks,
+        // unit checks, discount policy, credit rules and cost snapshots as an ordinary sale.
+        try {
+          const posted = await this.posting.postInTx(c, u, shopId, op.opId, op.payload, { applyDuePrices: true });
+          return posted.status === "pending_approval" ? "pending_approval" : undefined;
+        } catch (e: any) {
+          if (e instanceof SalePostingError) throw new BizError(e.kind, e.message);
+          throw e;
         }
-        if (credit > 0 && !customer) throw new BizError("rejected", "customer_required_for_credit");
-        if (credit > 0) {
-          const owing = await this.creditOutstanding(c, shopId, p.customerId!);
-          const limit = Number(customer.credit_limit);
-          // A zero limit means no credit line, not an unlimited one. This is an unconditional
-          // refusal: owner-approval and reason-override policies cannot be used to open a credit
-          // line the owner deliberately set to zero.
-          if (limit <= 0) throw new BizError("rejected", `credit_limit_exceeded:${limit}:owing=${owing}:proposed=${credit}`);
-          if (owing + credit > limit) {
-            const { credit_limit_policy } = await this.policy(c, shopId);
-            if (credit_limit_policy === "block") throw new BizError("rejected", `credit_limit_exceeded:${limit}:owing=${owing}:proposed=${credit}`);
-            if (credit_limit_policy === "owner_approval" && u.role !== "owner") {
-              const { rows: [pending] } = await c.query(
-                `INSERT INTO sales(id,shop_id,op_id,user_id,sold_at,gross_amount,discount,amount_paid,payment_method,customer_id,due_at,status)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending_approval')
-                 RETURNING id`,
-                [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod, p.customerId, p.dueAt ?? null]);
-              // No cost yet: this sale has moved no stock, and the cost it will move is the average
-              // at the moment the owner approves it (recorded then, in approveCredit).
-              for (const [i, l] of p.lines.entries()) {
-                await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered) VALUES ($1,$2,$3,$4,$5,$6)",
-                  [pending.id, l.productId, l.qty, l.unitPrice, amounts[i], natural[i]]);
-              }
-              await audit(c, { shopId, actorId: u.id, action: "sale.credit.approval_requested", entity: "sale", entityId: p.saleId,
-                newValue: { credit, limit, owing, customerId: p.customerId, reason: p.creditOverrideReason ?? null } });
-              return "pending_approval";
-            }
-            if (!p.creditOverrideReason) throw new BizError("rejected", "credit_override_reason_required");
-            await audit(c, { shopId, actorId: u.id, action: "sale.credit.override", entity: "sale", entityId: p.saleId,
-              newValue: { credit, limit, owing, customerId: p.customerId }, reason: p.creditOverrideReason });
-          }
-        }
-        // The cost of this sale is fixed here, once: the current weighted average of everything in
-        // the ledger, read under the product row locks taken above. Recording it on both the line and
-        // the movement is what keeps historical profit stable when a later (even backdated) receipt
-        // or a return arrives.
-        const costs = await this.costsNow(c, shopId, p.lines.map((l) => l.productId));
-        await c.query(
-          "INSERT INTO sales(id,shop_id,op_id,user_id,sold_at,gross_amount,discount,amount_paid,payment_method,customer_id,due_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-          [p.saleId, shopId, op.opId, u.id, p.soldAt, gross, p.discount, p.amountPaid, p.paymentMethod, p.customerId ?? null, p.dueAt ?? null]);
-        if (u.role !== "owner" && p.discount > 0) await audit(c, { shopId, actorId: u.id, action: "sale.discount", entity: "sale", entityId: p.saleId, newValue: { discount: p.discount, gross, limitPercent: max_discount_percent } });
-        for (const [i, l] of p.lines.entries()) {
-          const cost = costs.get(l.productId) ?? 0;
-          await c.query("INSERT INTO sale_lines(sale_id,product_id,qty,unit_price,line_amount,qty_entered,unit_cost) VALUES ($1,$2,$3,$4,$5,$6,$7)", [p.saleId, l.productId, l.qty, l.unitPrice, amounts[i], natural[i], cost]);
-          await this.mv(c, shopId, u.id, l.productId, "sale", -l.qty, cost, "sale", p.saleId, p.soldAt);
-        }
-        return;
       }
       case "purchase.create": {
         const p = op.payload; const cfg = await this.lock(c, shopId, p.lines.map(l => l.productId));
@@ -459,6 +393,22 @@ export class SyncService {
             newValue: { code: p.code, name: p.name, unit: p.unit, sellingPrice: p.sellingPrice, lowStockThreshold: p.lowStockThreshold, barcode: p.barcode ?? null,
               purchaseUnit: p.purchaseUnit ?? p.unit, sellingUnit: p.sellingUnit ?? p.unit,
               unitsPerPurchase: p.unitsPerPurchase ?? 1, unitsPerSelling: p.unitsPerSelling ?? 1, ...stock } });
+        }
+        return;
+      }
+      /**
+       * A correction request recorded offline. It freezes the reason, evidence and proposed values
+       * and posts no stock or money movement. Owner approval is a separate online route.
+       */
+      case "correction.request": {
+        try {
+          await this.corrections.createInTx(c, u, shopId, op.payload, op.opId);
+        } catch (e: any) {
+          if (e instanceof ConflictException) throw new BizError("conflict", String(e.message));
+          if (e instanceof BadRequestException || e instanceof ForbiddenException || e instanceof NotFoundException) {
+            throw new BizError("rejected", String(e.message));
+          }
+          throw e;
         }
         return;
       }

@@ -54,10 +54,27 @@ export class FinanceService {
   async movements(shopId: string): Promise<Map<string, Movement[]>> {
     // COALESCE on the timestamp and a filter on impossible rows: the ledger is NOT NULL by schema,
     // but a report must never throw because one legacy row cannot be ordered (see valuation#byTime).
-    const rows = await this.db.query("SELECT product_id, type, qty, unit_cost, seq, to_char(COALESCE(occurred_at, recorded_at) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at FROM stock_movements WHERE shop_id=$1 AND COALESCE(occurred_at, recorded_at) IS NOT NULL ORDER BY seq", [shopId]);
+    const rows = await this.db.query(
+      `SELECT sm.product_id, sm.type, sm.qty, sm.unit_cost, sm.seq,
+              to_char(COALESCE(sm.occurred_at, sm.recorded_at) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
+              (sm.type='sale' AND s.status='reversed') AS exclude_original_sale,
+              (sm.type='sale_return' AND sm.source_type IN ('sale_correction','sale_void')) AS exclude_reversal_leg
+         FROM stock_movements sm
+         LEFT JOIN sales s ON sm.type='sale' AND s.id=sm.source_id
+        WHERE sm.shop_id=$1 AND COALESCE(sm.occurred_at, sm.recorded_at) IS NOT NULL
+        ORDER BY sm.seq`, [shopId]);
     const m = new Map<string, Movement[]>();
     // `seq` is the immutable posting order; `occurredAt` stays the document date used by reports.
-    for (const r of rows) { const l = m.get(r.product_id) ?? []; l.push({ type: r.type, qty: r.qty, unitCost: r.unit_cost ?? undefined, occurredAt: r.at, seq: Number(r.seq) }); m.set(r.product_id, l); }
+    // A reversed original and the correction's return leg are excluded from period COGS: the
+    // corrected sale is the single posted transaction that owns the corrected revenue and cost.
+    for (const r of rows) {
+      const l = m.get(r.product_id) ?? [];
+      l.push({
+        type: r.type, qty: r.qty, unitCost: r.unit_cost ?? undefined, occurredAt: r.at, seq: Number(r.seq),
+        cogsExcluded: !!(r.exclude_original_sale || r.exclude_reversal_leg),
+      });
+      m.set(r.product_id, l);
+    }
     return m;
   }
 

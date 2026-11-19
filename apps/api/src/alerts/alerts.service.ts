@@ -362,6 +362,17 @@ export class AlertsService {
             WHERE shop_id=$1 AND entity_id=$2 AND action IN ('sale.credit.override','sale.discount','sale.credit.approval_requested')
             ORDER BY id DESC LIMIT 1`, [a.shop_id, s.id]);
         if (approval) related.push({ label: `Approval record (${approval.action})`, id: String(approval.id) });
+        const [correction] = await this.db.query(
+          `SELECT id, status, corrected_sale_id, reversal_id, requested_at
+             FROM sale_corrections WHERE shop_id=$1 AND sale_id=$2
+            ORDER BY requested_at DESC, id DESC LIMIT 1`, [a.shop_id, s.id]);
+        if (correction) {
+          fields.push({ label: "Correction status", value: correction.status });
+          related.push({ label: "Correction request", id: correction.id, at: correction.requested_at });
+          if (correction.corrected_sale_id) {
+            related.push({ label: "Corrected sale", id: correction.corrected_sale_id });
+          }
+        }
       }
     }
 

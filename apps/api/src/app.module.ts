@@ -23,6 +23,10 @@ import { FinanceService } from "./reports/finance.service";
 import { AuditsController } from "./audits/audits.controller";
 import { PurchasesController } from "./purchases/purchases.controller";
 import { SalesController } from "./sales/sales.controller";
+import { SalePostingService } from "./sales/sale-posting.service";
+import { SalesReversalService } from "./sales/reversal.service";
+import { CorrectionsController } from "./corrections/corrections.controller";
+import { CorrectionsService } from "./corrections/corrections.service";
 import { ShopController } from "./shop/shop.controller";
 import { StaffController } from "./shop/staff.controller";
 import { OnboardingService } from "./onboarding/onboarding.service";
@@ -44,10 +48,10 @@ import { PricingService } from "./returns/pricing.service";
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 240 }]),
     JwtModule.register({ global: true, secret: process.env.JWT_SECRET, signOptions: { expiresIn: process.env.JWT_EXPIRES_IN ?? "15m" } }),
   ],
-  controllers: [HealthController, AppVersionController, AuthController, AdminController, NotificationsController, SyncController, ReportsController, ProfitabilityController, AuditsController, PurchasesController, SalesController, ShopController, StaffController, ApplicationsController, AdminApplicationsController, StaffInvitationsController, SubscriptionsController, ShopMembershipsController, CustomersController, AlertsController, ReturnsController, PricesController],
+  controllers: [HealthController, AppVersionController, AuthController, AdminController, NotificationsController, SyncController, ReportsController, ProfitabilityController, AuditsController, PurchasesController, SalesController, CorrectionsController, ShopController, StaffController, ApplicationsController, AdminApplicationsController, StaffInvitationsController, SubscriptionsController, ShopMembershipsController, CustomersController, AlertsController, ReturnsController, PricesController],
   providers: [
     Db, SyncService, AuthService, EmailVerificationService, MailService, NotificationService, FinanceService, OnboardingService,
-    LoginLockout, AlertsService, ReturnsService, PricingService,
+    LoginLockout, AlertsService, ReturnsService, PricingService, SalePostingService, SalesReversalService, CorrectionsService,
     { provide: APP_GUARD, useClass: ThrottlerGuard }, { provide: APP_GUARD, useClass: AuthGuard },
     // Global error handling (ZodError -> 400, no leaked internals) lives in the module so the
     // integration tests — which build AppModule without main.ts's bootstrap — see identical behaviour.

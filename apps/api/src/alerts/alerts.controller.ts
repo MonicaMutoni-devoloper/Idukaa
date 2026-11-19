@@ -1,4 +1,5 @@
 import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Post, Put, Query } from "@nestjs/common";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { AlertActions, ResolutionCategories } from "@sms/shared";
 import { Db } from "../db/db.service";
@@ -113,40 +114,78 @@ export class AlertsController {
     if (!u.shopId) throw new BadRequestException("shop_required");
     const th = await this.alerts.thresholds(u.shopId);
     const findings = await this.detectAll(u.shopId, th);
-    let created = 0, updated = 0;
-    for (const f of findings) {
-      const [before] = await this.db.query(
-        "SELECT id, status FROM business_alerts WHERE shop_id=$1 AND dedupe_key=$2", [u.shopId, f.key]);
-      const [row] = await this.db.query(
-        `INSERT INTO business_alerts(shop_id,dedupe_key,category,severity,severity_level,title,explanation,entity_type,entity_id,evidence)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-         ON CONFLICT (shop_id,dedupe_key) DO UPDATE SET
-           severity=EXCLUDED.severity, severity_level=EXCLUDED.severity_level, title=EXCLUDED.title,
-           explanation=EXCLUDED.explanation, evidence=EXCLUDED.evidence, last_seen_at=now(), updated_at=now(),
-           status=CASE WHEN business_alerts.status IN ('resolved','legitimate') THEN 'open' ELSE business_alerts.status END,
-           resolved_at=CASE WHEN business_alerts.status IN ('resolved','legitimate') THEN NULL ELSE business_alerts.resolved_at END,
-           resolved_by=CASE WHEN business_alerts.status IN ('resolved','legitimate') THEN NULL ELSE business_alerts.resolved_by END
-         RETURNING id, (xmax=0) AS inserted`,
-        [u.shopId, f.key, f.category, f.severity, f.level, f.title, f.explanation,
-          f.entityType ?? null, f.entityId ?? null, JSON.stringify(f.evidence)]);
-      if (row?.inserted) {
-        created += 1;
-        await this.db.query("INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note,new_status) VALUES ($1,$2,$3,'detected',$4,'open')",
-          [row.id, u.shopId, u.id, f.explanation]);
-      } else {
-        updated += 1;
-        // A recurrence after a closed investigation is a new event, but stays on the same alert so
-        // the earlier decision, notes and resolution are not lost.
-        if (before && ["resolved", "legitimate"].includes(before.status)) {
-          await this.db.query(
-            "INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note,previous_status,new_status,details) VALUES ($1,$2,$3,'reopened',$4,$5,'open',$6)",
-            [row.id, u.shopId, u.id, f.explanation, before.status, JSON.stringify({ automatic: true, reason: "recurrence" })]);
+    let created = 0, updated = 0, reopened = 0;
+    // Detection is idempotent and recurrence-aware. A resolved legitimate promotion stays resolved
+    // while the same transaction and evidence are unchanged; a genuinely changed finding reopens it
+    // once, with the previous decision preserved in the event and notes.
+    await this.db.tx(async (c) => {
+      for (const f of findings) {
+        const signature = createHash("sha256").update(JSON.stringify(f.evidence)).digest("hex");
+        const { rows: [before] } = await c.query(
+          "SELECT * FROM business_alerts WHERE shop_id=$1 AND dedupe_key=$2 FOR UPDATE",
+          [u.shopId, f.key],
+        );
+        if (!before) {
+          const { rows: [row] } = await c.query(
+            `INSERT INTO business_alerts(shop_id,dedupe_key,category,severity,severity_level,title,explanation,
+                                         entity_type,entity_id,evidence,evidence_signature,occurrences)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1) RETURNING id`,
+            [u.shopId, f.key, f.category, f.severity, f.level, f.title, f.explanation,
+              f.entityType ?? null, f.entityId ?? null, JSON.stringify(f.evidence), signature],
+          );
+          created += 1;
+          await c.query(
+            "INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note,new_status) VALUES ($1,$2,$3,'detected',$4,'open')",
+            [row.id, u.shopId, u.id, f.explanation],
+          );
+          continue;
         }
+
+        updated += 1;
+        const closed = ["resolved", "legitimate"].includes(before.status);
+        const sameEvidence = before.evidence_signature === signature;
+        if (closed && sameEvidence) {
+          // Same transaction, same numbers, same evidence: count the detection but do not reopen.
+          await c.query(
+            "UPDATE business_alerts SET last_seen_at=now(), occurrences=occurrences+1 WHERE id=$1",
+            [before.id],
+          );
+          continue;
+        }
+
+        if (closed && !sameEvidence) {
+          reopened += 1;
+          await c.query(
+            `UPDATE business_alerts SET status='open', severity=$2, severity_level=$3, title=$4,
+                    explanation=$5, evidence=$6, evidence_signature=$7, occurrences=occurrences+1,
+                    last_seen_at=now(), updated_at=now(), resolution_category=NULL, resolution_note=NULL,
+                    corrective_action=NULL, approved_by=NULL, resolved_at=NULL, resolved_by=NULL,
+                    escalated_at=NULL, escalated_to=NULL
+              WHERE id=$1`,
+            [before.id, f.severity, f.level, f.title, f.explanation, JSON.stringify(f.evidence), signature],
+          );
+          await c.query(
+            `INSERT INTO alert_events(alert_id,shop_id,actor_id,action,note,previous_status,new_status,details)
+             VALUES ($1,$2,$3,'reopened',$4,$5,'open',$6)`,
+            [before.id, u.shopId, u.id, f.explanation, before.status,
+              JSON.stringify({ automatic: true, reason: "evidence_changed",
+                previousSignature: before.evidence_signature ?? null, signature })],
+          );
+          continue;
+        }
+
+        await c.query(
+          `UPDATE business_alerts SET severity=$2, severity_level=$3, title=$4, explanation=$5,
+                  evidence=$6, evidence_signature=$7, occurrences=occurrences+1,
+                  last_seen_at=now(), updated_at=now()
+            WHERE id=$1`,
+          [before.id, f.severity, f.level, f.title, f.explanation, JSON.stringify(f.evidence), signature],
+        );
       }
-    }
+    });
     await audit(this.db.pool, { shopId: u.shopId, actorId: u.id, action: "anomaly.detect", entity: "shop", entityId: u.shopId,
-      newValue: { findings: findings.length, created, updated } });
-    return { ok: true, evaluatedAt: new Date().toISOString(), findings: findings.length, created, updated,
+      newValue: { findings: findings.length, created, updated, reopened } });
+    return { ok: true, evaluatedAt: new Date().toISOString(), findings: findings.length, created, updated, reopened,
       sufficientHistory: await this.hasHistory(u.shopId) };
   }
 

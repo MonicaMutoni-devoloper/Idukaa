@@ -16,6 +16,7 @@ export const NAV: Record<Role, NavGroup[]> = {
     { label: "nav.groupOversight", items: [
       { href: "/reports", key: "nav.reports", description: "nav.reportsDesc" },
       { href: "/sales", key: "nav.sales", description: "nav.salesDesc" },
+      { href: "/corrections", key: "nav.corrections", description: "nav.correctionsDesc" },
       { href: "/customers", key: "nav.customers", description: "nav.customersDesc" },
     ] },
     { label: "nav.groupAdmin", items: [
@@ -44,6 +45,7 @@ export const NAV: Record<Role, NavGroup[]> = {
       { href: "/shops", key: "nav.shops", description: "nav.shopsDesc" },
       { href: "/customers", key: "nav.customers", description: "nav.customersDesc" },
       { href: "/alerts", key: "nav.alerts", description: "nav.alertsDesc" },
+      { href: "/corrections", key: "nav.corrections", description: "nav.correctionsDesc" },
     ] },
     { label: "nav.groupAdmin", items: [
       { href: "/expense", key: "nav.expense", description: "nav.expenseDesc" },

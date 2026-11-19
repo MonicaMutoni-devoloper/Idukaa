@@ -131,6 +131,21 @@ test("scenario E: a later purchase never rewrites the cost of a sale already pos
   assert.equal(r.value, 37200);   // 17 600 + 24 000 − 4 400
 });
 
+test("a correction reports the corrected sale once, not the reversed original or its return leg", () => {
+  const m: Movement[] = [
+    { type: "opening", qty: u(10), unitCost: 1000, occurredAt: t(1) },
+    // The original sale remains in the inventory replay but is excluded from period COGS.
+    { type: "sale", qty: -u(5), unitCost: 1000, occurredAt: t(2), cogsExcluded: true },
+    // The correction's stock-return leg is also excluded; the corrected sale is the one costed.
+    { type: "sale_return", qty: u(5), unitCost: 1000, occurredAt: t(3), cogsExcluded: true },
+    { type: "sale", qty: -u(5), unitCost: 1000, occurredAt: t(3) },
+  ];
+  assert.equal(periodCosts(m, t(2), t(4)).cogs, 5000);
+  const r = replayLedger(m);
+  assert.equal(r.onHand, u(5), "physical stock is still deducted once");
+  assert.equal(r.value, 5000, "inventory value is unchanged by the correction");
+});
+
 test("a voided sale returns at its original cost, not today's average", () => {
   const m: Movement[] = [
     { type: "opening", qty: u(10), unitCost: 1000, occurredAt: t(1) },
