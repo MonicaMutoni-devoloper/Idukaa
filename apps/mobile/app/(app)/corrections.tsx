@@ -7,7 +7,12 @@ import {
   Screen, Segmented, useToasts,
 } from "../../src/components/ui";
 import { useT, type Key } from "../../src/localization";
-import { listCustomers, listProducts, type LocalCustomer, type LocalProduct } from "../../src/database";
+import {
+  enqueue, listCustomers, listProducts, upsertLocalCustomer,
+  type LocalCustomer, type LocalProduct,
+} from "../../src/database";
+import { validateNewCreditCustomer } from "../../src/services/credit-sale";
+import { uuid } from "../../src/services/util";
 import {
   approveCorrection, discardQueuedCorrection, loadCorrection, loadCorrectionSale, loadCorrections,
   queueCorrectionRequest, rejectCorrection, requestCorrectionInfo, settleCorrectionRefund,
@@ -15,7 +20,7 @@ import {
 } from "../../src/services/corrections";
 import { useSession } from "../../src/services/api";
 import { getCustomers } from "../../src/services/business";
-import { useSync } from "../../src/synchronization/engine";
+import { syncNow, useSync } from "../../src/synchronization/engine";
 import { radius, space, type, useTheme } from "../../src/theme/tokens";
 
 type EditLine = {
@@ -103,6 +108,13 @@ export default function Corrections() {
   const [customerId, setCustomerId] = useState<string | null>(null);
   const [customerPickerOpen, setCustomerPickerOpen] = useState(false);
   const [customerSearch, setCustomerSearch] = useState("");
+  const [pickerSelection, setPickerSelection] = useState<string | null>(null);
+  const [creatingCustomer, setCreatingCustomer] = useState(false);
+  const [newCustomerName, setNewCustomerName] = useState("");
+  const [newCustomerPhone, setNewCustomerPhone] = useState("");
+  const [customerSaveError, setCustomerSaveError] = useState<string | null>(null);
+  const [customerDuplicateId, setCustomerDuplicateId] = useState<string | null>(null);
+  const [customerSaving, setCustomerSaving] = useState(false);
   const [reason, setReason] = useState("");
   const [evidence, setEvidence] = useState("");
   const [fulfillment, setFulfillment] = useState<"not_handed_over" | "handed_over">("not_handed_over");
@@ -152,7 +164,9 @@ export default function Corrections() {
       setReason(""); setEvidence(""); setDiscountText(String(ctx.context.sale.discount));
       setPaidText(String(ctx.context.sale.amountPaid));
       setCustomerId(ctx.context.sale.customer?.id ?? null);
-      setCustomerSearch(""); setCustomerPickerOpen(false);
+      setCustomerSearch(""); setCustomerPickerOpen(false); setPickerSelection(null);
+      setCreatingCustomer(false); setNewCustomerName(""); setNewCustomerPhone("");
+      setCustomerSaveError(null); setCustomerDuplicateId(null);
       const map = new Map(prods.map((p) => [p.id, p]));
       setLines(ctx.context.lines.map((l) => editFromLine(l, map)));
       if (ctx.source === "cache") setError(t("corr.offlineSale"));
@@ -214,11 +228,71 @@ export default function Corrections() {
   // owner reviews that name before approving the corrected credit sale.
   const needsCustomer = additional > 0 && !context?.sale.customer;
   const selectedCustomer = customers.find((x) => x.id === customerId) ?? context?.sale.customer ?? null;
+  const customerMatches = customers.filter((x) =>
+    `${x.name} ${x.phone ?? ""}`.toLowerCase().includes(customerSearch.trim().toLowerCase()));
   const physicalMismatch = fulfillment === "handed_over" && context ? !samePhysical(context.lines, lines) : false;
   const canSubmit = !!context?.eligibility.canRequest && reason.trim().length >= 3 && lines.length > 0
     && lines.every((l) => !!l.productId && inputSellingQty(l) > 0 && int(l.priceText) >= 0)
     && discount >= 0 && discount <= gross && paid >= 0 && !physicalMismatch
     && (!needsCustomer || !!selectedCustomer) && !submitting;
+
+  const openCustomerPicker = () => {
+    setPickerSelection(customerId);
+    setCustomerSearch("");
+    setCreatingCustomer(false);
+    setCustomerSaveError(null);
+    setCustomerDuplicateId(null);
+    setCustomerPickerOpen(true);
+  };
+
+  const usePickedCustomer = () => {
+    if (!pickerSelection) return;
+    setCustomerId(pickerSelection);
+    setCustomerPickerOpen(false);
+    setCreatingCustomer(false);
+  };
+
+  /**
+   * A walk-in correction cannot wait for a detour to another screen: the debtor is created in the
+   * outbox first, selected here, and the correction that follows can reference the id immediately.
+   */
+  const addCustomerForBalance = async () => {
+    setCustomerSaveError(null); setCustomerDuplicateId(null);
+    const check = validateNewCreditCustomer({ name: newCustomerName, phone: newCustomerPhone }, customers);
+    if (!check.ok) {
+      if (check.reason === "duplicate") {
+        const duplicate = customers.find((x) => x.id === check.duplicateId);
+        setCustomerDuplicateId(check.duplicateId ?? null);
+        setCustomerSaveError(t("credit.phoneTaken").replace("{name}", duplicate?.name ?? ""));
+      } else {
+        setCustomerSaveError(t(check.reason === "phone" ? "credit.phoneInvalid" : "credit.nameRequired"));
+      }
+      return;
+    }
+    setCustomerSaving(true);
+    const id = uuid();
+    try {
+      await enqueue(user.id, uuid(), "customer.upsert",
+        { customerId: id, name: check.name, phone: check.phone, creditLimit: 0 },
+        {}, () => upsertLocalCustomer({ id, name: check.name, phone: check.phone, creditLimit: 0 }),
+        new Date().toISOString());
+      const row: LocalCustomer = {
+        id, name: check.name, phone: check.phone, address: null, notes: null,
+        credit_limit: 0, status: "active", balance: 0, overdue: 0,
+      };
+      setCustomers((prev) => [row, ...prev].sort((a, b) => a.name.localeCompare(b.name)));
+      setCustomerId(id);
+      setPickerSelection(id);
+      setCreatingCustomer(false);
+      setNewCustomerName(""); setNewCustomerPhone("");
+      setCustomerSearch("");
+      setCustomerPickerOpen(false);
+      toast(t("credit.saved"));
+      void syncNow();
+    } catch {
+      setCustomerSaveError(t("common.error"));
+    } finally { setCustomerSaving(false); }
+  };
 
   const submit = async () => {
     if (!canSubmit || !context) return;
@@ -375,7 +449,7 @@ export default function Corrections() {
                       <>
                         {!selectedCustomer ? <Banner tone="warn" text={t("corr.customerRequiredHelp")} /> : null}
                         <Pressable testID="corr-customer" accessibilityRole="button"
-                          onPress={() => { setCustomerPickerOpen(true); setCustomerSearch(""); }}
+                          onPress={openCustomerPicker}
                           style={({ pressed }: any) => ({ paddingVertical: 11, paddingHorizontal: space.sm, borderRadius: radius.sm,
                             borderWidth: 1, borderColor: selectedCustomer ? c.lineStrong : c.danger,
                             backgroundColor: pressed ? c.surfaceMuted : c.surface })}>
@@ -385,6 +459,7 @@ export default function Corrections() {
                           {selectedCustomer?.phone ? <Text style={{ color: c.muted, fontSize: 11 }}>{selectedCustomer.phone}</Text> : null}
                         </Pressable>
                         {!customers.length ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.noCustomers")}</Text> : null}
+                        {customers.length ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.registerCustomerHint")}</Text> : null}
                       </>
                     )}
                   </View>
@@ -434,18 +509,68 @@ export default function Corrections() {
       </Card>
 
       {/* Debtor picker for a walk-in sale whose correction creates a balance. */}
-      <Modal open={customerPickerOpen} onClose={() => setCustomerPickerOpen(false)} title={t("corr.chooseCustomer")} scroll>
-        <Field label={t("common.search")} value={customerSearch} onChangeText={setCustomerSearch} autoCorrect={false} />
-        <View style={{ gap: 4 }}>
-          {customers.filter((x) => `${x.name} ${x.phone ?? ""}`.toLowerCase().includes(customerSearch.toLowerCase())).slice(0, 80).map((x) => (
-            <Pressable key={x.id} accessibilityRole="button" onPress={() => { setCustomerId(x.id); setCustomerPickerOpen(false); }}
-              style={({ pressed }: any) => ({ paddingVertical: 10, paddingHorizontal: space.sm, borderBottomWidth: 1, borderBottomColor: c.line, backgroundColor: pressed ? c.surfaceMuted : "transparent" })}>
-              <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{x.name}</Text>
-              <Text style={{ color: c.muted, fontSize: 11 }}>{x.phone ?? ""}{x.balance ? ` · ${money(x.balance)}` : ""}</Text>
-            </Pressable>
-          ))}
-          {!customers.length ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.noCustomers")}</Text> : null}
-        </View>
+      <Modal open={customerPickerOpen} onClose={() => setCustomerPickerOpen(false)} title={t("corr.balanceCustomer")} scroll
+        footer={creatingCustomer ? <>
+          <Button kind="secondary" label={t("common.cancel")}
+            onPress={() => { setCreatingCustomer(false); setCustomerSaveError(null); setCustomerDuplicateId(null); }} />
+          <Button testID="corr-customer-save" label={t("common.save")} loading={customerSaving}
+            disabled={newCustomerName.trim().length < 2 || !newCustomerPhone.trim()}
+            onPress={() => void addCustomerForBalance()} />
+        </> : <>
+          <Button kind="secondary" label={t("common.cancel")} onPress={() => setCustomerPickerOpen(false)} />
+          <Button testID="corr-customer-use" label={t("credit.useExisting")} disabled={!pickerSelection}
+            onPress={usePickedCustomer} />
+        </>}>
+        {creatingCustomer ? (
+          <View style={{ gap: space.md }}>
+            <Text style={{ color: c.ink, fontWeight: "700" }}>{t("corr.registerCustomer")}</Text>
+            <Field testID="corr-customer-name" label={t("credit.name")} required value={newCustomerName}
+              onChangeText={(x) => { setNewCustomerName(x); setCustomerSaveError(null); }}
+              placeholder={t("credit.namePlaceholder")} />
+            <Field testID="corr-customer-phone" label={t("credit.phone")} required value={newCustomerPhone}
+              keyboardType="phone-pad" onChangeText={(x) => { setNewCustomerPhone(x); setCustomerSaveError(null); }}
+              placeholder="078X XXX XXX" hint={t("credit.phoneHint")} />
+            {customerDuplicateId ? (
+              <Banner tone="warn" text={customerSaveError ?? ""} action={
+                <Button testID="corr-customer-use-duplicate" size="sm" kind="secondary" label={t("credit.useExisting")}
+                  onPress={() => {
+                    setPickerSelection(customerDuplicateId);
+                    setCreatingCustomer(false);
+                    setCustomerSearch("");
+                    setCustomerSaveError(null);
+                    setCustomerDuplicateId(null);
+                  }} />
+              } />
+            ) : customerSaveError ? <Text style={{ color: c.danger, fontSize: 12 }}>{customerSaveError}</Text> : null}
+          </View>
+        ) : (
+          <>
+            <Field label={t("common.search")} placeholder={t("credit.searchPlaceholder")} value={customerSearch}
+              onChangeText={setCustomerSearch} autoCorrect={false} />
+            <View style={{ gap: 4 }}>
+              {customerMatches.slice(0, 80).map((x) => {
+                const picked = pickerSelection === x.id;
+                return (
+                  <Pressable key={x.id} testID={`corr-customer-${x.id}`} accessibilityRole="button"
+                    accessibilityState={{ selected: picked }} onPress={() => setPickerSelection(x.id)}
+                    style={({ pressed }: any) => ({ paddingVertical: 10, paddingHorizontal: space.sm, gap: 2,
+                      borderWidth: picked ? 2 : 0, borderBottomWidth: picked ? 2 : 1,
+                      borderColor: picked ? c.primaryStrong : c.line,
+                      borderRadius: picked ? radius.sm : 0,
+                      backgroundColor: pressed ? c.surfaceMuted : picked ? c.hover : "transparent" })}>
+                    <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>
+                      {picked ? "✓ " : ""}{x.name}
+                    </Text>
+                    <Text style={{ color: c.muted, fontSize: 11 }}>{x.phone ?? ""}{x.balance ? ` · ${money(x.balance)}` : ""}</Text>
+                  </Pressable>
+                );
+              })}
+              {!customerMatches.length ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.noCustomerMatches")}</Text> : null}
+            </View>
+            <Button testID="corr-customer-new" kind="secondary" label={t("credit.newCustomer")}
+              onPress={() => { setCreatingCustomer(true); setNewCustomerName(customerSearch.trim()); setNewCustomerPhone(""); setCustomerSaveError(null); setCustomerDuplicateId(null); }} />
+          </>
+        )}
       </Modal>
 
       {/* Product picker: the catalogue already on this device, so it works offline. */}

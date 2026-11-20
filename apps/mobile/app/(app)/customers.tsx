@@ -34,11 +34,16 @@ export default function Customers() {
     setError(null);
     // Cached accounts keep the screen useful offline; the server refresh adds authoritative balances.
     const cached = await listCustomers(search).catch(() => [] as LocalCustomer[]);
-    setRows(cached.map((x) => ({ id: x.id, name: x.name, phone: x.phone, address: x.address, notes: x.notes,
-      creditLimit: x.credit_limit, status: x.status, balance: x.balance ?? 0, overdue: x.overdue ?? 0 })));
+    const cachedRows = cached.map((x) => ({ id: x.id, name: x.name, phone: x.phone, address: x.address, notes: x.notes,
+      creditLimit: x.credit_limit, status: x.status, balance: x.balance ?? 0, overdue: x.overdue ?? 0 }));
+    setRows(cachedRows);
     try {
       const [serverRows, serverSummary] = await Promise.all([getCustomers(search), getCreditSummary()]);
-      setRows(serverRows); setSummary(serverSummary);
+      // A customer added moments ago is still queued; the server list must not hide them before sync.
+      const serverIds = new Set(serverRows.map((x) => x.id));
+      setRows([...serverRows, ...cachedRows.filter((x) => !serverIds.has(x.id))]
+        .sort((a, b) => a.name.localeCompare(b.name)));
+      setSummary(serverSummary);
       // Keep the last confirmed balance on the device so a repayment can be queued offline.
       await cacheCustomerBalances(serverRows).catch(() => undefined);
     } catch (e: any) {
@@ -145,7 +150,7 @@ export default function Customers() {
         {!rows.length ? <Empty title={t("credit.noCustomers")} description={t("credit.paymentHint")} /> : null}
       </View>
 
-      <Modal open={addOpen} onClose={() => setAddOpen(false)} title={t("credit.add")} footer={
+      <Modal open={addOpen} onClose={() => setAddOpen(false)} title={t("credit.add")} scroll footer={
         <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: space.sm }}>
           <Button kind="secondary" label={t("common.cancel")} onPress={() => setAddOpen(false)} />
           <Button label={t("common.save")} loading={busy} disabled={name.trim().length < 2 || !phone.trim()} onPress={() => void add()} />
