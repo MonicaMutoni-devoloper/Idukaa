@@ -310,6 +310,11 @@ export async function markRetry(opIds: string[], message: string) {
 export const retryNow = async (userId: string, shopId: string | null) => (await db()).runAsync(
   "UPDATE outbox SET next_attempt_at=0 WHERE user_id=? AND COALESCE(shop_id,'')=? AND status='retry'", [userId, shopId ?? ""]);
 
+/** Delete only a queued operation that never reached the server as an applied record. */
+export const discardOutboxOp = async (userId: string, shopId: string | null, opId: string) => (await db()).runAsync(
+  "DELETE FROM outbox WHERE op_id=? AND user_id=? AND COALESCE(shop_id,'')=? AND status IN ('retry','conflict','rejected')",
+  [opId, userId, shopId ?? ""]);
+
 export async function applyPull(changes: { entity: string; id: string; data: any }[]) {
   const d = await db();
   await d.withTransactionAsync(async () => {

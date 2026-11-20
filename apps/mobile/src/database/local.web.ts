@@ -377,6 +377,13 @@ export async function markRetry(opIds: string[], message: string) {
 export const retryNow = async (userId: string, shopId: string | null) =>
   mutate((s) => { for (const r of s.outbox) if (r.user_id === userId && (r.shop_id ?? null) === shopId && r.status === "retry") r.next_attempt_at = 0; });
 
+/** Delete only a queued operation that never reached the server as an applied record. */
+export const discardOutboxOp = async (userId: string, shopId: string | null, opId: string) =>
+  mutate((s) => {
+    s.outbox = s.outbox.filter((x) => !(x.op_id === opId && x.user_id === userId
+      && (x.shop_id ?? null) === shopId && ["retry", "conflict", "rejected"].includes(x.status)));
+  });
+
 export async function applyPull(changes: { entity: string; id: string; data: any }[]) {
   await mutate((s) => {
     for (const c of changes) {

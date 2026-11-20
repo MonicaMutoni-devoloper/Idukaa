@@ -9,8 +9,8 @@ import {
 import { useT, type Key } from "../../src/localization";
 import { listProducts, type LocalProduct } from "../../src/database";
 import {
-  approveCorrection, loadCorrection, loadCorrectionSale, loadCorrections, queueCorrectionRequest,
-  rejectCorrection, requestCorrectionInfo, settleCorrectionRefund,
+  approveCorrection, discardQueuedCorrection, loadCorrection, loadCorrectionSale, loadCorrections,
+  queueCorrectionRequest, rejectCorrection, requestCorrectionInfo, settleCorrectionRefund,
   type Correction, type CorrectionDetail, type CorrectionLine, type CorrectionSaleContext,
 } from "../../src/services/corrections";
 import { useSession } from "../../src/services/api";
@@ -50,6 +50,29 @@ function refusalKey(e: any): Key {
   return "common.error";
 }
 
+/** Turn the outbox's stored refusal into a sentence the requester can act on. */
+function syncProblem(code: string | null | undefined, t: (key: Key) => string): string {
+  const value = String(code ?? "").trim();
+  const known: Record<string, Key> = {
+    network: "corr.syncNetwork",
+    sale_not_found: "corr.syncSaleMissing",
+    sale_not_posted: "corr.syncNotPosted",
+    sale_already_reversed: "corr.syncSaleReversed",
+    sale_is_corrected_sale: "corr.syncIsCorrected",
+    sale_already_corrected: "corr.syncAlreadyCorrected",
+    correction_pending: "corr.syncCorrectionPending",
+    duplicate_value: "corr.syncAlreadyCorrected",
+    sale_has_returns: "corr.syncHasReturns",
+    role_not_allowed: "corr.syncRole",
+  };
+  if (known[value]) return t(known[value]);
+  if (value.includes("schema_out_of_date")) return t("corr.syncSchema");
+  if (value.startsWith("server_5")) return t("corr.syncServer");
+  if (value.startsWith("server_4")) return t("corr.syncServer");
+  if (value.startsWith("invalid_operation")) return t("corr.syncInvalid");
+  return value ? `${t("corr.syncRejected")} ${value}` : t("corr.syncUnknown");
+}
+
 export default function Corrections() {
   const t = useT(); const c = useTheme(); const toast = useToasts((s) => s.push);
   const router = useRouter();
@@ -87,6 +110,8 @@ export default function Corrections() {
   const [decisionNote, setDecisionNote] = useState("");
   const [refundAmount, setRefundAmount] = useState("");
   const [decisionBusy, setDecisionBusy] = useState(false);
+  const [syncActionBusy, setSyncActionBusy] = useState(false);
+  const [discardOpen, setDiscardOpen] = useState(false);
   const openedParam = useRef<string | null>(null);
 
   const productsById = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
@@ -136,13 +161,25 @@ export default function Corrections() {
       const r = await loadCorrection(id);
       setSelected(r.correction);
     } catch (e: any) {
-      const queued = rows.find((x) => x.id === id && x.pendingSync);
+      // A local-only request has no server row yet. Keep its detail open so the stored refusal is
+      // visible instead of replacing it with a misleading "not found on the server" banner.
+      const queued = rows.find((x) => x.id === id && (x.pendingSync || x.displayStatus === "sync_error"));
       if (queued) setSelected({ ...queued, events: [], correctedSale: null } as CorrectionDetail);
       else setError(t(refusalKey(e)));
     } finally { setDetailLoading(false); }
   };
 
-  const closeDetail = () => { setDetailId(null); setSelected(null); setDecisionOpen(null); setDecisionNote(""); setRefundAmount(""); };
+  const closeDetail = () => { setDetailId(null); setSelected(null); setDecisionOpen(null); setDecisionNote(""); setRefundAmount(""); setDiscardOpen(false); };
+
+  const discardLocal = async (id: string) => {
+    setSyncActionBusy(true); setError(null);
+    try {
+      await discardQueuedCorrection(id);
+      toast(t("corr.discarded"));
+      closeDetail();
+      await load();
+    } catch { setError(t("common.error")); } finally { setSyncActionBusy(false); }
+  };
 
   const gross = lines.reduce((s, l) => s + lineAmount(inputSellingQty(l), int(l.priceText)), 0);
   const discount = int(discountText);
@@ -152,7 +189,7 @@ export default function Corrections() {
   const additional = Math.max(0, net - paid);
   const physicalMismatch = fulfillment === "handed_over" && context ? !samePhysical(context.lines, lines) : false;
   const canSubmit = !!context?.eligibility.canRequest && reason.trim().length >= 3 && lines.length > 0
-    && lines.every((l) => inputSellingQty(l) > 0 && int(l.priceText) >= 0)
+    && lines.every((l) => !!l.productId && inputSellingQty(l) > 0 && int(l.priceText) >= 0)
     && discount >= 0 && discount <= gross && paid >= 0 && !physicalMismatch && !submitting;
 
   const submit = async () => {
@@ -173,7 +210,7 @@ export default function Corrections() {
           sellingQty: inputSellingQty(l),
           unitPrice: int(l.priceText),
         })),
-      });
+      }, context);
       toast(t("corr.submitted"));
       setFormOpen(false); setContext(null); setReason(""); setEvidence(""); setLines([]);
       await load();
@@ -334,6 +371,9 @@ export default function Corrections() {
                 {r.expectedAdditional > 0 ? <Text style={{ color: c.accent, fontSize: 11 }}>{t("corr.additionalDue")} {money(r.expectedAdditional)}</Text> : null}
                 {r.displayStatus === "pending_sync" ? <Text style={{ color: c.info, fontSize: 11 }}>{t("corr.pendingSync")}</Text> : null}
               </View>
+              {r.displayStatus === "sync_error" ? (
+                <Text numberOfLines={2} style={{ color: c.danger, fontSize: 11 }}>{syncProblem(r.syncError, t)}</Text>
+              ) : null}
             </Pressable>
           );
         })}
@@ -362,7 +402,11 @@ export default function Corrections() {
         {detailLoading ? <Loading /> : selected ? (
           <View style={{ gap: space.md }}>
             {selected.pendingSync ? <Banner tone="warn" text={t("corr.queuedHelp")} /> : null}
-            {selected.syncError ? <Banner tone="danger" text={selected.syncError} /> : null}
+            {selected.syncError ? <Banner tone="danger" text={syncProblem(selected.syncError, t)} /> : null}
+            {selected.displayStatus === "sync_error" ? (
+              <Button testID="corr-discard-local" size="sm" kind="dangerQuiet" label={t("corr.discardLocal")}
+                disabled={syncActionBusy} onPress={() => setDiscardOpen(true)} />
+            ) : null}
             {selected.alertId ? <Badge tone="warn" label={t("corr.alertLink")} /> : null}
             <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
               <Badge tone={STATUS_TONE(selectedDisplay) as any} label={t(`corr.status.${selectedDisplay}` as Key)} />
@@ -413,7 +457,7 @@ export default function Corrections() {
               </View>
             ) : null}
 
-            {canDecide && !selected.pendingSync ? (
+            {canDecide && !selected.pendingSync && selected.displayStatus !== "sync_error" ? (
               <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap", borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.md }}>
                 {selected.actions.approve ? <Button testID="corr-approve" label={t("corr.approve")} disabled={!online} onPress={() => { setDecisionNote(""); setDecisionOpen("approve"); }} /> : null}
                 {selected.actions.reject ? <Button testID="corr-reject" kind="dangerQuiet" label={t("corr.reject")} disabled={!online} onPress={() => { setDecisionNote(""); setDecisionOpen("reject"); }} /> : null}
@@ -421,7 +465,7 @@ export default function Corrections() {
                 {selected.actions.settleRefund ? <Button testID="corr-refund" kind="secondary" label={t("corr.settleRefund")} disabled={!online} onPress={() => { setRefundAmount(""); setDecisionNote(""); setDecisionOpen("refund"); }} /> : null}
               </View>
             ) : null}
-            {!canDecide ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.ownerOnly")}</Text> : null}
+            {!canDecide && !selected.pendingSync && selected.displayStatus !== "sync_error" ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.ownerOnly")}</Text> : null}
 
             <View style={{ gap: 5 }}>
               <Text style={{ color: c.ink, fontWeight: "700" }}>{t("corr.timeline")}</Text>
@@ -460,6 +504,10 @@ export default function Corrections() {
         <Field testID="corr-info-note" label={t("corr.infoRequest")} value={decisionNote} onChangeText={setDecisionNote} multiline required />
       </Modal>
 
+      <ConfirmDialog open={discardOpen} title={t("corr.discardTitle")} message={t("corr.discardHelp")}
+        confirmLabel={t("corr.discardLocal")} tone="danger" busy={syncActionBusy}
+        onCancel={() => setDiscardOpen(false)} onConfirm={() => selected ? void discardLocal(selected.id) : undefined} />
+
       <Modal open={decisionOpen === "refund"} onClose={() => setDecisionOpen(null)} title={t("corr.settleRefund")}
         footer={<>
           <Button kind="secondary" label={t("common.cancel")} onPress={() => setDecisionOpen(null)} />
@@ -489,8 +537,12 @@ function Line({ l, c, proposed }: { l: CorrectionLine; c: any; proposed?: boolea
 
 function editFromLine(l: CorrectionLine, products: Map<string, LocalProduct>): EditLine {
   const p = products.get(l.productId);
-  const factor = Math.max(1, p?.units_per_selling ?? 1);
   const entered = l.qtyEntered ?? l.qty;
+  // Derive the conversion from the sale line itself. A later catalogue edit can change the
+  // product's selling unit; using today's factor would send a base quantity the server rejects.
+  const factor = entered > 0 && l.qty > 0
+    ? Math.max(1, Math.round(l.qty / entered))
+    : Math.max(1, p?.units_per_selling ?? 1);
   return {
     key: `l-${Math.random().toString(36).slice(2)}-${l.productId}`,
     productId: l.productId,

@@ -1,5 +1,5 @@
 import { lineAmount } from "@sms/shared";
-import { enqueue, kvGet, kvSet, listOutbox, type OutboxRow } from "../database";
+import { discardOutboxOp, enqueue, kvGet, kvSet, listOutbox, type OutboxRow } from "../database";
 import { refreshCounts, syncNow } from "../synchronization/engine";
 import { NetworkError, request, useSession } from "./api";
 import { uuid } from "./util";
@@ -155,41 +155,67 @@ export async function loadCorrections(): Promise<{ corrections: Correction[]; so
   }
 
   const outbox = await listOutbox(userId, shopId).catch(() => [] as OutboxRow[]);
-  const queued = outbox
-    .filter((r) => r.type === "correction.request" && ["pending", "retry", "pending_approval", "conflict", "rejected"].includes(r.status))
-    .map((r) => queuedCorrection(r))
-    .filter((x): x is Correction => x !== null);
+  const queuedRows = outbox.filter((r) => r.type === "correction.request"
+    && ["pending", "retry", "pending_approval", "conflict", "rejected"].includes(r.status));
+  // The sale context was saved when the request was written. Reading it back keeps the local
+  // request honest: without it the list claims the original sale was worth 0 RWF.
+  const queued = (await Promise.all(queuedRows.map(async (r) => {
+    const p = safePayload(r);
+    const hint = p ? await readCache<CorrectionSaleContext>(contextKey(shopId, p.saleId)) : null;
+    return queuedCorrection(r, hint);
+  }))).filter((x): x is Correction => x !== null);
   const known = new Set(server.map((c) => c.id));
   return { corrections: [...queued.filter((q) => !known.has(q.id)), ...server], source, savedAt };
 }
 
-function queuedCorrection(row: OutboxRow): Correction | null {
+function safePayload(row: OutboxRow): (CorrectionRequestDraft & { correctionId?: string }) | null {
+  try { return JSON.parse(row.payload) as CorrectionRequestDraft & { correctionId?: string }; } catch { return null; }
+}
+
+function queuedCorrection(row: OutboxRow, original: CorrectionSaleContext | null): Correction | null {
   try {
-    const p = JSON.parse(row.payload) as CorrectionRequestDraft & { correctionId?: string };
-    const lines = (p.lines ?? []).map((l) => ({
-      productId: l.productId, qty: l.qty, sellingQty: l.sellingQty ?? l.qty,
-      unitPrice: l.unitPrice, lineAmount: lineAmount(l.sellingQty ?? l.qty, l.unitPrice),
-    }));
+    const p = safePayload(row); if (!p) return null;
+    const sourceLines = new Map((original?.lines ?? []).map((l) => [l.productId, l]));
+    const lines = (p.lines ?? []).map((l) => {
+      const source = sourceLines.get(l.productId);
+      return {
+        productId: l.productId, qty: l.qty, sellingQty: l.sellingQty ?? l.qty,
+        unitPrice: l.unitPrice, lineAmount: lineAmount(l.sellingQty ?? l.qty, l.unitPrice),
+        name: source?.name ?? null, code: source?.code ?? null,
+        unit: source?.unit ?? null, sellingUnit: source?.sellingUnit ?? null,
+      };
+    });
     const gross = lines.reduce((s, l) => s + l.lineAmount, 0);
     const net = Math.max(0, gross - (p.discount ?? 0));
     const corrId = p.correctionId ?? row.op_id;
     const user = useSession.getState().user;
     const failed = row.status === "conflict" || row.status === "rejected";
+    const collected = Number(original?.sale.amountPaid ?? p.amountPaid ?? 0);
     return {
       id: corrId, saleId: p.saleId, status: "pending_approval",
       requestedBy: row.user_id, requestedByName: user?.name ?? null,
       requestedAt: row.created_at, reason: p.reason, evidence: p.evidence ?? null,
       fulfillment: p.fulfillment,
-      original: { at: null, cashier: null, gross: 0, discount: 0, net: 0, collected: 0, paymentMethod: null, lines: [] },
-      proposed: { gross, discount: p.discount ?? 0, net, collected: p.amountPaid ?? 0, lines },
-      expectedRefund: Math.max(0, (p.amountPaid ?? 0) - net),
-      expectedAdditional: Math.max(0, net - (p.amountPaid ?? 0)),
+      original: {
+        at: original?.sale.at ?? null,
+        cashier: original?.sale.cashier ?? null,
+        gross: Number(original?.sale.gross ?? 0),
+        discount: Number(original?.sale.discount ?? 0),
+        net: Number(original?.sale.net ?? 0),
+        collected,
+        paymentMethod: original?.sale.paymentMethod ?? null,
+        lines: original?.lines ?? [],
+      },
+      proposed: { gross, discount: p.discount ?? 0, net, collected, lines },
+      expectedRefund: Math.max(0, collected - net),
+      expectedAdditional: Math.max(0, net - collected),
       amountRefunded: 0, amountCollected: 0,
       decisionNote: null, decidedAt: null, ownerId: null, ownerName: null,
       reversalId: null, correctedSaleId: null, stockStatus: "pending", moneyStatus: "pending",
       alertId: p.alertId ?? null, settlementNote: null, settledAt: null, updatedAt: null,
       actions: { approve: false, reject: false, requestInfo: false, settleRefund: false },
-      displayStatus: failed ? "sync_error" : "pending_sync", pendingSync: !failed, syncError: failed ? row.message ?? row.status : null,
+      displayStatus: failed ? "sync_error" : "pending_sync", pendingSync: !failed,
+      syncError: failed ? row.message ?? row.status : row.message,
     };
   } catch { return null; }
 }
@@ -227,14 +253,26 @@ export async function loadCorrectionSale(saleId: string): Promise<{ context: Cor
  * Save the request durably before reporting success. It is only a request: no stock, money or
  * report effect is applied locally, and the owner cannot approve it from this device offline.
  */
-export async function queueCorrectionRequest(draft: CorrectionRequestDraft): Promise<{ correctionId: string; opId: string }> {
-  const { userId } = scope();
+export async function queueCorrectionRequest(
+  draft: CorrectionRequestDraft, context?: CorrectionSaleContext,
+): Promise<{ correctionId: string; opId: string }> {
+  const { shopId, userId } = scope();
   const correctionId = uuid();
   const payload = { correctionId, ...draft };
+  // Persist the sale seen by the requester before the queue row. It is display-only on this device;
+  // the server still takes its own immutable snapshot during sync.
+  if (context) await writeCache(contextKey(shopId, draft.saleId), context).catch(() => undefined);
   await enqueue(userId, correctionId, "correction.request", payload, {}, undefined, undefined, { record: false });
   await refreshCounts(true);
   void syncNow();
   return { correctionId, opId: correctionId };
+}
+
+/** Remove a request that never reached the server. Synced corrections are never deleted. */
+export async function discardQueuedCorrection(id: string): Promise<void> {
+  const { shopId, userId } = scope();
+  await discardOutboxOp(userId, shopId, id);
+  await refreshCounts(true);
 }
 
 export const approveCorrection = (id: string, note?: string) =>
