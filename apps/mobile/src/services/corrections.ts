@@ -1,5 +1,5 @@
 import { lineAmount } from "@sms/shared";
-import { discardOutboxOp, enqueue, kvGet, kvSet, listOutbox, type OutboxRow } from "../database";
+import { discardOutboxOp, enqueue, kvGet, kvSet, listCustomers, listOutbox, type OutboxRow } from "../database";
 import { refreshCounts, syncNow } from "../synchronization/engine";
 import { NetworkError, request, useSession } from "./api";
 import { uuid } from "./util";
@@ -38,6 +38,8 @@ export interface Correction {
   proposed: {
     gross: number; discount: number; net: number; collected: number; lines: CorrectionLine[];
   };
+  /** Debtor named by the reviewed proposal when the corrected sale carries a balance. */
+  customer: { id: string; name: string; phone: string | null } | null;
   expectedRefund: number;
   expectedAdditional: number;
   amountRefunded: number;
@@ -87,6 +89,7 @@ export interface CorrectionSaleContext {
     id: string; at: string; cashier: string; paymentMethod: string; status: string;
     dispatchedAt: string | null; reversalReason: string | null; gross: number; discount: number;
     net: number; amountPaid: number; balance: number;
+    customer: { id: string; name: string; phone: string | null } | null;
     correctsSaleId: string | null; correctionId: string | null;
   };
   lines: CorrectionLine[];
@@ -106,6 +109,8 @@ export interface CorrectionRequestDraft {
   amountPaid: number;
   lines: { productId: string; qty: number; unitPrice: number; sellingQty?: number }[];
   alertId?: string | null;
+  /** Named debtor when the corrected sale creates a balance for a walk-in sale. */
+  customerId?: string | null;
 }
 
 const scope = () => {
@@ -159,10 +164,15 @@ export async function loadCorrections(): Promise<{ corrections: Correction[]; so
     && ["pending", "retry", "pending_approval", "conflict", "rejected"].includes(r.status));
   // The sale context was saved when the request was written. Reading it back keeps the local
   // request honest: without it the list claims the original sale was worth 0 RWF.
+  const queuedCustomers = queuedRows.some((r) => safePayload(r)?.customerId)
+    ? await listCustomers("").catch(() => [])
+    : [];
+  const customerById = new Map(queuedCustomers.map((x) => [x.id, x]));
   const queued = (await Promise.all(queuedRows.map(async (r) => {
     const p = safePayload(r);
     const hint = p ? await readCache<CorrectionSaleContext>(contextKey(shopId, p.saleId)) : null;
-    return queuedCorrection(r, hint);
+    const customer = p?.customerId ? customerById.get(p.customerId) ?? null : null;
+    return queuedCorrection(r, hint, customer);
   }))).filter((x): x is Correction => x !== null);
   const known = new Set(server.map((c) => c.id));
   return { corrections: [...queued.filter((q) => !known.has(q.id)), ...server], source, savedAt };
@@ -172,7 +182,10 @@ function safePayload(row: OutboxRow): (CorrectionRequestDraft & { correctionId?:
   try { return JSON.parse(row.payload) as CorrectionRequestDraft & { correctionId?: string }; } catch { return null; }
 }
 
-function queuedCorrection(row: OutboxRow, original: CorrectionSaleContext | null): Correction | null {
+function queuedCorrection(
+  row: OutboxRow, original: CorrectionSaleContext | null,
+  customer: { id: string; name: string; phone: string | null } | null = null,
+): Correction | null {
   try {
     const p = safePayload(row); if (!p) return null;
     const sourceLines = new Map((original?.lines ?? []).map((l) => [l.productId, l]));
@@ -207,6 +220,7 @@ function queuedCorrection(row: OutboxRow, original: CorrectionSaleContext | null
         lines: original?.lines ?? [],
       },
       proposed: { gross, discount: p.discount ?? 0, net, collected, lines },
+      customer: customer ?? original?.sale.customer ?? null,
       expectedRefund: Math.max(0, collected - net),
       expectedAdditional: Math.max(0, net - collected),
       amountRefunded: 0, amountCollected: 0,

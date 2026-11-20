@@ -21,6 +21,8 @@ const CreateBody = z.object({
     sellingQty: z.number().int().positive().optional(),
   })).min(1).max(100),
   alertId: uuid.nullable().optional(),
+  /** Required by the service when the corrected net exceeds the amount already collected. */
+  customerId: uuid.nullable().optional(),
 });
 const DecisionBody = z.object({ note: z.string().trim().min(3).max(1000) });
 const NoteBody = z.object({ note: z.string().trim().min(3).max(1000).optional() });

@@ -180,6 +180,7 @@ At approval:
 - `expected_additional = corrected_net − original_collected` when positive;
 - the corrected sale can apply at most its own net as paid. Any excess stays a refund liability on the correction; it does not become a negative customer receivable;
 - an additional amount requires a named active customer, because the corrected sale creates a normal credit sale and receivable;
+- when the original sale was walk-in, the requester names that customer in the correction request; the choice is frozen in `proposed.customerId`, shown to the owner in review, validated again when approval locks the customer row, and used as the corrected sale's `customer_id`;
 - no cash movement is fabricated.
 
 If a refund is due, the correction is `reconciliation_required` and `money_status='refund_due'`. The owner records the actual amount through `POST /corrections/:id/settle-refund`. Partial refunds are allowed. The correction becomes `completed` only when the full expected refund is recorded; otherwise it stays `reconciliation_required`.
@@ -241,7 +242,8 @@ Validation highlights:
 - 1–100 lines;
 - positive base quantities and selling quantities;
 - nonnegative integer RWF prices/discount;
-- product IDs must belong to the shop;
+- product IDs and the optional debtor customer ID must belong to the shop;
+- a correction that leaves more owed than the original collection must name an active customer, either the sale's existing customer or one selected for a walk-in sale;
 - every read/write uses the authenticated shop;
 - original fingerprint must still match at approval;
 - sale must still be `posted`, unreversed, and have no returns;

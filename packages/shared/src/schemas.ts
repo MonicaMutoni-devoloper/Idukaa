@@ -205,6 +205,8 @@ export const CorrectionRequestOp = z.object({
     })).min(1).max(100),
     /** The discount alert this correction came from, when started from an investigation. */
     alertId: id.nullable().optional(),
+    /** Named debtor when a walk-in sale is corrected to carry an additional balance. */
+    customerId: id.nullable().optional(),
   }),
 });
 

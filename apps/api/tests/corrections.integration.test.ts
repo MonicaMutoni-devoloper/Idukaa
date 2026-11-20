@@ -63,6 +63,7 @@ async function seedSale(input: {
 async function requestCorrection(input: {
   saleId: string; discount?: number; lines?: { productId: string; qty: number; unitPrice: number; sellingQty?: number }[];
   fulfillment?: "not_handed_over" | "handed_over"; actor?: any; alertId?: string | null; reason?: string;
+  customerId?: string | null;
 }) {
   const correctionId = uuid();
   const sale = (await pool.query("SELECT s.*, (SELECT json_agg(json_build_object('productId',sl.product_id,'qty',sl.qty,'unitPrice',sl.unit_price,'sellingQty',sl.qty_entered) ORDER BY sl.id) FROM sale_lines sl WHERE sl.sale_id=s.id) lines FROM sales s WHERE s.id=$1", [input.saleId])).rows[0];
@@ -71,6 +72,7 @@ async function requestCorrection(input: {
     correctionId, saleId: input.saleId, reason: input.reason ?? "Incorrect entry confirmed by the investigation",
     evidence: "test evidence", fulfillment: input.fulfillment ?? "not_handed_over",
     discount: input.discount ?? 0, amountPaid: 0, lines, alertId: input.alertId ?? null,
+    customerId: input.customerId ?? null,
   })]);
   return { correctionId, result: r[0], lines };
 }
@@ -166,6 +168,29 @@ test("discount correction preserves the original, reverses once, posts one corre
     [shopA, customer])).rows[0].v);
   assert.equal(owing, 4300, "the additional amount is a customer receivable, not a new cash receipt");
   assert.equal(await pool.query("SELECT count(*)::int n FROM sales WHERE corrects_sale_id=$1", [saleId]).then((r) => r.rows[0].n), 1);
+});
+
+test("a walk-in correction that creates a balance requires and records the customer who owes it", { skip }, async () => {
+  const product = await seedProduct("WALKIN-1");
+  const saleId = await seedSale({ productId: product, qty: 3000, price: 1500, discount: 4300, paid: 200 });
+
+  const withoutCustomer = await requestCorrection({ saleId, discount: 200 });
+  assert.equal(withoutCustomer.result.status, "rejected", "an unnamed walk-in cannot carry a new receivable");
+  assert.match(String(withoutCustomer.result.message), /customer_required_for_additional_payment/);
+
+  const withCustomer = await requestCorrection({ saleId, discount: 200, customerId: customer });
+  assert.equal(withCustomer.result.status, "applied", withCustomer.result.message);
+  const approved = await approve(withCustomer.correctionId);
+  assert.equal(approved.customer.id, customer, "the owner reviews the named debtor");
+  assert.equal(approved.expectedAdditional, 4100);
+  assert.equal(approved.moneyStatus, "balance_due");
+
+  const corrected = await salesFor(approved.correctedSaleId);
+  assert.equal(corrected.customer_id, customer, "the corrected sale carries the named receivable");
+  assert.equal(Number(corrected.amount_paid), 200, "only the original collection is applied");
+  assert.equal(Number(corrected.gross_amount) - Number(corrected.discount), 4300);
+  const frozen = (await pool.query("SELECT proposed->>'customerId' AS c FROM sale_corrections WHERE id=$1", [withCustomer.correctionId])).rows[0].c;
+  assert.equal(frozen, customer, "the reviewed debtor is frozen with the rest of the proposal");
 });
 
 test("price correction records a refund, caps the corrected sale's applied payment and completes after settlement", { skip }, async () => {

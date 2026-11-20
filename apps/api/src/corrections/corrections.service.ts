@@ -30,6 +30,8 @@ export interface CorrectionRequestInput {
   amountPaid: number;
   lines: SalePostingLine[];
   alertId?: string | null;
+  /** Named debtor when the corrected sale creates a balance and the original sale was walk-in. */
+  customerId?: string | null;
 }
 
 const round = (n: number) => Math.max(0, Math.round(n));
@@ -129,14 +131,21 @@ export class CorrectionsService {
     // The amount already collected is a historical fact from the posted sale, not a client claim.
     // Accepting it from the request would let a caller manufacture a refund or a new receivable.
     const originalCollected = Number(sale.amount_paid);
+    const additional = round(net - originalCollected);
+    if (sale.customer_id && input.customerId && input.customerId !== sale.customer_id) {
+      throw new BadRequestException("customer_change_not_allowed");
+    }
     // A corrected credit balance must have a named debtor. A refund can be recorded without one.
-    if (net > originalCollected && !sale.customer_id) {
+    // A walk-in sale can name the debtor at correction time; the owner reviews and approves that
+    // choice before the corrected sale is posted.
+    const correctionCustomerId = additional > 0 ? (sale.customer_id ?? input.customerId ?? null) : sale.customer_id;
+    if (additional > 0 && !correctionCustomerId) {
       throw new BadRequestException("customer_required_for_additional_payment");
     }
-    if (sale.customer_id) {
+    if (correctionCustomerId) {
       const { rowCount } = await c.query(
         "SELECT 1 FROM customers WHERE id=$1 AND shop_id=$2 AND status='active'",
-        [sale.customer_id, shopId],
+        [correctionCustomerId, shopId],
       );
       if (!rowCount) throw new BadRequestException("customer_blocked");
     }
@@ -180,6 +189,7 @@ export class CorrectionsService {
     const proposal = {
       discount: input.discount,
       amountPaid: originalCollected,
+      customerId: correctionCustomerId,
       lines: quoted.lines.map((l) => {
         const product: any = productById.get(l.productId);
         return {
@@ -190,7 +200,6 @@ export class CorrectionsService {
       }),
     };
     const refund = round(originalCollected - net);
-    const additional = round(net - originalCollected);
     const fp = fingerprint(sale, originalLines);
 
     await c.query(
@@ -211,12 +220,12 @@ export class CorrectionsService {
     await this.event(c, shopId, u.id, input.correctionId, "requested", null, "pending_approval", input.reason, {
       fulfillment: input.fulfillment, originalNet: Number(sale.gross_amount) - Number(sale.discount),
       proposedNet: net, expectedRefund: refund, expectedAdditional: additional,
-      alertId: input.alertId ?? null,
+      alertId: input.alertId ?? null, customerId: correctionCustomerId,
     });
     await audit(c, {
       shopId, actorId: u.id, action: "sale.correction.requested", entity: "sale_correction", entityId: input.correctionId,
       oldValue: { saleId: sale.id, status: sale.status, gross: Number(sale.gross_amount), discount: Number(sale.discount), net: Number(sale.gross_amount) - Number(sale.discount), collected: originalCollected },
-      newValue: { status: "pending_approval", fulfillment: input.fulfillment, gross: quoted.gross, discount: input.discount, net, collected: originalCollected, lines: proposal.lines },
+      newValue: { status: "pending_approval", fulfillment: input.fulfillment, gross: quoted.gross, discount: input.discount, net, collected: originalCollected, customerId: correctionCustomerId, lines: proposal.lines },
       reason: input.reason,
     });
     return { correctionId: input.correctionId, duplicate: false, status: "pending_approval", originalFingerprint: fp };
@@ -225,12 +234,16 @@ export class CorrectionsService {
   async list(shopId: string, canDecide = false) {
     const rows = await this.db.query(
       `SELECT sc.*, ru.full_name AS requested_name, ou.full_name AS owner_name,
-              s.sold_at, s.user_id AS cashier_id, cu.full_name AS cashier_name
+              s.sold_at, s.user_id AS cashier_id, cu.full_name AS cashier_name,
+              cc.id AS correction_customer_id, cc.name AS correction_customer_name,
+              cc.phone AS correction_customer_phone
          FROM sale_corrections sc
          JOIN sales s ON s.id=sc.sale_id
          JOIN users ru ON ru.id=sc.requested_by
          JOIN users cu ON cu.id=s.user_id
          LEFT JOIN users ou ON ou.id=sc.owner_id
+         LEFT JOIN customers cc
+           ON cc.id = COALESCE(NULLIF(sc.proposed->>'customerId','')::uuid, s.customer_id)
         WHERE sc.shop_id=$1
         ORDER BY CASE WHEN sc.status='pending_approval' THEN 0 ELSE 1 END,
                  sc.requested_at DESC, sc.id DESC LIMIT 200`,
@@ -242,12 +255,16 @@ export class CorrectionsService {
   async get(shopId: string, id: string, canDecide = false) {
     const [row] = await this.db.query(
       `SELECT sc.*, ru.full_name AS requested_name, ou.full_name AS owner_name,
-              s.sold_at, s.user_id AS cashier_id, cu.full_name AS cashier_name
+              s.sold_at, s.user_id AS cashier_id, cu.full_name AS cashier_name,
+              cc.id AS correction_customer_id, cc.name AS correction_customer_name,
+              cc.phone AS correction_customer_phone
          FROM sale_corrections sc
          JOIN sales s ON s.id=sc.sale_id
          JOIN users ru ON ru.id=sc.requested_by
          JOIN users cu ON cu.id=s.user_id
          LEFT JOIN users ou ON ou.id=sc.owner_id
+         LEFT JOIN customers cc
+           ON cc.id = COALESCE(NULLIF(sc.proposed->>'customerId','')::uuid, s.customer_id)
         WHERE sc.id=$1 AND sc.shop_id=$2`,
       [id, shopId],
     );
@@ -287,8 +304,10 @@ export class CorrectionsService {
     const [sale] = await this.db.query(
       `SELECT s.id, s.sold_at, s.gross_amount, s.discount, s.amount_paid, s.payment_method, s.status,
               s.dispatched_at, s.reversal_reason, s.reversal_id, s.corrects_sale_id, s.correction_id,
+              s.customer_id, c.name AS customer_name, c.phone AS customer_phone,
               us.full_name AS cashier
          FROM sales s JOIN users us ON us.id=s.user_id
+         LEFT JOIN customers c ON c.id=s.customer_id
         WHERE s.id=$1 AND s.shop_id=$2`,
       [saleId, shopId],
     );
@@ -326,6 +345,9 @@ export class CorrectionsService {
         net: Number(sale.gross_amount) - Number(sale.discount),
         amountPaid: Number(sale.amount_paid),
         balance: Number(sale.gross_amount) - Number(sale.discount) - Number(sale.amount_paid),
+        customer: sale.customer_id ? {
+          id: sale.customer_id, name: sale.customer_name, phone: sale.customer_phone ?? null,
+        } : null,
         correctsSaleId: sale.corrects_sale_id ?? null, correctionId: sale.correction_id ?? null,
       },
       lines: lines.map((l) => ({
@@ -388,7 +410,9 @@ export class CorrectionsService {
       );
       if (Number(ret?.n ?? 0) > 0) throw new ConflictException("sale_has_returns");
 
-      const proposed = corr.proposed as { discount: number; amountPaid: number; lines: SalePostingLine[] };
+      const proposed = corr.proposed as {
+        discount: number; amountPaid: number; lines: SalePostingLine[]; customerId?: string | null;
+      };
       let quoted: Awaited<ReturnType<SalePostingService["quoteInTx"]>>;
       try {
         quoted = await this.posting.quoteInTx(c, shopId, proposed.lines);
@@ -396,10 +420,29 @@ export class CorrectionsService {
         if (e instanceof SalePostingError) throw new BadRequestException(e.message);
         throw e;
       }
-      if (quoted.gross - proposed.discount !== Number(corr.proposed_net)) {
+      const correctedNet = quoted.gross - proposed.discount;
+      if (correctedNet !== Number(corr.proposed_net)) {
         throw new ConflictException("proposal_changed");
       }
       if (corr.fulfillment === "handed_over") this.assertNoPhysicalChange(originalLines, quoted.lines);
+
+      // The debtor was frozen in the reviewed proposal. Validate it again under the approval lock:
+      // a customer blocked after the request must not receive the corrected receivable.
+      if (sale.customer_id && proposed.customerId && proposed.customerId !== sale.customer_id) {
+        throw new BadRequestException("customer_change_not_allowed");
+      }
+      const correctionCustomerId = sale.customer_id ?? proposed.customerId ?? null;
+      const additional = round(correctedNet - Number(corr.original_collected));
+      if (additional > 0 && !correctionCustomerId) {
+        throw new BadRequestException("customer_required_for_additional_payment");
+      }
+      if (correctionCustomerId) {
+        const { rowCount } = await c.query(
+          "SELECT 1 FROM customers WHERE id=$1 AND shop_id=$2 AND status='active'",
+          [correctionCustomerId, shopId],
+        );
+        if (!rowCount) throw new BadRequestException("customer_blocked");
+      }
 
       // Handed-over goods never come back. The reversal restocks and the corrected sale relieves the
       // SAME quantities at the SAME historical cost, so stock quantity and inventory value both net
@@ -431,7 +474,6 @@ export class CorrectionsService {
         // The corrected sale is consideration for the corrected goods/services, so it can consume at
         // most its own net amount. Any excess originally collected stays a refund liability tracked
         // on the correction instead of becoming a negative receivable on the customer.
-        const correctedNet = quoted.gross - proposed.discount;
         const appliedPaid = Math.min(Number(corr.original_collected), correctedNet);
         posted = await this.posting.postInTx(c, u, shopId, internalOpId, {
           saleId: correctedSaleId,
@@ -439,7 +481,7 @@ export class CorrectionsService {
           discount: proposed.discount,
           amountPaid: appliedPaid,
           paymentMethod: sale.payment_method,
-          customerId: sale.customer_id,
+          customerId: correctionCustomerId,
           dueAt: sale.due_at,
           lines: proposed.lines,
         }, {
@@ -453,7 +495,6 @@ export class CorrectionsService {
       if (posted.status !== "posted") throw new ConflictException("corrected_sale_not_posted");
 
       const refund = round(Number(corr.original_collected) - posted.net);
-      const additional = round(posted.net - Number(corr.original_collected));
       const status = refund > 0 ? "reconciliation_required" : "completed";
       const moneyStatus = refund > 0 ? "refund_due" : additional > 0 ? "balance_due" : "reconciled";
       await c.query(
@@ -474,7 +515,7 @@ export class CorrectionsService {
       });
       await this.event(c, shopId, u.id, id, "corrected", "reversed", "corrected", null, {
         correctedSaleId, gross: posted.gross, discount: posted.discount, net: posted.net,
-        collected: posted.amountPaid,
+        collected: posted.amountPaid, customerId: correctionCustomerId,
       });
       await this.event(c, shopId, u.id, id, "stock_reconciled", "corrected", "stock_reconciled", null, {
         fulfillment: corr.fulfillment, netPhysicalChange: this.physicalDelta(originalLines, quoted.lines),
@@ -491,6 +532,7 @@ export class CorrectionsService {
         newValue: {
           status, reversalId, correctedSaleId, gross: posted.gross, discount: posted.discount,
           net: posted.net, collected: posted.amountPaid, refund, additional, moneyStatus,
+          customerId: correctionCustomerId,
         },
         reason: note ?? corr.reason,
       });
@@ -720,6 +762,11 @@ export class CorrectionsService {
           unitPrice: l.unitPrice, lineAmount: l.lineAmount,
         })),
       },
+      customer: r.correction_customer_id ? {
+        id: r.correction_customer_id,
+        name: r.correction_customer_name,
+        phone: r.correction_customer_phone ?? null,
+      } : null,
       expectedRefund: Number(r.expected_refund),
       expectedAdditional: Number(r.expected_additional),
       amountRefunded: Number(r.amount_refunded),

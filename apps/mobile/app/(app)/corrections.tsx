@@ -7,13 +7,14 @@ import {
   Screen, Segmented, useToasts,
 } from "../../src/components/ui";
 import { useT, type Key } from "../../src/localization";
-import { listProducts, type LocalProduct } from "../../src/database";
+import { listCustomers, listProducts, type LocalCustomer, type LocalProduct } from "../../src/database";
 import {
   approveCorrection, discardQueuedCorrection, loadCorrection, loadCorrectionSale, loadCorrections,
   queueCorrectionRequest, rejectCorrection, requestCorrectionInfo, settleCorrectionRefund,
   type Correction, type CorrectionDetail, type CorrectionLine, type CorrectionSaleContext,
 } from "../../src/services/corrections";
 import { useSession } from "../../src/services/api";
+import { getCustomers } from "../../src/services/business";
 import { useSync } from "../../src/synchronization/engine";
 import { radius, space, type, useTheme } from "../../src/theme/tokens";
 
@@ -64,6 +65,9 @@ function syncProblem(code: string | null | undefined, t: (key: Key) => string): 
     duplicate_value: "corr.syncAlreadyCorrected",
     sale_has_returns: "corr.syncHasReturns",
     role_not_allowed: "corr.syncRole",
+    customer_required_for_additional_payment: "corr.syncCustomerRequired",
+    customer_blocked: "corr.syncCustomerBlocked",
+    customer_change_not_allowed: "corr.syncCustomerChange",
   };
   if (known[value]) return t(known[value]);
   if (value.includes("schema_out_of_date")) return t("corr.syncSchema");
@@ -95,6 +99,10 @@ export default function Corrections() {
   const [formLoading, setFormLoading] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [products, setProducts] = useState<LocalProduct[]>([]);
+  const [customers, setCustomers] = useState<LocalCustomer[]>([]);
+  const [customerId, setCustomerId] = useState<string | null>(null);
+  const [customerPickerOpen, setCustomerPickerOpen] = useState(false);
+  const [customerSearch, setCustomerSearch] = useState("");
   const [reason, setReason] = useState("");
   const [evidence, setEvidence] = useState("");
   const [fulfillment, setFulfillment] = useState<"not_handed_over" | "handed_over">("not_handed_over");
@@ -134,15 +142,30 @@ export default function Corrections() {
   const openForm = useCallback(async (saleId: string, linkedAlert?: string | null) => {
     setFormOpen(true); setFormLoading(true); setFormError(null); setAlertId(linkedAlert ?? null);
     try {
-      const [ctx, prods] = await Promise.all([loadCorrectionSale(saleId), listProducts("")]);
+      const [ctx, prods, cachedCustomers] = await Promise.all([
+        loadCorrectionSale(saleId), listProducts(""), listCustomers("").catch(() => [] as LocalCustomer[]),
+      ]);
       setProducts(prods);
+      setCustomers(cachedCustomers.filter((x) => x.status !== "blocked"));
       setContext(ctx.context);
       setFulfillment(ctx.context.eligibility.fulfillmentDefault);
       setReason(""); setEvidence(""); setDiscountText(String(ctx.context.sale.discount));
       setPaidText(String(ctx.context.sale.amountPaid));
+      setCustomerId(ctx.context.sale.customer?.id ?? null);
+      setCustomerSearch(""); setCustomerPickerOpen(false);
       const map = new Map(prods.map((p) => [p.id, p]));
       setLines(ctx.context.lines.map((l) => editFromLine(l, map)));
       if (ctx.source === "cache") setError(t("corr.offlineSale"));
+      // The cache is enough offline; a server refresh adds accounts created on another device.
+      void getCustomers("").then((rows) => setCustomers((current) => {
+        // Merge instead of replace: a customer queued moments ago may not be on the server yet.
+        const merged = new Map(current.map((x) => [x.id, x]));
+        for (const x of rows) if (x.status === "active") merged.set(x.id, {
+          id: x.id, name: x.name, phone: x.phone, address: x.address, notes: x.notes,
+          credit_limit: x.creditLimit, status: x.status, balance: x.balance,
+        });
+        return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+      })).catch(() => undefined);
     } catch {
       setFormError(t("corr.loadFailed"));
     } finally { setFormLoading(false); }
@@ -187,10 +210,15 @@ export default function Corrections() {
   const paid = int(paidText);
   const refund = Math.max(0, paid - net);
   const additional = Math.max(0, net - paid);
+  // A walk-in sale has no debtor to carry an increased balance. The requester names one, and the
+  // owner reviews that name before approving the corrected credit sale.
+  const needsCustomer = additional > 0 && !context?.sale.customer;
+  const selectedCustomer = customers.find((x) => x.id === customerId) ?? context?.sale.customer ?? null;
   const physicalMismatch = fulfillment === "handed_over" && context ? !samePhysical(context.lines, lines) : false;
   const canSubmit = !!context?.eligibility.canRequest && reason.trim().length >= 3 && lines.length > 0
     && lines.every((l) => !!l.productId && inputSellingQty(l) > 0 && int(l.priceText) >= 0)
-    && discount >= 0 && discount <= gross && paid >= 0 && !physicalMismatch && !submitting;
+    && discount >= 0 && discount <= gross && paid >= 0 && !physicalMismatch
+    && (!needsCustomer || !!selectedCustomer) && !submitting;
 
   const submit = async () => {
     if (!canSubmit || !context) return;
@@ -204,6 +232,7 @@ export default function Corrections() {
         discount,
         amountPaid: paid,
         alertId,
+        customerId: needsCustomer ? customerId : undefined,
         lines: lines.map((l) => ({
           productId: l.productId,
           qty: baseQty(l),
@@ -335,6 +364,31 @@ export default function Corrections() {
                   {additional > 0 ? <KeyValue strong label={t("corr.additionalDue")} value={money(additional)} /> : null}
                   {refund === 0 && additional === 0 ? <KeyValue label={t("corr.noDifference")} value={money(0)} /> : null}
                 </View>
+                {additional > 0 ? (
+                  <View style={{ gap: space.sm }}>
+                    <Text style={{ color: c.ink, fontWeight: "700" }}>{t("corr.balanceCustomer")}</Text>
+                    {context.sale.customer ? (
+                      <Text style={{ color: c.inkSoft, fontSize: 13 }}>
+                        {context.sale.customer.name}{context.sale.customer.phone ? ` · ${context.sale.customer.phone}` : ""}
+                      </Text>
+                    ) : (
+                      <>
+                        {!selectedCustomer ? <Banner tone="warn" text={t("corr.customerRequiredHelp")} /> : null}
+                        <Pressable testID="corr-customer" accessibilityRole="button"
+                          onPress={() => { setCustomerPickerOpen(true); setCustomerSearch(""); }}
+                          style={({ pressed }: any) => ({ paddingVertical: 11, paddingHorizontal: space.sm, borderRadius: radius.sm,
+                            borderWidth: 1, borderColor: selectedCustomer ? c.lineStrong : c.danger,
+                            backgroundColor: pressed ? c.surfaceMuted : c.surface })}>
+                          <Text style={{ color: selectedCustomer ? c.ink : c.muted, fontSize: 13, fontWeight: "600" }}>
+                            {selectedCustomer ? selectedCustomer.name : t("corr.chooseCustomer")}
+                          </Text>
+                          {selectedCustomer?.phone ? <Text style={{ color: c.muted, fontSize: 11 }}>{selectedCustomer.phone}</Text> : null}
+                        </Pressable>
+                        {!customers.length ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.noCustomers")}</Text> : null}
+                      </>
+                    )}
+                  </View>
+                ) : null}
                 <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>
                   {fulfillment === "handed_over" ? t("corr.fulfillmentImpact.noRestock") : t("corr.fulfillmentImpact.restock")}
                 </Text>
@@ -378,6 +432,21 @@ export default function Corrections() {
           );
         })}
       </Card>
+
+      {/* Debtor picker for a walk-in sale whose correction creates a balance. */}
+      <Modal open={customerPickerOpen} onClose={() => setCustomerPickerOpen(false)} title={t("corr.chooseCustomer")} scroll>
+        <Field label={t("common.search")} value={customerSearch} onChangeText={setCustomerSearch} autoCorrect={false} />
+        <View style={{ gap: 4 }}>
+          {customers.filter((x) => `${x.name} ${x.phone ?? ""}`.toLowerCase().includes(customerSearch.toLowerCase())).slice(0, 80).map((x) => (
+            <Pressable key={x.id} accessibilityRole="button" onPress={() => { setCustomerId(x.id); setCustomerPickerOpen(false); }}
+              style={({ pressed }: any) => ({ paddingVertical: 10, paddingHorizontal: space.sm, borderBottomWidth: 1, borderBottomColor: c.line, backgroundColor: pressed ? c.surfaceMuted : "transparent" })}>
+              <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{x.name}</Text>
+              <Text style={{ color: c.muted, fontSize: 11 }}>{x.phone ?? ""}{x.balance ? ` · ${money(x.balance)}` : ""}</Text>
+            </Pressable>
+          ))}
+          {!customers.length ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("corr.noCustomers")}</Text> : null}
+        </View>
+      </Modal>
 
       {/* Product picker: the catalogue already on this device, so it works offline. */}
       <Modal open={!!pickerFor} onClose={() => setPickerFor(null)} title={t("corr.selectProduct")} scroll>
@@ -436,6 +505,7 @@ export default function Corrections() {
 
             <View style={{ gap: 2 }}>
               <KeyValue label={t("corr.stockImpact")} value={selected.fulfillment === "handed_over" ? t("corr.fulfillmentImpact.noRestock") : t("corr.fulfillmentImpact.restock")} />
+              {selected.customer ? <KeyValue label={t("corr.balanceCustomer")} value={`${selected.customer.name}${selected.customer.phone ? ` · ${selected.customer.phone}` : ""}`} /> : null}
               <KeyValue label={t("corr.expectedRefund")} value={money(selected.expectedRefund)} />
               <KeyValue label={t("corr.expectedAdditional")} value={money(selected.expectedAdditional)} />
               {selected.expectedRefund > 0 ? <KeyValue strong label={t("corr.remainingRefund")} value={money(selected.expectedRefund - selected.amountRefunded)} /> : null}
