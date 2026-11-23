@@ -110,15 +110,15 @@ const ACTION_KEYS: Record<string, Key> = {
   "shop.policy.update": "dash.act.policy",
 };
 
-function Kpi({ label, value, hint, delta, tone, testID }: {
-  label: string; value: string; hint?: string; delta?: Change | null; tone?: string; testID?: string;
+function Kpi({ label, value, hint, delta, tone, restricted, testID }: {
+  label: string; value: string; hint?: string; delta?: Change | null; tone?: string; restricted?: boolean; testID?: string;
 }) {
   const c = useTheme();
   const t = useT();
   return (
     <Card style={{ flexGrow: 1, flexBasis: 172, minWidth: 148, gap: 5, padding: space.lg }}>
       <Text numberOfLines={1} style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{label}</Text>
-      <Text testID={testID} style={{ color: tone ?? c.ink, ...type.money }}>{value}</Text>
+      <Text testID={testID} style={{ color: restricted ? c.muted : tone ?? c.ink, ...type.money }}>{restricted ? "—" : value}</Text>
       {hint ? <Text numberOfLines={2} style={{ color: c.muted, fontSize: 12, lineHeight: 16 }}>{hint}</Text> : null}
       {delta ? (
         delta.pct === null
@@ -172,19 +172,6 @@ function AttentionRow({ label, count, tone, onPress }: {
   );
 }
 
-function FigureRow({ label, value, note }: { label: string; value: string; note?: string }) {
-  const c = useTheme();
-  return (
-    <View style={{ flexGrow: 1, flexBasis: 250, minWidth: 0, flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: space.md, paddingVertical: 7, borderBottomWidth: 1, borderBottomColor: c.line }}>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={{ color: c.muted, fontSize: 13 }}>{label}</Text>
-        {note ? <Text numberOfLines={2} style={{ color: c.muted, fontSize: 11 }}>{note}</Text> : null}
-      </View>
-      <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{value}</Text>
-    </View>
-  );
-}
-
 /** One compact secondary figure. Same width and minimum height keep every group visually even. */
 function FigureCard({ label, value, hint, note, tone, emphasis, width, testID }: {
   label: string; value: string; hint?: string; note?: string;
@@ -223,18 +210,31 @@ function FigureGroup({ title, children, divided }: { title: string; children: Re
   );
 }
 
-/** Owner-only secondary figures. Collapsed by default; the open state lives in Home so refreshes keep it. */
-function MoreFigures({ fin, ops, expenses, methodNote, open, onOpenChange }: {
-  fin: Financials; ops: Operations; expenses: { category: string; amount: number; unpaid: number }[];
-  methodNote: string; open: boolean; onOpenChange: (open: boolean) => void;
+/** The same explanation is used wherever a role may not read cost or profit. */
+function FinanceUnavailable({ allowed }: { allowed: boolean }) {
+  const t = useT(); const c = useTheme();
+  return (
+    <Card tone="muted" style={{ gap: 4, padding: space.md }}>
+      <Text style={{ color: c.ink, fontWeight: "700", fontSize: 13 }}>
+        {t(allowed ? "dash.sectionUnavailable" : "dash.financeRestrictedTitle")}
+      </Text>
+      {!allowed ? <Text style={{ color: c.muted, fontSize: 12, lineHeight: 17 }}>{t("dash.financeRestrictedHint")}</Text> : null}
+    </Card>
+  );
+}
+
+/** Secondary figures shared by both roles. Financial groups appear only when the role may read them. */
+function MoreFigures({ fin, ops, expenses, methodNote, financialsAllowed, open, onOpenChange }: {
+  fin: Financials | null; ops: Operations; expenses: { category: string; amount: number; unpaid: number }[];
+  methodNote: string; financialsAllowed: boolean; open: boolean; onOpenChange: (open: boolean) => void;
 }) {
   const c = useTheme();
   const t = useT();
   const { width } = useWindowDimensions();
   const columns = width >= 900 ? 3 : width >= 520 ? 2 : 1;
   const cardWidth = columns === 3 ? "31.5%" : columns === 2 ? "48.2%" : "100%";
-  const stockLoss = fin.stockLosses ?? fin.stockLossValue ?? 0;
-  const resultAfterLosses = fin.operatingResultAfterStockLosses ?? fin.operatingProfit;
+  const stockLoss = fin?.stockLosses ?? fin?.stockLossValue ?? 0;
+  const resultAfterLosses = fin?.operatingResultAfterStockLosses ?? fin?.operatingProfit ?? 0;
   // Keep the existing explanation verbatim; break its sentences into readable lines rather than
   // introducing a second, potentially divergent definition of the accounting rules.
   const definitions = t("fin.calculationNote").split(". ")
@@ -242,67 +242,80 @@ function MoreFigures({ fin, ops, expenses, methodNote, open, onOpenChange }: {
     .filter(Boolean);
 
   return (
-    <Disclosure title={t("dash.moreFigures")} description={t("dash.moreFiguresHint")}
+    <Disclosure title={t("dash.moreFigures")}
+      description={financialsAllowed ? t("dash.moreFiguresHint") : t("dash.moreFiguresLimited")}
       testID="dash-financial-detail" open={open} onOpenChange={onOpenChange}>
       <View style={{ padding: space.lg, paddingTop: space.md, gap: space.lg }}>
-        <FigureGroup title={t("dash.financialPerformance")}>
-          <FigureCard width={cardWidth} testID="dash-figure-cogs" label={t("fin.cogs")} value={formatRwf(fin.cogs)} hint={t("fin.cogsHint")} />
-          <FigureCard width={cardWidth} testID="dash-figure-expenses" label={t("fin.expenses")} value={formatRwf(fin.operatingExpenses)}
-            note={`${t("fin.outstanding")}: ${formatRwf(fin.outstandingExpenses)}`} />
-          <FigureCard width={cardWidth} testID="dash-figure-operating-profit" label={t("fin.operating")} value={formatRwf(fin.operatingProfit)}
-            hint={t("fin.operatingHint")} emphasis tone={fin.operatingProfit < 0 ? "danger" : undefined} />
-          <FigureCard width={cardWidth} testID="dash-figure-stock-losses" label={t("fin.stockLoss")} value={formatRwf(stockLoss)}
-            hint={t("fin.stockLossHint")} tone={stockLoss > 0 ? "danger" : undefined} />
-          <FigureCard width={cardWidth} testID="dash-figure-result-after-losses" label={t("fin.resultAfterLosses")} value={formatRwf(resultAfterLosses)}
-            hint={t("fin.resultAfterLossesHint")} tone={resultAfterLosses < 0 ? "danger" : undefined} />
+        <FigureGroup title={t("dash.salesActivity")}>
+          <FigureCard width={cardWidth} testID="dash-figure-transactions" label={t("dash.transactions")} value={String(ops.transactions)} />
+          <FigureCard width={cardWidth} testID="dash-figure-units-sold" label={t("dash.unitsSold")} value={formatQty(ops.unitsSold)} hint={t("dash.unitsSoldHint")} />
+          <FigureCard width={cardWidth} testID="dash-figure-average-sale" label={t("dash.avgSale")} value={formatRwf(ops.averageTransaction)} hint={t("dash.avgSaleHint")} />
+          <FigureCard width={cardWidth} testID="dash-figure-units-received" label={t("dash.productsReceived")} value={formatQty(ops.unitsReceived)}
+            note={`${ops.deliveries} ${t("dash.deliveries")} · ${ops.productsReceived} ${t("dash.products")}`} />
         </FigureGroup>
 
-        <FigureGroup title={t("dash.cashAndInventory")} divided>
-          <FigureCard width={cardWidth} testID="dash-figure-collected" label={t("fin.salesCollected")} value={formatRwf(ops.cashCollected)} hint={t("fin.salesCollectedHint")} />
-          <FigureCard width={cardWidth} testID="dash-figure-credit-repayments" label={t("fin.creditRepayments")} value={formatRwf(ops.creditRepayments ?? 0)}
-            hint={t("fin.creditRepaymentsHint")} note={methodNote || undefined} />
-          <FigureCard width={cardWidth} testID="dash-figure-purchases" label={t("fin.purchases")} value={formatRwf(fin.inventoryPurchases)}
-            note={`${t("dash.supplierPayables")}: ${formatRwf(ops.supplierPayables)}`} />
-          <FigureCard width={cardWidth} testID="dash-figure-inventory-value" label={t("fin.invValue")}
-            value={ops.inventoryValue !== null ? formatRwf(ops.inventoryValue) : "—"} hint={t("dash.inventoryHint")} />
-        </FigureGroup>
+        {financialsAllowed && fin ? (
+          <>
+            <FigureGroup title={t("dash.financialPerformance")} divided>
+              <FigureCard width={cardWidth} testID="dash-figure-cogs" label={t("fin.cogs")} value={formatRwf(fin.cogs)} hint={t("fin.cogsHint")} />
+              <FigureCard width={cardWidth} testID="dash-figure-expenses" label={t("fin.expenses")} value={formatRwf(fin.operatingExpenses)}
+                note={`${t("fin.outstanding")}: ${formatRwf(fin.outstandingExpenses)}`} />
+              <FigureCard width={cardWidth} testID="dash-figure-operating-profit" label={t("fin.operating")} value={formatRwf(fin.operatingProfit)}
+                hint={t("fin.operatingHint")} emphasis tone={fin.operatingProfit < 0 ? "danger" : undefined} />
+              <FigureCard width={cardWidth} testID="dash-figure-stock-losses" label={t("fin.stockLoss")} value={formatRwf(stockLoss)}
+                hint={t("fin.stockLossHint")} tone={stockLoss > 0 ? "danger" : undefined} />
+              <FigureCard width={cardWidth} testID="dash-figure-result-after-losses" label={t("fin.resultAfterLosses")} value={formatRwf(resultAfterLosses)}
+                hint={t("fin.resultAfterLossesHint")} tone={resultAfterLosses < 0 ? "danger" : undefined} />
+            </FigureGroup>
 
-        <FigureGroup title={t("dash.salesAdjustments")} divided>
-          <FigureCard width={cardWidth} testID="dash-figure-discounts" label={t("dash.discounts")} value={formatRwf(fin.discounts)}
-            note={`${t("dash.returns")}: ${formatRwf(fin.salesReturns)}`} />
-        </FigureGroup>
+            <FigureGroup title={t("dash.cashAndInventory")} divided>
+              <FigureCard width={cardWidth} testID="dash-figure-collected" label={t("fin.salesCollected")} value={formatRwf(ops.cashCollected)} hint={t("fin.salesCollectedHint")} />
+              <FigureCard width={cardWidth} testID="dash-figure-credit-repayments" label={t("fin.creditRepayments")} value={formatRwf(ops.creditRepayments ?? 0)}
+                hint={t("fin.creditRepaymentsHint")} note={methodNote || undefined} />
+              <FigureCard width={cardWidth} testID="dash-figure-purchases" label={t("fin.purchases")} value={formatRwf(fin.inventoryPurchases)}
+                note={`${t("dash.supplierPayables")}: ${formatRwf(ops.supplierPayables)}`} />
+              <FigureCard width={cardWidth} testID="dash-figure-inventory-value" label={t("fin.invValue")}
+                value={ops.inventoryValue !== null ? formatRwf(ops.inventoryValue) : "—"} hint={t("dash.inventoryHint")} />
+            </FigureGroup>
 
-        <View style={{ borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.lg, gap: space.sm }}>
-          <Text style={{ color: c.inkSoft, fontSize: 12, lineHeight: 16, fontWeight: "700", letterSpacing: 0.2 }}>{t("dash.expensesByCategory")}</Text>
-          {expenses.length ? (
-            <View style={{ borderWidth: 1, borderColor: c.line, borderRadius: radius.sm, overflow: "hidden" }}>
-              {expenses.map((e, i) => (
-                <View key={e.category} style={{
-                  flexDirection: "row", alignItems: "center", gap: space.md, paddingVertical: 9, paddingHorizontal: space.md,
-                  borderTopWidth: i ? 1 : 0, borderTopColor: c.line, backgroundColor: c.surface,
-                }}>
-                  <Text style={{ flex: 1, color: c.inkSoft, fontSize: 13 }}>{e.category}</Text>
-                  <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(e.amount)}</Text>
+            <FigureGroup title={t("dash.salesAdjustments")} divided>
+              <FigureCard width={cardWidth} testID="dash-figure-discounts" label={t("dash.discounts")} value={formatRwf(fin.discounts)}
+                note={`${t("dash.returns")}: ${formatRwf(fin.salesReturns)}`} />
+            </FigureGroup>
+
+            <View style={{ borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.lg, gap: space.sm }}>
+              <Text style={{ color: c.inkSoft, fontSize: 12, lineHeight: 16, fontWeight: "700", letterSpacing: 0.2 }}>{t("dash.expensesByCategory")}</Text>
+              {expenses.length ? (
+                <View style={{ borderWidth: 1, borderColor: c.line, borderRadius: radius.sm, overflow: "hidden" }}>
+                  {expenses.map((e, i) => (
+                    <View key={e.category} style={{
+                      flexDirection: "row", alignItems: "center", gap: space.md, paddingVertical: 9, paddingHorizontal: space.md,
+                      borderTopWidth: i ? 1 : 0, borderTopColor: c.line, backgroundColor: c.surface,
+                    }}>
+                      <Text style={{ flex: 1, color: c.inkSoft, fontSize: 13 }}>{e.category}</Text>
+                      <Text style={{ color: c.ink, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(e.amount)}</Text>
+                    </View>
+                  ))}
                 </View>
-              ))}
+              ) : (
+                <View style={{ borderWidth: 1, borderColor: c.line, borderRadius: radius.sm, padding: space.md, backgroundColor: c.surfaceMuted }}>
+                  <Text style={{ color: c.muted, fontSize: 12, lineHeight: 17 }}>{t("dash.noExpensesThisPeriod")}</Text>
+                </View>
+              )}
             </View>
-          ) : (
-            <View style={{ borderWidth: 1, borderColor: c.line, borderRadius: radius.sm, padding: space.md, backgroundColor: c.surfaceMuted }}>
-              <Text style={{ color: c.muted, fontSize: 12, lineHeight: 17 }}>{t("dash.noExpensesThisPeriod")}</Text>
-            </View>
-          )}
-        </View>
 
-        <Disclosure title={t("fin.howCalculated")} compact>
-          <View style={{ gap: 6, paddingBottom: space.sm }}>
-            {definitions.map((line, i) => (
-              <View key={`${i}-${line.slice(0, 18)}`} style={{ flexDirection: "row", alignItems: "flex-start", gap: 7 }}>
-                <View style={{ width: 4, height: 4, borderRadius: 2, marginTop: 7, backgroundColor: c.lineStrong }} />
-                <Text style={{ flex: 1, color: c.muted, fontSize: 12, lineHeight: 18 }}>{line}</Text>
+            <Disclosure title={t("fin.howCalculated")} compact>
+              <View style={{ gap: 6, paddingBottom: space.sm }}>
+                {definitions.map((line, i) => (
+                  <View key={`${i}-${line.slice(0, 18)}`} style={{ flexDirection: "row", alignItems: "flex-start", gap: 7 }}>
+                    <View style={{ width: 4, height: 4, borderRadius: 2, marginTop: 7, backgroundColor: c.lineStrong }} />
+                    <Text style={{ flex: 1, color: c.muted, fontSize: 12, lineHeight: 18 }}>{line}</Text>
+                  </View>
+                ))}
               </View>
-            ))}
-          </View>
-        </Disclosure>
+            </Disclosure>
+          </>
+        ) : <FinanceUnavailable allowed={financialsAllowed} />}
       </View>
     </Disclosure>
   );
@@ -644,7 +657,9 @@ export default function Home() {
     : null;
   const kpiHint = (key: string) => {
     if (key === "grossProfit") {
-      return fin?.grossMarginBps != null ? `${t("dash.grossMargin")} ${(fin.grossMarginBps / 100).toFixed(1)}%` : t("fin.marginUnavailable");
+      if (!finVisible) return t("dash.financeRestrictedHint");
+      if (!fin) return t("dash.sectionUnavailable");
+      return fin.grossMarginBps != null ? `${t("dash.grossMargin")} ${(fin.grossMarginBps / 100).toFixed(1)}%` : t("fin.marginUnavailable");
     }
     if (key === "moneyReceived") {
       return t("dash.receivedBreakdown")
@@ -713,27 +728,17 @@ export default function Home() {
                 value={tile.key === "transactions" ? String(tile.value) : formatRwf(tile.value)}
                 delta={tile.delta}
                 hint={kpiHint(tile.key) ?? (tile.hintKey ? t(tile.hintKey) : undefined)}
+                restricted={tile.restricted}
                 tone={tile.tone === "danger" ? c.danger : tile.tone === "accent" ? c.accent : undefined} />
             ))}
           </View>
 
           {fin?.costBasisIncomplete ? <Banner tone="warn" text={t("fin.provisional")} /> : null}
 
-          {/* Secondary figures sit directly under the headline KPIs and stay folded by default. */}
-          {finVisible && fin ? (
-            <MoreFigures fin={fin} ops={ops} expenses={data.expensesByCategory} methodNote={methodNote}
-              open={moreFiguresOpen} onOpenChange={setMoreFiguresOpen} />
-          ) : (
-            <Disclosure title={t("dash.moreFigures")} description={t("dash.moreFiguresOpsHint")}>
-              <View style={{ padding: space.lg, paddingTop: space.md }}>
-                <FigureRow label={t("dash.transactions")} value={String(ops.transactions)} />
-                <FigureRow label={t("dash.unitsSold")} value={formatQty(ops.unitsSold)} />
-                <FigureRow label={t("dash.avgSale")} value={formatRwf(ops.averageTransaction)} />
-                <FigureRow label={t("dash.productsReceived")} value={formatQty(ops.unitsReceived)}
-                  note={`${ops.deliveries} ${t("dash.deliveries")} · ${ops.productsReceived} ${t("dash.products")}`} />
-              </View>
-            </Disclosure>
-          )}
+          {/* Secondary figures sit directly under the headline KPIs and stay folded by default.
+              Both roles get the same shell and the same sales activity; only cost and profit are gated. */}
+          <MoreFigures fin={fin ?? null} ops={ops} expenses={data.expensesByCategory} methodNote={methodNote}
+            financialsAllowed={finVisible} open={moreFiguresOpen} onOpenChange={setMoreFiguresOpen} />
 
           {/* Four actions, one row, no duplicate routes. */}
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
@@ -789,9 +794,10 @@ export default function Home() {
                 <Text style={{ color: c.ink, ...type.h2 }}>{t("home.recentActivity")}</Text>
                 <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.activityHint")}</Text>
               </View>
+              {/* Sales are shared shop activity. Expenses and profitability stay financial-only. */}
+              <Button size="sm" kind="secondary" label={t("common.sales")} onPress={() => router.push(`/reports?kind=sales&from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}` as any)} />
               {finVisible ? (
                 <>
-                  <Button size="sm" kind="secondary" label={t("common.sales")} onPress={() => router.push(`/reports?kind=sales&from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}` as any)} />
                   <Button size="sm" kind="secondary" label={t("common.expenses")} onPress={() => router.push(`/reports?kind=expenses&from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}` as any)} />
                   <Button size="sm" kind="secondary" label={t("nav.profitability")} onPress={() => router.push("/profitability" as any)} />
                 </>
@@ -821,8 +827,8 @@ export default function Home() {
             ) : null}
           </Card>
 
-          {finVisible && fin ? (
-            <Disclosure title={t("dash.moreCharts")} description={t("dash.moreChartsHint")}>
+          <Disclosure title={t("dash.moreCharts")} description={t("dash.moreChartsHint")}>
+            {finVisible && fin ? (
               <View style={{ padding: space.lg, gap: space.lg, paddingTop: space.md }}>
                 <View style={{ gap: 2 }}>
                   <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.gpVsExpenses")}</Text>
@@ -841,8 +847,8 @@ export default function Home() {
                       label={t("fin.resultAfterLosses")} labelMode="month" showCount={false} />
                   : <Empty title={t("dash.noSales")} description={t("dash.noSalesDesc")} />}
               </View>
-            </Disclosure>
-          ) : null}
+            ) : <View style={{ padding: space.lg, paddingTop: space.md }}><FinanceUnavailable allowed={finVisible} /></View>}
+          </Disclosure>
 
           <Disclosure title={t("dash.productPanels")} description={t("dash.productPanelsHint")}>
             <View style={{ padding: space.lg, gap: space.lg, paddingTop: space.md }}>
@@ -853,21 +859,25 @@ export default function Home() {
                 </View>
                 <View style={{ flex: 1, gap: space.sm, minWidth: 0 }}>
                   <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.topByProfit")}</Text>
-                  {profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
+                  {!finVisible ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.financeRestrictedHint")}</Text>
+                    : profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
                     : (fin?.topProductsByProfit ?? []).length ? (fin?.topProductsByProfit ?? []).map((p) => (
                     <View key={p.productId} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
                       <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
                       <Text style={{ color: (p.grossProfit ?? 0) < 0 ? c.danger : c.success, fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{formatRwf(p.grossProfit ?? 0)}</Text>
                       <Text style={{ color: c.muted, fontSize: 11, width: 52, textAlign: "right" }}>{p.grossMarginBps != null ? `${(p.grossMarginBps / 100).toFixed(0)}%` : "—"}</Text>
                     </View>
-                  )) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.noSales")}</Text>}
+                  )) : !fin ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.sectionUnavailable")}</Text>
+                    : <Text style={{ color: c.muted, fontSize: 12 }}>{t("dash.noSales")}</Text>}
                 </View>
               </View>
-              {finVisible && fin ? (
-                <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg }}>
+              <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg }}>
                   <View style={{ flex: 1, gap: space.sm, minWidth: 0 }}>
                     <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.lowMargin")}</Text>
-                    {profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
+                    {!finVisible || !fin ? <Text style={{ color: c.muted, fontSize: 12 }}>
+                        {t(!finVisible ? "dash.financeRestrictedHint" : "dash.sectionUnavailable")}
+                      </Text>
+                      : profitMissing ? <Text style={{ color: c.danger, fontSize: 13, lineHeight: 19 }}>{t("dash.sectionUnavailable")}</Text>
                       : (fin.lowMarginProducts ?? []).length ? (fin.lowMarginProducts ?? []).map((p) => (
                       <View key={p.productId} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: 6, borderTopWidth: 1, borderTopColor: c.line }}>
                         <Text numberOfLines={1} style={{ color: c.ink, fontSize: 13, flex: 1 }}>{p.name}</Text>
@@ -883,7 +893,6 @@ export default function Home() {
                     <ProductRanking items={data.worstProducts} emptyLabel={t("dash.noSales")} valueLabel={t("common.total")} />
                   </View>
                 </View>
-              ) : null}
               <View style={{ gap: space.sm }}>
                 <Text style={{ color: c.ink, ...type.h3 }}>{t("dash.stockHealth")}</Text>
                 <StockHealthBar inStock={inStock} low={lowOnly} out={outCount} label={t("dash.stockHealth")} />

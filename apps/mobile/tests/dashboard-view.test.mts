@@ -63,14 +63,20 @@ test("no comparison arrow is invented without a baseline", () => {
   assert.equal(withPrior.find((t) => t.key === "moneyReceived")?.delta, null, "no per-period collection baseline exists");
 });
 
-test("a manager without the cost grant gets no profit figure at all", () => {
-  const tiles = primaryFigures({
+test("both roles get the same four headline cards; a manager's profit card is locked, not swapped out", () => {
+  const owner = primaryFigures({ operations: ops(), financials: fin(), financialsAllowed: true });
+  const manager = primaryFigures({
     operations: ops({ netSales: 100_000, transactions: 4 }), financials: null, financialsAllowed: false,
     salesComparison: { netSales: { change: 0, pct: 0 } },
   });
-  assert.equal(tiles.length, 4);
-  assert.deepEqual(tiles.map((t) => t.key), ["netSales", "moneyReceived", "outstandingCredit", "transactions"]);
-  assert.ok(!tiles.some((t) => t.key === "grossProfit"), "no zero stand-in that reads as a real loss");
+  const keys = ["netSales", "grossProfit", "moneyReceived", "outstandingCredit"];
+  assert.deepEqual(owner.map((t) => t.key), keys);
+  assert.deepEqual(manager.map((t) => t.key), keys, "the dashboards keep the same order for both roles");
+  const locked = manager.find((t) => t.key === "grossProfit");
+  assert.equal(locked?.restricted, true, "the value is withheld, not rendered as a real zero");
+  assert.equal(locked?.hintKey, "dash.financeRestrictedHint");
+  assert.equal(locked?.delta, null, "a hidden figure carries no invented comparison");
+  assert.equal(owner.find((t) => t.key === "grossProfit")?.restricted, false);
 });
 
 test("gross profit goes red only when it is actually negative", () => {

@@ -29,23 +29,22 @@ export const NAV: Record<Role, NavGroup[]> = {
     ] },
   ],
   owner: [
-    // The owner does the same day-to-day work a manager does — selling and receiving stock — so
-    // those destinations come first. Without this group the owner could record a sale only through
-    // a dashboard shortcut, never from the navigation a manager uses.
+    // Shared destinations use the manager's order, so switching roles never moves Home, Sell,
+    // Stock or Reports. Owner-only destinations follow the shared ones instead of splitting them.
     { label: "nav.groupOperations", items: [
+      { href: "/", key: "nav.home", description: "nav.homeDesc" },
       { href: "/sell", key: "nav.sell", description: "nav.sellDesc" },
       { href: "/stock", key: "nav.stock", description: "nav.stockDesc" },
     ] },
     { label: "nav.groupOversight", items: [
-      { href: "/", key: "nav.home", description: "nav.homeDesc" },
       { href: "/reports", key: "nav.reports", description: "nav.reportsDesc" },
       { href: "/sales", key: "nav.sales", description: "nav.salesDesc" },
+      { href: "/corrections", key: "nav.corrections", description: "nav.correctionsDesc" },
+      { href: "/customers", key: "nav.customers", description: "nav.customersDesc" },
       { href: "/profitability", key: "nav.profitability", description: "nav.profitabilityDesc" },
       { href: "/approvals", key: "nav.approvals", description: "nav.approvalsDesc" },
       { href: "/shops", key: "nav.shops", description: "nav.shopsDesc" },
-      { href: "/customers", key: "nav.customers", description: "nav.customersDesc" },
       { href: "/alerts", key: "nav.alerts", description: "nav.alertsDesc" },
-      { href: "/corrections", key: "nav.corrections", description: "nav.correctionsDesc" },
     ] },
     { label: "nav.groupAdmin", items: [
       { href: "/expense", key: "nav.expense", description: "nav.expenseDesc" },

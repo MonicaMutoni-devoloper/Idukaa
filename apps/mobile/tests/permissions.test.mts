@@ -26,6 +26,14 @@ test("the owner can reach selling and stock counting from the navigation", () =>
   assert.ok(bottomNav("owner").some((i) => i.href === "/sell"), "selling is in the owner's tab bar");
 });
 
+test("shared destinations keep the same order for both roles", () => {
+  const manager = hrefs("manager");
+  const ownerShared = hrefs("owner").filter((href) => manager.includes(href));
+  assert.deepEqual(ownerShared, manager, "a shared destination never moves when the role changes");
+  assert.deepEqual(bottomNav("owner").map((i) => i.href), bottomNav("manager").map((i) => i.href),
+    "both roles get the same five tab-bar slots");
+});
+
 test("owner-only destinations stay out of the manager's navigation", () => {
   const manager = hrefs("manager");
   for (const href of ["/approvals", "/team", "/profitability"]) {

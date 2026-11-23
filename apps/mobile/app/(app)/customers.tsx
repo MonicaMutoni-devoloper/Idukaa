@@ -65,7 +65,9 @@ export default function Customers() {
     if (dupe) { setError(t("credit.phoneTaken").replace("{name}", dupe.name)); return; }
     setBusy(true);
     const id = uuid(); const cleanName = name.trim();
-    const limitValue = Math.max(0, Number(limit) || 0);
+    // The API stores zero for a manager; keep the queued/locally cached row identical so the
+    // screen never shows a credit line the server refused.
+    const limitValue = user.role === "owner" ? Math.max(0, Number(limit) || 0) : 0;
     try {
       // Queued and saved locally first, so registering a debtor is never lost to a dropped connection.
       await enqueue(user.id, uuid(), "customer.upsert",
@@ -161,8 +163,9 @@ export default function Customers() {
           <Field label={t("credit.phone")} required value={phone} onChangeText={setPhone} keyboardType="phone-pad"
             placeholder="078X XXX XXX" hint={t("credit.phoneHint")} />
           <Field label={t("credit.address")} value={address} onChangeText={setAddress} />
-          <Field label={t("credit.limit")} value={limit} onChangeText={setLimit} keyboardType="number-pad"
-            hint={user.role === "owner" ? undefined : t("offline.center.forbidden")} />
+          <Field label={t("credit.limit")} value={user.role === "owner" ? limit : "0"}
+            onChangeText={setLimit} keyboardType="number-pad" editable={user.role === "owner"}
+            hint={t("credit.limitHint")} />
         </View>
       </Modal>
 

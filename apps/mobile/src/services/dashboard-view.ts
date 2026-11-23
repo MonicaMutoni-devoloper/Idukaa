@@ -3,7 +3,7 @@ import type { Key } from "../localization";
 import type { Change, Operations } from "./local-dashboard";
 
 /**
- * Presentation rules for the owner dashboard.
+ * Presentation rules shared by the owner and manager dashboards.
  *
  * The dashboard used to decide these things inline: which figures deserve a headline, which
  * "needs attention" tiles to show, and how to label a chart. Keeping the rules here means they can
@@ -44,6 +44,8 @@ export interface PrimaryFigure {
   /** Only ever set when the payload carried a real previous-period figure. */
   delta: Change | null;
   tone: "default" | "danger" | "accent";
+  /** True when the figure exists for this role but its value may not be shown. */
+  restricted?: boolean;
   testID?: string;
 }
 
@@ -69,8 +71,9 @@ export interface PrimaryInput {
  *    `cashCollected`: a repayment is money in the till and must be counted once, here.
  *  - Outstanding credit is a BALANCE as of the period end, so it stands alone rather than being
  *    netted against this period's sales.
- *  - Profit is only present when the payload was allowed to carry it. A manager without the
- *    grant gets operational figures instead of a zero that would read as a real loss.
+ *  - Both roles get the SAME four cards in the same order. A manager without the cost grant sees
+ *    the profit card locked, never a different card that makes the dashboards look unrelated and
+ *    never a zero that would read as a real loss.
  *  - A comparison is attached only when the payload supplied one. No baseline, no arrow.
  */
 export function primaryFigures(input: PrimaryInput): PrimaryFigure[] {
@@ -89,18 +92,19 @@ export function primaryFigures(input: PrimaryInput): PrimaryFigure[] {
     },
   ];
 
-  if (financialsAllowed && financials) {
-    out.push({
-      key: "grossProfit",
-      labelKey: "fin.gross",
-      value: financials.grossProfit,
-      // The screen renders the margin itself; `grossMarginBps` stays the only source for it.
-      hintKey: financials.grossMarginBps != null ? "dash.grossMargin" : "fin.marginUnavailable",
-      delta: input.comparison?.grossProfit ?? null,
-      tone: financials.grossProfit < 0 ? "danger" : "default",
-      testID: "kpi-grossProfit",
-    });
-  }
+  out.push({
+    key: "grossProfit",
+    labelKey: "fin.gross",
+    value: financials?.grossProfit ?? 0,
+    // The screen renders the margin itself; `grossMarginBps` stays the only source for it.
+    hintKey: financials && financialsAllowed
+      ? (financials.grossMarginBps != null ? "dash.grossMargin" : "fin.marginUnavailable")
+      : (financialsAllowed ? "dash.sectionUnavailable" : "dash.financeRestrictedHint"),
+    delta: financials && financialsAllowed ? input.comparison?.grossProfit ?? null : null,
+    tone: financials && financialsAllowed && financials.grossProfit < 0 ? "danger" : "default",
+    restricted: !(financials && financialsAllowed),
+    testID: "kpi-grossProfit",
+  });
 
   out.push({
     key: "moneyReceived",
@@ -121,19 +125,6 @@ export function primaryFigures(input: PrimaryInput): PrimaryFigure[] {
     tone: (ops.outstandingCredit ?? 0) > 0 ? "accent" : "default",
     testID: "kpi-outstandingCredit",
   });
-
-  // A manager without cost data still needs a fourth tile; transactions is real and not financial.
-  if (out.length < 4) {
-    out.push({
-      key: "transactions",
-      labelKey: "dash.transactions",
-      value: ops.transactions,
-      hintKey: "dash.unitsSoldHint",
-      delta: null,
-      tone: "default",
-      testID: "kpi-transactions",
-    });
-  }
 
   return out;
 }
