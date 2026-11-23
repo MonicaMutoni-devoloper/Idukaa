@@ -222,7 +222,7 @@ export class SalePostingService {
         [p.saleId, l.productId, l.qty, l.unitPrice, amounts[i], natural[i], cost],
       );
       await this.mv(c, shopId, u.id, l.productId, "sale", -l.qty, cost, "sale", p.saleId, p.soldAt,
-        link ? "corrected sale" : undefined);
+        link ? "corrected sale" : undefined, p.soldAt);
       postedLines.push({ productId: l.productId, qty: l.qty, unitPrice: l.unitPrice, lineAmount: amounts[i]!, unitCost: cost });
     }
 
@@ -296,11 +296,11 @@ export class SalePostingService {
 
   private async mv(
     c: PoolClient, shopId: string, userId: string, productId: string, type: string, qty: number,
-    unitCost: number | null, src: string, srcId: string, at: string, reason?: string,
+    unitCost: number | null, src: string, srcId: string, at: string, reason?: string, actedAt?: string,
   ) {
     await c.query(
-      "INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-      [shopId, productId, type, qty, unitCost, src, srcId, userId, reason ?? null, at],
+      "INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at,acted_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+      [shopId, productId, type, qty, unitCost, src, srcId, userId, reason ?? null, at, actedAt ?? new Date().toISOString()],
     );
     await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [productId]);
   }

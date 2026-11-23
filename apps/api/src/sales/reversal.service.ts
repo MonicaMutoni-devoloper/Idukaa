@@ -115,8 +115,8 @@ export class SalesReversalService {
     if (restock) {
       for (const l of lines) {
         await c.query(
-          `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at)
-           VALUES ($1,$2,'sale_return',$3,$4,$5,$6,$7,$8,now())`,
+          `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at,acted_at)
+           VALUES ($1,$2,'sale_return',$3,$4,$5,$6,$7,$8,now(),now())`,
           [shopId, l.product_id, l.qty, l.unit_cost, input.source, sourceId, u.id,
             input.source === "sale_correction" ? `correction reversal: ${input.reason}` : `sale cancelled: ${input.reason}`],
         );

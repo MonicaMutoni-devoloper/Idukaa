@@ -172,9 +172,9 @@ export class ReturnsService {
         // Restored at the cost the goods originally left at, never today's purchase cost. A legacy
         // line without a recorded cost keeps the running-average fallback in the valuation replay.
         await c.query(
-          `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at)
-           VALUES ($1,$2,'sale_return',$3,$4,'sale_return',$5,$6,$7,$8)`,
-          [shopId, l.productId, l.qty, line.unitCost, p.returnId, u.id, `return (${l.condition}): ${p.reason}`, p.returnedAt]);
+          `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at,acted_at)
+           VALUES ($1,$2,'sale_return',$3,$4,'sale_return',$5,$6,$7,$8,$9)`,
+          [shopId, l.productId, l.qty, line.unitCost, p.returnId, u.id, `return (${l.condition}): ${p.reason}`, p.returnedAt, p.returnedAt]);
         await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [l.productId]);
         if (line.unitCost !== null) costReversed += Math.round((line.unitCost * l.qty) / 1000);
       }

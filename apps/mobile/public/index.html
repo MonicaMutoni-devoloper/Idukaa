@@ -18,7 +18,15 @@
       html, body { height: 100%; background-color: #F6F8FA; }
       body { overflow: hidden; margin: 0; }
       #root { display: flex; height: 100%; flex: 1; }
+      /* Visible before the launch bundle paints. If a stale shell never mounts, this is a readable
+         loading state instead of a page that looks completely black. */
+      #root:empty::after {
+        content: "Opening Idukaa…"; position: fixed; inset: 0; display: flex; align-items: center;
+        justify-content: center; color: #8AA0B4; font: 600 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        letter-spacing: .01em;
+      }
     </style>
+    <script src="/boot-recovery.js" defer></script>
     <script>
       /* Only the appearance preference is read here: no tokens, accounts or business data. */
       (function () {

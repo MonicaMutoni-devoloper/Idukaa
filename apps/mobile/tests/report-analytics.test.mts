@@ -209,7 +209,8 @@ test("movement totals keep quantities exact and refuse to guess a loss cost", ()
 test("movements derived from device records carry quantities, references and no invented balance", () => {
   const records = [
     rec("op1", "purchase.create", "2026-11-03T07:00:00.000Z", {
-      purchaseId: "pur-1", orderedAt: "2026-11-03T07:00:00.000Z", receiveNow: true, amountPaid: 5000,
+      // A day-only receive form stores the business date at noon; the action time must stay 07:00.
+      purchaseId: "pur-1", orderedAt: "2026-11-03T12:00:00.000Z", receiveNow: true, amountPaid: 5000,
       lines: [{ productId: "p1", qty: 10000, unitCost: 500 }],
     }),
     rec("op2", "sale.create", "2026-11-03T09:00:00.000Z", {
@@ -231,6 +232,8 @@ test("movements derived from device records carry quantities, references and no 
   const received = rows.find((r) => r.type === "receipt")!;
   assert.equal(received.qty, 10000);
   assert.equal(received.unitCost, 500);
+  assert.equal(received.at, "2026-11-03T12:00:00.000Z", "the stock date stays the entered business day");
+  assert.equal(received.actedAt, "2026-11-03T07:00:00.000Z", "the receipt shows when the operation was saved");
   assert.equal(received.reference, "RC-PUR1", "short human reference, not a UUID");
   const loss = rows.find((r) => r.type === "damage")!;
   assert.equal(loss.syncStatus, "pending_approval");

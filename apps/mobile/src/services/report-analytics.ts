@@ -28,7 +28,11 @@ export interface InventoryRow {
 export type MovementGroup = "in" | "sold" | "loss" | "adjust" | "other";
 
 export interface MovementRow {
-  id: string; at: string; product: string; code: string; unit: string;
+  id: string;
+  /** Business/document date. A day-only form is stored at noon, so this is not the action time. */
+  at: string; product: string; code: string; unit: string;
+  /** When the operation was actually saved. Older server rows fall back to their record time. */
+  actedAt?: string | null;
   type: MovementType; qty: number; unitCost: number | null;
   reason: string | null; reference: string | null; by: string | null;
   balanceBefore: number | null; balanceAfter: number | null;
@@ -274,11 +278,17 @@ export function movementsFromRecords(input: {
   // parseRecords drops the operation id, so remember the sync verdict by the business id inside
   // each payload. Every row here is a device record; the verdict tells the table what is pending.
   const verdict = new Map<string, RowSyncStatus>();
+  // The local record's created_at is when the device saved the operation. It is the only honest
+  // action time for a receipt whose business date was entered as a day (and therefore is noon).
+  const acted = new Map<string, string>();
   for (const r of input.records) {
     let p: any;
     try { p = JSON.parse(r.data); } catch { continue; }
-    const id = p?.saleId ?? p?.purchaseId ?? p?.receiptId ?? p?.adjustmentId;
-    if (id) verdict.set(String(id), r.status as RowSyncStatus);
+    const id = p?.saleId ?? p?.purchaseId ?? p?.receiptId ?? p?.adjustmentId ?? p?.productId;
+    if (id) {
+      verdict.set(String(id), r.status as RowSyncStatus);
+      if (r.created_at) acted.set(String(id), r.created_at);
+    }
   }
   const productsById = (id: string) => products.get(id);
   const row = (id: string, at: string, productId: string, type: MovementType, qty: number, unitCost: number | null, extra: Partial<MovementRow> = {}): MovementRow => {
@@ -291,19 +301,22 @@ export function movementsFromRecords(input: {
   };
   const out: MovementRow[] = [];
   for (const o of recs.openings) {
-    out.push(row(`m:open:${o.productId}:${o.at}`, o.at, o.productId, "opening", o.qty, o.unitCost ?? null));
+    out.push(row(`m:open:${o.productId}:${o.at}`, o.at, o.productId, "opening", o.qty, o.unitCost ?? null,
+      { actedAt: acted.get(o.productId) ?? o.at }));
   }
   for (const p of recs.purchases) {
     if (!p.receiveNow) continue;
-    p.lines.forEach((l, i) => out.push(row(`m:rcv:${p.id}:${l.productId}:${i}`, p.receivedAt, l.productId, "receipt", l.qty, l.unitCost ?? null, { reference: shortId(p.id), syncStatus: verdict.get(p.id) })));
+    p.lines.forEach((l, i) => out.push(row(`m:rcv:${p.id}:${l.productId}:${i}`, p.receivedAt, l.productId, "receipt", l.qty, l.unitCost ?? null,
+      { reference: shortId(p.id), syncStatus: verdict.get(p.id), actedAt: acted.get(p.id) ?? p.receivedAt })));
   }
   for (const s of recs.sales) {
-    s.lines.forEach((l, i) => out.push(row(`m:sale:${s.id}:${l.productId}:${i}`, s.at, l.productId, "sale", -l.qty, null, { reference: shortId(s.id), syncStatus: verdict.get(s.id) })));
+    s.lines.forEach((l, i) => out.push(row(`m:sale:${s.id}:${l.productId}:${i}`, s.at, l.productId, "sale", -l.qty, null,
+      { reference: shortId(s.id), syncStatus: verdict.get(s.id), actedAt: acted.get(s.id) ?? s.at })));
   }
   for (const a of recs.adjustments) {
     const type: MovementType = a.reason === "damage" ? "damage" : a.reason === "expiry" ? "expiry" : a.reason === "sale_return" ? "sale_return" : a.reason === "supplier_return" ? "supplier_return" : "adjustment";
     out.push(row(`m:adj:${a.id}:${a.productId}`, a.at, a.productId, type, a.qty, null, {
-      reason: a.reason, reference: shortId(a.id), syncStatus: verdict.get(a.id),
+      reason: a.reason, reference: shortId(a.id), syncStatus: verdict.get(a.id), actedAt: acted.get(a.id) ?? a.at,
     }));
   }
   return out

@@ -23,7 +23,10 @@
 // whole list again next launch. A hash-named file already in the cache is skipped, so the next launch
 // resumes where the last one stopped; unhashed files are always re-fetched so a redeploy cannot leave
 // a stale index.html or manifest behind.
-const CACHE = "idukaa-shell-v11";
+// v12: a successful online navigation now refreshes the saved shell. Previously only a worker install
+// replaced it, so a tab could keep an old shell that named hashed chunks the current deployment had
+// already removed — a reload looked like a black page until a new tab got the new shell.
+const CACHE = "idukaa-shell-v12";
 const SHELL = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png"];
 // Written next to the export by scripts/write-sw-manifest.mjs: every file, not only the launch ones.
 const MANIFEST = "/sw-assets.json";
@@ -172,8 +175,15 @@ self.addEventListener("fetch", (e) => {
       const timedOut = new Promise((resolve) => {
         timer = setTimeout(() => { savedShell().then(resolve); }, NAV_TIMEOUT_MS);
       });
+      // A successful online launch is the shell this deployment actually serves. Saving it here
+      // keeps the offline fallback in step with the live hashed assets, instead of waiting for the
+      // next worker install to replace a shell whose chunk names may already be gone.
+      const fresh = fetch(req).then((res) => {
+        if (res.ok && res.type === "basic") void save("/", res.clone());
+        return res;
+      });
       try {
-        return await Promise.race([fetch(req), timedOut]);
+        return await Promise.race([fresh, timedOut]);
       } catch {
         return await savedShell();
       } finally {

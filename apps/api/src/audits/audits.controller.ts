@@ -43,7 +43,7 @@ export class AuditsController {
           "SELECT type, qty, unit_cost, occurred_at, seq FROM stock_movements WHERE product_id=$1 ORDER BY seq", [a.product_id]);
         const r = replayLedger(mvs.map((m: any) => ({ type: m.type, qty: Number(m.qty), unitCost: m.unit_cost ?? undefined, occurredAt: new Date(m.occurred_at).toISOString(), seq: Number(m.seq) })));
         const unitCost = r.onHand > 0 ? Math.round((r.value * 1000) / r.onHand) : null;
-        await c.query("INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at) VALUES ($1,$2,$3,$4,$5,'adjustment',$6,$7,$8,now())", [u.shopId, a.product_id, MOVE[a.reason as keyof typeof MOVE], a.qty, unitCost, a.id, a.requested_by, `${a.reason}: ${a.note}`]);
+        await c.query("INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at,acted_at) VALUES ($1,$2,$3,$4,$5,'adjustment',$6,$7,$8,now(),now())", [u.shopId, a.product_id, MOVE[a.reason as keyof typeof MOVE], a.qty, unitCost, a.id, a.requested_by, `${a.reason}: ${a.note}`]);
         await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [a.product_id]);
       }
       await c.query("UPDATE adjustments SET status=$2, decided_by=$3, decided_at=now(), decision_note=$4 WHERE id=$1", [id, d.approve ? "approved" : "rejected", u.id, d.note]);

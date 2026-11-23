@@ -1102,6 +1102,7 @@ export const rw: Record<Key, string> = {
   "ana.qty": "Ingano",
   "ana.balance": "Asigaye",
   "ana.reference": "Nomero",
+  "ana.actionTime": "Igihe byakorewe", "ana.stockDate": "Itariki y'ububiko",
   "ana.by": "Byanditswe na",
   "ana.unitCost": "Ikiguzi cy'igipimo",
   "ana.value": "Agaciro",

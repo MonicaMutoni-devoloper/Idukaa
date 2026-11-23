@@ -18,6 +18,14 @@ const boot = `
 })();
 `;
 
+const fallbackCss = `
+#root:empty::after {
+  content: "Opening Idukaa…"; position: fixed; inset: 0; display: flex; align-items: center;
+  justify-content: center; color: #8AA0B4; font: 600 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  letter-spacing: .01em;
+}
+`;
+
 export default function Root({ children }: PropsWithChildren) {
   return (
     <html lang="en"><head>
@@ -25,6 +33,8 @@ export default function Root({ children }: PropsWithChildren) {
       <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
       <link rel="manifest" href="/manifest.json" /><meta name="theme-color" content="#0F5C4D" /><meta name="apple-mobile-web-app-title" content="Idukaa" />
       <ScrollViewStyleReset />
+      <style dangerouslySetInnerHTML={{ __html: fallbackCss }} />
+      <script src="/boot-recovery.js" defer />
       <script dangerouslySetInnerHTML={{ __html: boot }} />
       <script dangerouslySetInnerHTML={{ __html: "if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js')})}" }} />
     </head><body>{children}</body></html>

@@ -77,6 +77,7 @@ test("the service worker caches only the shell and never API responses", () => {
   // A launch may not wait on a hanging network: the cached shell answers after a bounded delay.
   assert.match(sw, /const NAV_TIMEOUT_MS = \d+;/);
   assert.match(sw, /setTimeout\(/, "the navigation path must be time-bounded");
+  assert.match(sw, /void save\("\/", res\.clone\(\)\)/, "a successful online launch refreshes the saved shell");
 });
 
 test("install progress is read from the saved entries, never guessed", () => {
@@ -100,5 +101,16 @@ test("both web HTML entry points register the worker and use Idukaa metadata", (
     assert.match(html, /manifest\.json/, `${file} must link the manifest`);
     assert.match(html, /serviceWorker/, `${file} must register the service worker`);
     assert.match(html, /#0F5C4D|Idukaa/, `${file} must carry Idukaa branding`);
+    assert.match(html, /boot-recovery\.js/, `${file} must load the boot recovery before the app`);
   }
+});
+
+test("a stale web shell self-heals without touching saved business data", () => {
+  const js = read("public/boot-recovery.js");
+  assert.match(js, /serviceWorker\.getRegistrations/, "the stale worker is removed");
+  assert.match(js, /caches\.delete/, "the old app-shell cache is removed");
+  assert.match(js, /sessionStorage/, "the recovery retries once, not in a loop");
+  assert.match(js, /script\.src|target\.src/, "a missing launch chunk triggers recovery");
+  assert.match(js, /setTimeout/, "an empty root triggers recovery after a bounded wait");
+  assert.doesNotMatch(js, /indexedDB|localStorage\.clear/, "sales, stock and queued work are never cleared");
 });

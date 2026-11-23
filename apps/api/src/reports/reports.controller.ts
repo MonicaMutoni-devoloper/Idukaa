@@ -414,11 +414,12 @@ export class ReportsController {
     const rows = await this.db.query(
       `WITH led AS (
          SELECT m.id, m.product_id, m.type, m.qty, m.unit_cost, m.reason, m.source_id,
-                m.occurred_at, m.user_id,
+                m.occurred_at, m.recorded_at, m.acted_at, m.user_id,
                 SUM(m.qty) OVER (PARTITION BY m.product_id ORDER BY m.occurred_at, m.seq) AS balance_after
          FROM stock_movements m WHERE m.shop_id=$1
        )
        SELECT led.id, to_char(led.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
+              to_char(COALESCE(led.acted_at, led.recorded_at) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS acted_at,
               led.product_id, p.name AS product, p.code, p.unit, led.type, led.qty,
               led.unit_cost, led.reason, led.source_id, us.full_name AS by,
               led.balance_after, (led.balance_after - led.qty) AS balance_before
@@ -429,7 +430,7 @@ export class ReportsController {
          AND ($5::uuid IS NULL OR led.product_id=$5)
        ORDER BY led.occurred_at DESC, led.id DESC LIMIT ${LIMIT} OFFSET $6`, [u.shopId, from, to, type, productId, offset]);
     const items = rows.slice(0, limit).map((r: any) => ({
-      id: r.id, at: r.at, productId: r.product_id, product: r.product, code: r.code, unit: r.unit,
+      id: r.id, at: r.at, actedAt: r.acted_at, productId: r.product_id, product: r.product, code: r.code, unit: r.unit,
       type: r.type, qty: Number(r.qty), unitCost: canSeeFinancials && r.unit_cost !== null ? Number(r.unit_cost) : null,
       reason: r.reason, reference: r.source_id ?? null, by: r.by ?? null,
       balanceBefore: Number(r.balance_before), balanceAfter: Number(r.balance_after),

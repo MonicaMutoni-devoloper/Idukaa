@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Linking, Platform, View } from "react-native";
+import { ActivityIndicator, Linking, Platform, Pressable, Text, View } from "react-native";
 import { Slot } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import * as Crypto from "expo-crypto";
@@ -20,6 +20,25 @@ import {
 async function initDbPlatform() {
   await initDb();
   if (!(await kvGet("device_id"))) await kvSet("device_id", Crypto.randomUUID());
+}
+
+/** A route render failure must never leave the web page on the dark body colour with no text. */
+export function ErrorBoundary({ error, retry }: { error: Error; retry: () => void }) {
+  return (
+    <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24, backgroundColor: "#F6F8FA" }}>
+      <View style={{ width: "100%", maxWidth: 440, gap: 10, padding: 24, borderRadius: 14, borderWidth: 1, borderColor: "#D7E3EC", backgroundColor: "#FFFFFF" }}>
+        <Text style={{ fontSize: 18, fontWeight: "800", color: "#17252F" }}>Idukaa could not open this screen</Text>
+        <Text style={{ fontSize: 13, lineHeight: 20, color: "#52616B" }}>
+          Nothing saved on this device was lost. Reload to try the screen again.
+        </Text>
+        {error?.message ? <Text style={{ fontSize: 11, lineHeight: 17, color: "#8A4B2E" }}>{error.message}</Text> : null}
+        <Pressable accessibilityRole="button" onPress={() => { if (Platform.OS === "web") (globalThis as any).location?.reload?.(); else retry(); }}
+          style={{ minHeight: 44, alignItems: "center", justifyContent: "center", borderRadius: 10, backgroundColor: "#0F5C4D" }}>
+          <Text style={{ fontSize: 14, fontWeight: "700", color: "#FFFFFF" }}>Reload Idukaa</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
 }
 
 export default function Root() {

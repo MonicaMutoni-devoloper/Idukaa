@@ -95,8 +95,8 @@ export class SalesController {
       for (const l of lines) {
         const cost = costs.get(l.product_id) ?? 0;
         await c.query(
-          `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at)
-           VALUES ($1,$2,'sale',$3,$4,'sale',$5,$6,$7,$8)`,
+          `INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at,acted_at)
+           VALUES ($1,$2,'sale',$3,$4,'sale',$5,$6,$7,$8,now())`,
           [u.shopId, l.product_id, -Number(l.qty), cost, id, u.id, "credit approval", sale.sold_at]);
         await c.query("UPDATE sale_lines SET unit_cost=$2 WHERE sale_id=$1 AND product_id=$3", [id, cost, l.product_id]);
         await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [l.product_id]);

@@ -380,7 +380,12 @@ export function MovementsReport({ data, meta, online, lastSync, from, to, view, 
 
   const groupCount = (g: MovementGroup) => items.filter((r) => movementGroup(r.type) === g).length;
   const cols: Col<any>[] = [
-    { key: "at", title: t("common.date"), width: 1.4, render: (r) => <Text style={{ color: c.inkSoft, fontSize: 12 }}>{instantText(r.at)}</Text> },
+    { key: "actedAt", title: t("ana.actionTime"), width: 1.7, render: (r) => (
+      <View style={{ gap: 1 }}>
+        <Text style={{ color: c.inkSoft, fontSize: 12 }}>{instantText(r.actedAt ?? r.at)}</Text>
+        <Text style={{ color: c.muted, fontSize: 10 }}>{t("ana.stockDate")}: {dayText(r.at)}</Text>
+      </View>
+    ) },
     { key: "product", title: t("common.product"), width: 2, render: (r) => (
       <View><Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{r.product}</Text><Text style={{ color: c.muted, fontSize: 11 }}>{r.code}</Text></View>
     ) },
@@ -399,9 +404,9 @@ export function MovementsReport({ data, meta, online, lastSync, from, to, view, 
 
   const spec: ExportSpec = {
     title: `${t("ana.cat.movements" as any)} · ${t(`ana.sub.movements.${view === "adjust" ? "adjust" : view}` as any)}`,
-    header: [t("common.date"), t("common.product"), t("stock.code"), t("ana.type"), t("ana.qty"), t("ana.balance"), t("ana.unitCost"), t("ana.reference"), t("ana.by")],
+    header: [t("ana.actionTime"), t("ana.stockDate"), t("common.product"), t("stock.code"), t("ana.type"), t("ana.qty"), t("ana.balance"), t("ana.unitCost"), t("ana.reference"), t("ana.by")],
     rows: rows.map((r) => [
-      instantText(r.at), r.product, r.code, t(`ana.move.${r.type}` as any), `${formatQty(r.qty)} ${r.unit}`,
+      instantText(r.actedAt ?? r.at), dayText(r.at), r.product, r.code, t(`ana.move.${r.type}` as any), `${formatQty(r.qty)} ${r.unit}`,
       r.balanceAfter === null ? "" : `${formatQty(r.balanceAfter)} ${r.unit}`, r.unitCost === null ? "" : r.unitCost, r.reference ?? "", r.by ?? "",
     ]),
     metrics: [

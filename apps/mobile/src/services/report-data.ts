@@ -205,7 +205,7 @@ export interface MovementsData { items: MovementRow[]; truncated: boolean; finan
 
 interface ApiMovements {
   items: {
-    id: string; at: string; productId: string; product: string; code: string; unit: string;
+    id: string; at: string; actedAt: string; productId: string; product: string; code: string; unit: string;
     type: MovementRow["type"]; qty: number; unitCost: number | null; reason: string | null;
     reference: string | null; by: string | null; balanceBefore: number; balanceAfter: number;
   }[];

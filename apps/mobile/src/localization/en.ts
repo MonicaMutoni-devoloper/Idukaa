@@ -1090,6 +1090,7 @@ export const en = {
   "ana.qty": "Quantity",
   "ana.balance": "Balance",
   "ana.reference": "Reference",
+  "ana.actionTime": "Action time", "ana.stockDate": "Stock date",
   "ana.by": "Recorded by",
   "ana.unitCost": "Unit cost",
   "ana.value": "Value",

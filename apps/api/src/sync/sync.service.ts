@@ -170,8 +170,8 @@ export class SyncService {
     }
     return new Map(ids.map((id) => [id, currentAverageCost(by.get(id) ?? [])]));
   }
-  private async mv(c: PoolClient, shopId: string, userId: string, productId: string, type: string, qty: number, unitCost: number | null, src: string, srcId: string, at: string, reason?: string) {
-    await c.query("INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [shopId, productId, type, qty, unitCost, src, srcId, userId, reason ?? null, at]);
+  private async mv(c: PoolClient, shopId: string, userId: string, productId: string, type: string, qty: number, unitCost: number | null, src: string, srcId: string, at: string, reason?: string, actedAt?: string) {
+    await c.query("INSERT INTO stock_movements(shop_id,product_id,type,qty,unit_cost,source_type,source_id,user_id,reason,occurred_at,acted_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", [shopId, productId, type, qty, unitCost, src, srcId, userId, reason ?? null, at, actedAt ?? new Date().toISOString()]);
     await c.query("UPDATE products SET updated_at=now() WHERE id=$1", [productId]); // drives incremental pull
   }
 
@@ -233,7 +233,7 @@ export class SyncService {
           await c.query("INSERT INTO goods_receipts(id,shop_id,purchase_id,op_id,user_id,received_at) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5)", [shopId, p.purchaseId, op.opId, u.id, p.orderedAt]);
           for (const l of p.lines) {
             await c.query("UPDATE purchase_lines SET qty_received=qty_ordered WHERE purchase_id=$1 AND product_id=$2", [p.purchaseId, l.productId]);
-            await this.mv(c, shopId, u.id, l.productId, "receipt", l.qty, l.unitCost, "purchase", p.purchaseId, p.orderedAt);
+            await this.mv(c, shopId, u.id, l.productId, "receipt", l.qty, l.unitCost, "purchase", p.purchaseId, p.orderedAt, undefined, op.createdAt);
             await this.applySellingPrice(c, shopId, u.id, l.productId, l.sellingPrice, p.purchaseId);
           }
         }
@@ -250,7 +250,7 @@ export class SyncService {
           if (!pl) throw new BizError("rejected", "product_not_on_purchase");
           if (pl.qty_received + l.qty > pl.qty_ordered) throw new BizError("conflict", `over_receipt:${l.productId}:ordered=${pl.qty_ordered}:received=${pl.qty_received}:now=${l.qty}`);
           await c.query("UPDATE purchase_lines SET qty_received=qty_received+$1 WHERE id=$2", [l.qty, pl.id]);
-          await this.mv(c, shopId, u.id, l.productId, "receipt", l.qty, pl.unit_cost, "receipt", p.receiptId, p.receivedAt);
+          await this.mv(c, shopId, u.id, l.productId, "receipt", l.qty, pl.unit_cost, "receipt", p.receiptId, p.receivedAt, undefined, op.createdAt);
           await this.applySellingPrice(c, shopId, u.id, l.productId, pl.selling_price ?? undefined, p.purchaseId);
         }
         return;
@@ -388,7 +388,7 @@ export class SyncService {
         } else {
           // Product creation is always audited; initial stock, when supplied, is audited with it
           // (the ledger movement it produced is visible through the stock history).
-          if (p.initialQty) await this.mv(c, shopId, u.id, p.productId, "opening", p.initialQty, p.initialUnitCost ?? 0, "product", p.productId, op.createdAt, "initial stock");
+          if (p.initialQty) await this.mv(c, shopId, u.id, p.productId, "opening", p.initialQty, p.initialUnitCost ?? 0, "product", p.productId, op.createdAt, "initial stock", op.createdAt);
           await audit(c, { shopId, actorId: u.id, action: "product.create", entity: "product", entityId: p.productId,
             newValue: { code: p.code, name: p.name, unit: p.unit, sellingPrice: p.sellingPrice, lowStockThreshold: p.lowStockThreshold, barcode: p.barcode ?? null,
               purchaseUnit: p.purchaseUnit ?? p.unit, sellingUnit: p.sellingUnit ?? p.unit,
