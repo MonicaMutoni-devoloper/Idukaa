@@ -58,14 +58,16 @@ export function ThemeSwitcher({ compact = false }: { compact?: boolean }) {
 }
 
 /** Full appearance section for Settings: labelled choices, selected state and persistence note. */
-export function AppearanceSettings() {
+export function AppearanceSettings({ embedded = false }: { embedded?: boolean }) {
   const t = useT(); const c = useTheme(); const mode = useThemeMode((s) => s.mode); const setMode = useThemeMode((s) => s.setMode);
   return (
     <View style={{ gap: space.md }}>
-      <View style={{ gap: 2 }}>
-        <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("appearance.title")}</Text>
-        <Text style={{ color: c.muted, ...type.small }}>{t("appearance.help")}</Text>
-      </View>
+      {embedded ? null : (
+        <View style={{ gap: 2 }}>
+          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("appearance.title")}</Text>
+          <Text style={{ color: c.muted, ...type.small }}>{t("appearance.help")}</Text>
+        </View>
+      )}
       <View accessibilityRole={"radiogroup" as any} accessibilityLabel={t("appearance.title")} style={{ gap: space.sm }}>
         {OPTIONS.map((o) => {
           const active = mode === o.value;

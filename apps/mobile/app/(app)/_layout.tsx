@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Animated, Easing, Linking, Pressable, Text, View } from "react-native";
+import { Animated, Easing, Linking, Pressable, ScrollView, Text, View } from "react-native";
 import Constants from "expo-constants";
 import { Redirect, Slot, usePathname, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -17,12 +17,12 @@ import { startUpdateChecks, useAppUpdate } from "../../src/services/updates";
 const testId = (prefix: string, href: string) => `${prefix}-${href === "/" ? "home" : href.replace(/^\/+/, "").replace(/\//g, "-")}`;
 const SIDEBAR_KEY = "sidebar_collapsed";
 
-function Brand({ compact, inverse }: { compact?: boolean; inverse?: boolean }) {
+function Brand({ compact, inverse, testID }: { compact?: boolean; inverse?: boolean; testID?: string }) {
   const c = useTheme(); const t = useT();
   const ink = inverse ? c.sidebarInk : c.ink;
   const soft = inverse ? c.sidebarMuted : c.muted;
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+    <View testID={testID} style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
       <View style={{ width: 30, height: 30, borderRadius: 8, backgroundColor: c.primaryStrong, alignItems: "center", justifyContent: "center" }}>
         <Text style={{ color: c.onPrimary, fontWeight: "800", fontSize: 15 }}>S</Text>
       </View>
@@ -161,11 +161,14 @@ export default function AppLayout() {
     const labelOpacity = sidebar.interpolate({ inputRange: [0, 0.55, 1], outputRange: [0, 0, 1] });
     return (
       <View style={{ flex: 1, flexDirection: "row", backgroundColor: c.bg }}>
-        <Animated.View testID="sidebar" style={{ width, backgroundColor: c.sidebar, borderRightWidth: 1, borderRightColor: c.sidebarLine, paddingTop: space.lg, paddingBottom: space.md, overflow: "hidden" }}>
-          <View style={{ flex: 1 }}>
-            <View style={{ paddingHorizontal: collapsed ? 0 : space.lg, marginBottom: space.xl, alignItems: collapsed ? "center" : "flex-start" }}>
-              <Brand compact={collapsed} inverse />
-            </View>
+        <Animated.View testID="sidebar" style={{ width, minHeight: 0, backgroundColor: c.sidebar, borderRightWidth: 1, borderRightColor: c.sidebarLine, paddingTop: space.lg, paddingBottom: space.md, overflow: "hidden" }}>
+          {/* The brand stays put; only the destinations scroll, so a short window or a zoomed page
+              can never hide the lower groups or the collapse control. */}
+          <View style={{ flexShrink: 0, paddingHorizontal: collapsed ? 0 : space.lg, marginBottom: space.xl, alignItems: collapsed ? "center" : "flex-start" }}>
+            <Brand compact={collapsed} inverse testID="sidebar-brand" />
+          </View>
+          <ScrollView testID="sidebar-scroll" style={{ flex: 1, minHeight: 0 }}
+            contentContainerStyle={{ paddingBottom: space.xs }} showsVerticalScrollIndicator={!collapsed}>
             {groups.map((g) => (
               <View key={g.label} style={{ marginBottom: space.lg }}>
                 {collapsed ? <View style={{ height: 1, marginHorizontal: space.md, marginBottom: 6, backgroundColor: c.sidebarLine }} /> : (
@@ -193,8 +196,8 @@ export default function AppLayout() {
                 })}
               </View>
             ))}
-          </View>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingHorizontal: collapsed ? 0 : space.lg, justifyContent: collapsed ? "center" : "space-between" }}>
+          </ScrollView>
+          <View style={{ flexShrink: 0, flexDirection: "row", alignItems: "center", gap: space.sm, paddingTop: space.sm, paddingHorizontal: collapsed ? 0 : space.lg, justifyContent: collapsed ? "center" : "space-between" }}>
             {collapsed ? null : (
               <Animated.View style={{ gap: 3, flex: 1, opacity: labelOpacity }}>
                 <Text style={{ color: c.sidebarMuted, fontSize: 11 }}>{t("shell.offlineNote")}</Text>

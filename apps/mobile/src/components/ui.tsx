@@ -66,6 +66,66 @@ export function Section({ title, description, actions, children, gap = space.md 
   );
 }
 
+/**
+ * A self-contained settings panel. The header keeps the section's current value visible while the
+ * body is closed, so scanning the page never requires opening every form. Height is measured rather
+ * than guessed, which lets notes, banners and loaded policy fields expand without clipping.
+ */
+export function CollapsibleSection({ title, summary, icon, badge, children, testID, defaultOpen = false }: {
+  title: string; summary?: string; icon?: IconName; badge?: ReactNode; children: ReactNode; testID?: string; defaultOpen?: boolean;
+}) {
+  const c = useTheme(); const reduced = useReducedMotion();
+  const [open, setOpen] = useState(defaultOpen);
+  const [contentHeight, setContentHeight] = useState(0);
+  const progress = useRef(new Animated.Value(defaultOpen ? 1 : 0)).current;
+
+  useEffect(() => {
+    if (reduced) { progress.setValue(open ? 1 : 0); return; }
+    Animated.timing(progress, {
+      toValue: open ? 1 : 0, duration: motion.slow, easing: open ? Easing.out(Easing.cubic) : Easing.in(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+  }, [open, progress, reduced]);
+
+  const height = progress.interpolate({ inputRange: [0, 1], outputRange: [0, contentHeight] });
+  const opacity = progress.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0, 0, 1] });
+
+  return (
+    <Card padded={false} style={{ overflow: "hidden", gap: 0 }}>
+      <Pressable testID={testID ? `${testID}-toggle` : undefined} accessibilityRole="button" accessibilityLabel={summary ? `${title}. ${summary}` : title}
+        accessibilityState={{ expanded: open }} {...({ "aria-expanded": open } as any)} onPress={() => setOpen((v) => !v)}
+        style={({ hovered, pressed, focused }: any) => ({
+          flexDirection: "row", alignItems: "center", gap: space.md, padding: space.lg,
+          backgroundColor: hovered || pressed ? c.surfaceMuted : c.surface,
+          borderWidth: focused ? 2 : 0, borderColor: c.focus, borderRadius: radius.md,
+        })}>
+        {icon ? (
+          <View style={{ width: 38, height: 38, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: c.primarySoft }}>
+            <Icon name={icon} size={18} color={c.primaryStrong} bg={c.primarySoft} />
+          </View>
+        ) : null}
+        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+          <Text style={{ color: c.ink, ...type.h3 }}>{title}</Text>
+          {summary ? <Text numberOfLines={open ? 2 : 1} style={{ color: c.muted, fontSize: 12, lineHeight: 17 }}>{summary}</Text> : null}
+        </View>
+        {badge}
+        <View style={{ width: 28, height: 28, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", backgroundColor: c.bgAlt }}>
+          <Animated.View style={{ transform: [{ rotate: progress.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "180deg"] }) }] }}>
+            <Icon name="chevronDown" size={15} color={c.inkSoft} bg={c.bgAlt} />
+          </Animated.View>
+        </View>
+      </Pressable>
+      <Animated.View style={{ height, opacity, overflow: "hidden" }} pointerEvents={open ? "auto" : "none"}
+        {...({ "aria-hidden": !open } as any)}>
+        <View onLayout={(e) => setContentHeight(e.nativeEvent.layout.height)}
+          style={{ padding: space.lg, gap: space.md, borderTopWidth: 1, borderTopColor: c.line }}>
+          {children}
+        </View>
+      </Animated.View>
+    </Card>
+  );
+}
+
 /* ------------------------------------------------------------------ controls */
 
 type ButtonKind = "primary" | "secondary" | "quiet" | "danger" | "dangerQuiet";

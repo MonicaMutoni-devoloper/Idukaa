@@ -563,6 +563,8 @@ export const rw: Record<Key, string> = {
   "stock.productSaved": "Amakuru y'igicuruzwa yabitswe.", "stock.codeHelp": "Kode igomba kuba imwe gusa mu iduka.",
 
   "settings.email": "Imeyili", "settings.shop": "Iduka", "settings.profile": "Umwirondoro wawe",
+  "settings.accountProfile": "Umwirondoro wa konti", "settings.shopPolicies": "Amabwiriza y'iduka",
+  "settings.deviceSync": "Iki gikoresho no guhuza", "settings.offlineSection": "Ikigo cya offline n'amakuru ahari",
   "settings.profileHelp": "Iri zina rigaragara ku byanditswe byose ubika.", "settings.fullName": "Izina riboneka",
   "settings.nameSaved": "Izina ryabitswe.", "settings.nameInvalid": "Andika izina rifite nibura inyuguti 2.",
   "settings.security": "Ijambo ry'ibanga n'umutekano",

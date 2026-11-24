@@ -33,7 +33,7 @@ const toneFor = (s: OfflineCategoryState): "ok" | "warn" | "danger" | "neutral" 
   s === "available" ? "ok" : s === "stale" || s === "downloading" ? "warn" : s === "error" ? "danger" : "neutral";
 
 /** Honest, category-level offline readiness. Never claims "available" without a stored copy. */
-export function OfflineDownloadCard({ compact = false }: { compact?: boolean }) {
+export function OfflineDownloadCard({ compact = false, embedded = false }: { compact?: boolean; embedded?: boolean }) {
   const t = useT(); const c = useTheme();
   const user = useSession((s) => s.user);
   const status = useOfflineData((s) => s.status);
@@ -61,7 +61,10 @@ export function OfflineDownloadCard({ compact = false }: { compact?: boolean }) 
   const headline = preparing ? t("offline.preparing") : summary.ready ? t("offline.readyAll") : summary.needsRefresh ? t("offline.needsRefresh") : t("offline.notReady");
 
   return (
-    <View testID="offline-download-card"><Card style={{ gap: space.md }}>
+    <View testID="offline-download-card"><Card padded={!embedded} style={{
+      gap: space.md,
+      ...(embedded ? { backgroundColor: "transparent", borderWidth: 0 } : {}),
+    }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("offline.title")}</Text>

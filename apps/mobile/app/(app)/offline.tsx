@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Switch, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import {
-  Badge, Banner, Button, Card, ConfirmDialog, Empty, KeyValue, Screen, Segmented, useWide,
+  Badge, Banner, Button, Card, CollapsibleSection, ConfirmDialog, Empty, KeyValue, Screen, Segmented, useWide,
 } from "../../src/components/ui";
 import { useT, type Key } from "../../src/localization";
 import { useSession } from "../../src/services/api";
@@ -186,6 +186,11 @@ export default function OfflineCenter() {
   const storageTone = overview?.level === "critical" ? "danger" : overview?.level === "warning" ? "warn" : "ok";
   const storageMessage = overview?.level === "critical" ? t("offline.center.storageCritical")
     : overview?.level === "warning" ? t("offline.center.storageWarning") : "";
+  const readinessLabel = preparing ? t("offline.preparing") : summary.ready ? t("offline.readyAll") : summary.needsRefresh ? t("offline.needsRefresh") : t("offline.notReady");
+  const retentionLabel = settings ? t(MODE_KEY[settings.mode]) : t("common.loading");
+  const cleanupSummary = cleanupCount
+    ? t("offline.center.cleanupPreview").replace("{count}", String(cleanupCount)).replace("{size}", formatSize(cleanupPlan?.bytesFreed ?? 0)).replace("{months}", String(new Set(cleanupPlan?.remove.map((e) => e.period).filter(Boolean)).size))
+    : t("offline.center.cleanupNone");
 
   return (
     <Screen
@@ -197,64 +202,41 @@ export default function OfflineCenter() {
       {storageMessage ? <Banner tone={storageTone === "ok" ? "warn" : storageTone} title={t("offline.center.storage")} text={storageMessage} /> : null}
       {status?.archive?.waitingForWifi ? <Banner tone="warn" text={t("offline.center.waitingWifi")} /> : null}
 
-      <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
-        <Badge dot tone={summary.ready ? "ok" : summary.needsRefresh ? "warn" : "neutral"}
-          label={preparing ? t("offline.preparing") : summary.ready ? t("offline.readyAll") : summary.needsRefresh ? t("offline.needsRefresh") : t("offline.notPrepared")} />
-        <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.center.updated")}: {status ? new Date(status.savedAt).toLocaleString() : t("common.never")}</Text>
-      </View>
-
-      <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg, alignItems: "stretch" }}>
-        <Card style={{ flex: 1, gap: 3 }}>
-          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.storage")}</Text>
-          <KeyValue label={t("offline.center.total")} value={formatSize(overview?.usage.totalBytes)} />
-          <KeyValue label={t(overview?.usage.backend === "sqlite" ? "offline.center.available" : "offline.center.availableWeb")}
-            value={overview?.usage.availableBytes == null ? t("offline.center.unavailable") : formatSize(overview.usage.availableBytes)} />
-          <View style={{ height: 8, borderRadius: 4, backgroundColor: c.line, overflow: "hidden", marginVertical: 6 }}>
-            <View style={{ width: `${limitPct}%`, height: 8, borderRadius: 4, backgroundColor: storageTone === "danger" ? c.danger : storageTone === "warn" ? c.warning : c.success }} />
+      {/* One honest status line, always visible; the detailed panels below stay closed until needed. */}
+      <Card style={{ gap: space.md }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: space.md, flexWrap: "wrap" }}>
+          <View style={{ flex: 1, minWidth: 200, gap: 3 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.availability")}</Text>
+            <Text style={{ color: c.ink, ...type.h2 }}>{readinessLabel}</Text>
+            <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.center.updated")}: {status ? new Date(status.savedAt).toLocaleString() : t("common.never")}</Text>
           </View>
-          <Text style={{ color: c.muted, fontSize: 11 }}>{t("offline.center.limitUse").replace("{used}", formatSize(overview?.downloadedBytes)).replace("{limit}", `${activeLimit} MB`)}</Text>
-        </Card>
-        <Card style={{ flex: 1, gap: 3 }}>
-          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.downloaded")}</Text>
-          <KeyValue label={t("offline.center.archiveStorage")} value={formatSize(overview?.archiveBytes)} />
-          <KeyValue label={t("offline.center.reports")} value={formatSize(overview?.reportsBytes)} />
-          <KeyValue label={t("offline.center.saleDetails")} value={formatSize(overview?.saleDetailBytes)} />
-          <KeyValue label={t("offline.center.otherCache")} value={formatSize(overview?.otherCacheBytes)} />
-        </Card>
-        <Card style={{ flex: 1, gap: 3 }} tone="muted">
-          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.protectedTitle")}</Text>
-          <KeyValue label={t("offline.center.business")} value={formatSize(overview?.businessBytes)} />
-          <KeyValue label={t("offline.center.pendingStorage")} value={formatSize(overview?.pendingBytes)} />
-          <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.protectedHelp")}</Text>
-        </Card>
-      </View>
-      <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.measureNote")}</Text>
-
-      <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg, alignItems: "stretch" }}>
-        <Card style={{ flex: 1, gap: 5 }}>
-          <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("offline.center.availability")}</Text>
-          <KeyValue label={t("offline.center.periods")} value={`${periodsReady + archiveSaved}`} />
-          <KeyValue label={t("offline.center.archiveMonths")} value={`${archiveSaved} / ${months.length || "—"}`} />
-          <KeyValue label={t("offline.center.pendingOps")} value={`${pending + awaitingApproval}`} />
-          <KeyValue label={t("offline.center.lastSync")} value={lastSync ? new Date(lastSync).toLocaleString() : t("common.never")} />
-          <KeyValue label={t("offline.center.lastPreparation")} value={status ? new Date(status.savedAt).toLocaleString() : t("common.never")} />
-          {/* The screens themselves, not the data: a half-saved install blanks a screen that was
-              never opened, and nothing else here would show that. */}
-          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-            <Text style={{ flex: 1, color: c.muted, fontSize: 12 }}>{t("shell.title")}</Text>
-            {shell ? (
-              <Badge tone={shell.done >= shell.total ? "ok" : "warn"}
-                label={`${shell.done} / ${shell.total}`} />
-            ) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.center.unavailable")}</Text>}
+          <Badge dot tone={summary.ready ? "ok" : summary.needsRefresh ? "warn" : "neutral"} label={readinessLabel} />
+        </View>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.lg, borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.md }}>
+          <View style={{ flexGrow: 1, flexBasis: 130, gap: 2 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.downloaded")}</Text>
+            <Text style={{ color: c.ink, fontSize: 15, fontWeight: "700" }}>{formatSize(overview?.downloadedBytes)}</Text>
           </View>
-          <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>
-            {shell ? (shell.done >= shell.total ? t("shell.readyText") : t("shell.incomplete")) : null}
-          </Text>
-          <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.forbidden")}</Text>
-        </Card>
-        <Card style={{ flex: wide ? 1.4 : 1, gap: 5 }}>
+          <View style={{ flexGrow: 1, flexBasis: 130, gap: 2 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.archiveMonths")}</Text>
+            <Text style={{ color: c.ink, fontSize: 15, fontWeight: "700" }}>{archiveSaved} / {months.length || "—"}</Text>
+          </View>
+          <View style={{ flexGrow: 1, flexBasis: 130, gap: 2 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.pendingOps")}</Text>
+            <Text style={{ color: pending + awaitingApproval ? c.accent : c.ink, fontSize: 15, fontWeight: "700" }}>{pending + awaitingApproval}</Text>
+          </View>
+          <View style={{ flexGrow: 1, flexBasis: 130, gap: 2 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.lastPreparation")}</Text>
+            <Text style={{ color: c.ink, fontSize: 15, fontWeight: "700" }} numberOfLines={1}>{status ? new Date(status.savedAt).toLocaleDateString() : t("common.never")}</Text>
+          </View>
+        </View>
+      </Card>
+
+      <CollapsibleSection testID="offline-section-downloads" defaultOpen title={t("offline.center.progress")} icon="sync"
+        summary={`${archiveSaved} / ${months.length || "—"} ${t("offline.center.archiveMonths")} · ${t("offline.center.pendingOps")}: ${pending + awaitingApproval}`}>
+        <Card tone="muted" style={{ gap: space.md }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-            <Text style={{ flex: 1, color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("offline.center.progress")}</Text>
+            <Text style={{ flex: 1, color: c.ink, ...type.h3 }}>{t("offline.center.progress")}</Text>
             {startedDownload ? <ActivityIndicator size="small" color={c.muted} /> : null}
           </View>
           <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>
@@ -275,119 +257,163 @@ export default function OfflineCenter() {
             {preparing ? <Button testID="offline-cancel" kind="dangerQuiet" label={t("offline.center.cancel")} onPress={cancelOfflinePreparation} /> : null}
           </View>
         </Card>
-      </View>
 
-      <Card style={{ gap: space.md }}>
-        <View style={{ gap: 2 }}>
-          <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("offline.center.archive")}</Text>
-          <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("offline.center.archiveHelp")}</Text>
-        </View>
-        {!months.length ? <Empty title={t("offline.center.historyUnknown")} description={t("offline.center.historyUnknownHelp")} />
-          : (
-            <View style={{ gap: 6 }}>
-              {visibleMonths.map((month) => {
-                const saved = savedMonths.has(month);
-                return (
-                  <View key={month} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap", paddingVertical: 3 }}>
-                    <View style={{ flex: 1, minWidth: 120 }}>
-                      <Text style={{ color: c.ink, fontWeight: "700", fontSize: 13 }}>{month}</Text>
-                      <Text style={{ color: c.muted, fontSize: 11 }}>{saved ? t("offline.center.saved") : t("offline.center.missing")}</Text>
+        <View style={{ gap: space.sm }}>
+          <View style={{ gap: 2 }}>
+            <Text style={{ color: c.ink, ...type.h3 }}>{t("offline.center.archive")}</Text>
+            <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("offline.center.archiveHelp")}</Text>
+          </View>
+          {!months.length ? <Empty title={t("offline.center.historyUnknown")} description={t("offline.center.historyUnknownHelp")} />
+            : (
+              <View style={{ gap: 6 }}>
+                {visibleMonths.map((month) => {
+                  const saved = savedMonths.has(month);
+                  return (
+                    <View key={month} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap", paddingVertical: 3 }}>
+                      <View style={{ flex: 1, minWidth: 120 }}>
+                        <Text style={{ color: c.ink, fontWeight: "700", fontSize: 13 }}>{month}</Text>
+                        <Text style={{ color: c.muted, fontSize: 11 }}>{saved ? t("offline.center.saved") : t("offline.center.missing")}</Text>
+                      </View>
+                      <Badge tone={saved ? "ok" : "neutral"} label={saved ? t("offline.state.available") : t("offline.center.notDownloaded")} />
+                      {saved ? (
+                        <>
+                          <Button size="sm" kind="secondary" testID={`offline-open-${month}`} label={t("offline.center.openMonth")} onPress={() => openMonth(month)} />
+                          <Button size="sm" kind="quiet" testID={`offline-refresh-${month}`} label={t("offline.center.refreshMonth")}
+                            loading={refreshingMonth === month} disabled={!online || !!refreshingMonth || preparing} onPress={() => void refreshMonth(month)} />
+                        </>
+                      ) : (
+                        <Button size="sm" kind="quiet" label={t("offline.center.retry")} disabled={!online || busy || preparing} onPress={() => void download(false)} />
+                      )}
                     </View>
-                    <Badge tone={saved ? "ok" : "neutral"} label={saved ? t("offline.state.available") : t("offline.center.notDownloaded")} />
-                    {saved ? (
-                      <>
-                        <Button size="sm" kind="secondary" testID={`offline-open-${month}`} label={t("offline.center.openMonth")} onPress={() => openMonth(month)} />
-                        <Button size="sm" kind="quiet" testID={`offline-refresh-${month}`} label={t("offline.center.refreshMonth")}
-                          loading={refreshingMonth === month} disabled={!online || !!refreshingMonth || preparing} onPress={() => void refreshMonth(month)} />
-                      </>
-                    ) : (
-                      <Button size="sm" kind="quiet" label={t("offline.center.retry")} disabled={!online || busy || preparing} onPress={() => void download(false)} />
-                    )}
+                  );
+                })}
+                {pages > 1 ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
+                    <Button size="sm" kind="quiet" label="‹" disabled={page === 0} onPress={() => setPage((p) => Math.max(0, p - 1))} />
+                    <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.center.page").replace("{page}", String(page + 1)).replace("{pages}", String(pages))}</Text>
+                    <Button size="sm" kind="quiet" label="›" disabled={page >= pages - 1} onPress={() => setPage((p) => Math.min(pages - 1, p + 1))} />
                   </View>
-                );
-              })}
-              {pages > 1 ? (
-                <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
-                  <Button size="sm" kind="quiet" label="‹" disabled={page === 0} onPress={() => setPage((p) => Math.max(0, p - 1))} />
-                  <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.center.page").replace("{page}", String(page + 1)).replace("{pages}", String(pages))}</Text>
-                  <Button size="sm" kind="quiet" label="›" disabled={page >= pages - 1} onPress={() => setPage((p) => Math.min(pages - 1, p + 1))} />
-                </View>
-              ) : null}
-            </View>
-          )}
-      </Card>
-
-      <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg, alignItems: "stretch" }}>
-        <Card style={{ flex: 1, gap: space.md }}>
-          <View style={{ gap: 2 }}>
-            <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("offline.center.retention")}</Text>
-            <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("offline.center.retentionHelp")}</Text>
-          </View>
-          {draft ? (
-            <>
-              <Segmented<RetentionMode> label={t("offline.center.retention")} value={draft.mode}
-                onChange={(mode) => setDraft({ ...draft, mode })}
-                options={([
-                  { value: "recent", label: t(MODE_KEY.recent) },
-                  { value: "months12", label: t(MODE_KEY.months12) },
-                  { value: "months24", label: t(MODE_KEY.months24) },
-                  { value: "auto", label: t(MODE_KEY.auto) },
-                ] as const)} />
-              <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t(EXPLAIN_KEY[draft.mode])}</Text>
-              {draft.mode === "auto" ? (
-                <View style={{ gap: 5 }}>
-                  <Text style={{ color: c.inkSoft, fontWeight: "600", fontSize: 12 }}>{t("offline.center.limit")}</Text>
-                  <Segmented<string> label={t("offline.center.limit")} value={String(draft.limitMb)}
-                    onChange={(v) => setDraft({ ...draft, limitMb: Number(v) })}
-                    options={RETENTION_LIMIT_OPTIONS.map((mb) => ({ value: String(mb), label: `${mb} MB` }))} />
-                  <Text style={{ color: c.muted, fontSize: 11 }}>{t("offline.center.limitHelp")}</Text>
-                </View>
-              ) : null}
-              <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
-                <Switch testID="offline-wifi-only" value={draft.wifiOnly} onValueChange={(wifiOnly) => setDraft({ ...draft, wifiOnly })} />
-                <View style={{ flex: 1, gap: 1 }}>
-                  <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{t("offline.center.wifi")}</Text>
-                  <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.wifiHelp")}</Text>
-                </View>
+                ) : null}
               </View>
-              <Button testID="offline-apply-policy" label={t("offline.center.apply")} disabled={!dirty || busy}
-                onPress={() => setApplyOpen(true)} />
-            </>
-          ) : null}
-        </Card>
+            )}
+        </View>
+      </CollapsibleSection>
 
-        <Card style={{ flex: 1, gap: space.md }}>
-          <View style={{ gap: 2 }}>
-            <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("offline.center.cleanup")}</Text>
-            <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("offline.center.cleanupHelp")}</Text>
-          </View>
-          {cleanupCount ? (
-            <Banner tone="warn" text={t("offline.center.cleanupPreview")
-              .replace("{count}", String(cleanupCount))
-              .replace("{size}", formatSize(cleanupPlan?.bytesFreed ?? 0))
-              .replace("{months}", String(new Set(cleanupPlan?.remove.map((e) => e.period).filter(Boolean)).size))} />
-          ) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.center.cleanupNone")}</Text>}
-          <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.cleanupAutomatic")}</Text>
-          <Button testID="offline-cleanup" kind="dangerQuiet" label={t("offline.center.cleanup")} disabled={!cleanupCount || busy}
-            onPress={() => setCleanupOpen(true)} />
-        </Card>
-      </View>
-
-      <Card style={{ gap: space.sm }}>
-        <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("offline.center.categories")}</Text>
-        {(status?.categories ?? []).map((row) => (
-          <View key={row.key} style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor:
-              row.state === "available" ? c.success : row.state === "stale" || row.state === "downloading" ? c.warning : row.state === "error" ? c.danger : c.lineStrong }} />
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: c.inkSoft, fontSize: 13 }}>{t(LABEL[row.key])}</Text>
-              <Text style={{ color: c.muted, fontSize: 11 }}>{row.savedAt ? new Date(row.savedAt).toLocaleString() : t("common.never")}</Text>
+      <CollapsibleSection testID="offline-section-storage" title={t("offline.center.storage")} icon="layers"
+        summary={`${formatSize(overview?.downloadedBytes)} / ${activeLimit || "—"} MB · ${formatSize(overview?.usage.totalBytes)} ${t("offline.center.total").toLowerCase()}`}>
+        <View style={{ flexDirection: wide ? "row" : "column", gap: space.md, alignItems: "stretch" }}>
+          <Card tone="muted" style={{ flex: 1, gap: 3 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.storage")}</Text>
+            <KeyValue label={t("offline.center.total")} value={formatSize(overview?.usage.totalBytes)} />
+            <KeyValue label={t(overview?.usage.backend === "sqlite" ? "offline.center.available" : "offline.center.availableWeb")}
+              value={overview?.usage.availableBytes == null ? t("offline.center.unavailable") : formatSize(overview.usage.availableBytes)} />
+            <View style={{ height: 8, borderRadius: 4, backgroundColor: c.line, overflow: "hidden", marginVertical: 6 }}>
+              <View style={{ width: `${limitPct}%`, height: 8, borderRadius: 4, backgroundColor: storageTone === "danger" ? c.danger : storageTone === "warn" ? c.warning : c.success }} />
             </View>
-            <Badge tone={toneFor(row.state)} label={t(STATE_LABEL[row.state])} />
+            <Text style={{ color: c.muted, fontSize: 11 }}>{t("offline.center.limitUse").replace("{used}", formatSize(overview?.downloadedBytes)).replace("{limit}", `${activeLimit} MB`)}</Text>
+          </Card>
+          <Card tone="muted" style={{ flex: 1, gap: 3 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.downloaded")}</Text>
+            <KeyValue label={t("offline.center.archiveStorage")} value={formatSize(overview?.archiveBytes)} />
+            <KeyValue label={t("offline.center.reports")} value={formatSize(overview?.reportsBytes)} />
+            <KeyValue label={t("offline.center.saleDetails")} value={formatSize(overview?.saleDetailBytes)} />
+            <KeyValue label={t("offline.center.otherCache")} value={formatSize(overview?.otherCacheBytes)} />
+          </Card>
+          <Card tone="muted" style={{ flex: 1, gap: 3 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("offline.center.protectedTitle")}</Text>
+            <KeyValue label={t("offline.center.business")} value={formatSize(overview?.businessBytes)} />
+            <KeyValue label={t("offline.center.pendingStorage")} value={formatSize(overview?.pendingBytes)} />
+            <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.protectedHelp")}</Text>
+          </Card>
+        </View>
+        <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.measureNote")}</Text>
+      </CollapsibleSection>
+
+      <CollapsibleSection testID="offline-section-readiness" title={t("offline.center.availability")} icon="checkSquare"
+        summary={`${periodsReady + archiveSaved} ${t("offline.center.periods").toLowerCase()} · ${readinessLabel}`}>
+        <Card tone="muted" style={{ gap: 5 }}>
+          <KeyValue label={t("offline.center.periods")} value={`${periodsReady + archiveSaved}`} />
+          <KeyValue label={t("offline.center.archiveMonths")} value={`${archiveSaved} / ${months.length || "—"}`} />
+          <KeyValue label={t("offline.center.pendingOps")} value={`${pending + awaitingApproval}`} />
+          <KeyValue label={t("offline.center.lastSync")} value={lastSync ? new Date(lastSync).toLocaleString() : t("common.never")} />
+          <KeyValue label={t("offline.center.lastPreparation")} value={status ? new Date(status.savedAt).toLocaleString() : t("common.never")} />
+          {/* The screens themselves, not the data: a half-saved install blanks a screen that was
+              never opened, and nothing else here would show that. */}
+          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+            <Text style={{ flex: 1, color: c.muted, fontSize: 12 }}>{t("shell.title")}</Text>
+            {shell ? (
+              <Badge tone={shell.done >= shell.total ? "ok" : "warn"} label={`${shell.done} / ${shell.total}`} />
+            ) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.center.unavailable")}</Text>}
           </View>
-        ))}
-        {!status ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.notPrepared")}</Text> : null}
-      </Card>
+          <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>
+            {shell ? (shell.done >= shell.total ? t("shell.readyText") : t("shell.incomplete")) : null}
+          </Text>
+          <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.forbidden")}</Text>
+        </Card>
+
+        <View style={{ gap: space.sm }}>
+          <Text style={{ color: c.ink, ...type.h3 }}>{t("offline.center.categories")}</Text>
+          {(status?.categories ?? []).map((row) => (
+            <View key={row.key} style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+              <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor:
+                row.state === "available" ? c.success : row.state === "stale" || row.state === "downloading" ? c.warning : row.state === "error" ? c.danger : c.lineStrong }} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: c.inkSoft, fontSize: 13 }}>{t(LABEL[row.key])}</Text>
+                <Text style={{ color: c.muted, fontSize: 11 }}>{row.savedAt ? new Date(row.savedAt).toLocaleString() : t("common.never")}</Text>
+              </View>
+              <Badge tone={toneFor(row.state)} label={t(STATE_LABEL[row.state])} />
+            </View>
+          ))}
+          {!status ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.notPrepared")}</Text> : null}
+        </View>
+      </CollapsibleSection>
+
+      <CollapsibleSection testID="offline-section-retention" title={t("offline.center.retention")} icon="settings"
+        summary={`${retentionLabel}${settings?.mode === "auto" ? ` · ${settings.limitMb} MB` : ""}`}>
+        <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("offline.center.retentionHelp")}</Text>
+        {draft ? (
+          <>
+            <Segmented<RetentionMode> label={t("offline.center.retention")} value={draft.mode}
+              onChange={(mode) => setDraft({ ...draft, mode })}
+              options={([
+                { value: "recent", label: t(MODE_KEY.recent) },
+                { value: "months12", label: t(MODE_KEY.months12) },
+                { value: "months24", label: t(MODE_KEY.months24) },
+                { value: "auto", label: t(MODE_KEY.auto) },
+              ] as const)} />
+            <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t(EXPLAIN_KEY[draft.mode])}</Text>
+            {draft.mode === "auto" ? (
+              <View style={{ gap: 5 }}>
+                <Text style={{ color: c.inkSoft, fontWeight: "600", fontSize: 12 }}>{t("offline.center.limit")}</Text>
+                <Segmented<string> label={t("offline.center.limit")} value={String(draft.limitMb)}
+                  onChange={(v) => setDraft({ ...draft, limitMb: Number(v) })}
+                  options={RETENTION_LIMIT_OPTIONS.map((mb) => ({ value: String(mb), label: `${mb} MB` }))} />
+                <Text style={{ color: c.muted, fontSize: 11 }}>{t("offline.center.limitHelp")}</Text>
+              </View>
+            ) : null}
+            <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
+              <Switch testID="offline-wifi-only" value={draft.wifiOnly} onValueChange={(wifiOnly) => setDraft({ ...draft, wifiOnly })} />
+              <View style={{ flex: 1, gap: 1 }}>
+                <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{t("offline.center.wifi")}</Text>
+                <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.wifiHelp")}</Text>
+              </View>
+            </View>
+            <Button testID="offline-apply-policy" label={t("offline.center.apply")} disabled={!dirty || busy}
+              onPress={() => setApplyOpen(true)} />
+          </>
+        ) : null}
+      </CollapsibleSection>
+
+      <CollapsibleSection testID="offline-section-cleanup" title={t("offline.center.cleanup")} icon="receipt"
+        summary={cleanupSummary}>
+        <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("offline.center.cleanupHelp")}</Text>
+        {cleanupCount ? (
+          <Banner tone="warn" text={cleanupSummary} />
+        ) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("offline.center.cleanupNone")}</Text>}
+        <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("offline.center.cleanupAutomatic")}</Text>
+        <Button testID="offline-cleanup" kind="dangerQuiet" label={t("offline.center.cleanup")} disabled={!cleanupCount || busy}
+          onPress={() => setCleanupOpen(true)} />
+      </CollapsibleSection>
 
       <ConfirmDialog open={applyOpen} title={t("offline.center.confirmPolicyTitle")}
         message={`${t("offline.center.confirmPolicy")}\n\n${draft ? t(EXPLAIN_KEY[draft.mode]) : ""}`}

@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
-import { Switch, Text, View } from "react-native";
+import { Platform, Switch, Text, View } from "react-native";
 import { useRouter } from "expo-router";
-import { Badge, Banner, Button, Card, ConfirmDialog, Field, PasswordField, Screen, Segmented, useWide } from "../../src/components/ui";
+import {
+  Badge, Banner, Button, Card, CollapsibleSection, ConfirmDialog, Field, PasswordField, Screen, Segmented, useWide,
+} from "../../src/components/ui";
 import { AppearanceSettings } from "../../src/components/theme-switcher";
 import { PwaInstallCard } from "../../src/components/pwa-install";
 import { OfflineDownloadCard } from "../../src/components/offline-download";
@@ -12,7 +14,7 @@ import { syncNow, useSync } from "../../src/synchronization/engine";
 import { installedApp } from "../../src/services/updates";
 import { readCachedPolicy, savePolicySnapshot } from "../../src/services/policy-cache";
 import { readOfflineSnapshot, snapshotKeys } from "../../src/services/offline-data";
-import { space, type, useTheme } from "../../src/theme/tokens";
+import { space, type, useTheme, useThemeMode } from "../../src/theme/tokens";
 
 interface Me { id: string; email: string; name: string; role: "owner" | "manager" | "system_admin"; shopId: string | null; shopName: string | null }
 interface ShopProfile { id: string; name: string; currency: string; createdAt: string }
@@ -22,6 +24,7 @@ type Note = { tone: "ok" | "danger"; text: string } | null;
 export default function Settings() {
   const t = useT(); const c = useTheme(); const wide = useWide(); const router = useRouter();
   const { user, token, logout, apply } = useSession(); const { lang, set } = useLang();
+  const appearanceMode = useThemeMode((s) => s.mode);
   const pending = useSync((s) => s.pending); const issues = useSync((s) => s.issues);
   const lastSync = useSync((s) => s.lastSync); const online = useSync((s) => s.online); const running = useSync((s) => s.running);
   const [confirm, setConfirm] = useState(false); const [busy, setBusy] = useState(false);
@@ -156,179 +159,179 @@ export default function Settings() {
 
   const shopLabel = shop?.name ?? me?.shopName ?? null;
   const email = me?.email ?? null;
+  const profileName = me?.name ?? user?.name ?? "";
+  const storageLabel = storage === "sqlite" ? t("sync.storageSqlite") : storage === "indexeddb" ? t("sync.storageIdb") : t("sync.storageLs");
+  const appearanceLabel = t(`appearance.${appearanceMode}` as Key);
 
   return (
     <Screen title={t("nav.settings")} subtitle={t("settings.subtitle")}>
       {accountCachedAt ? <Banner tone="warn" text={t("offline.cached").replace("{time}", new Date(accountCachedAt).toLocaleString())} /> : null}
-      <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg, alignItems: "stretch" }}>
-        <Card style={{ flex: 1, gap: space.sm }}>
-          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("settings.account")}</Text>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
-            <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: c.primarySoft, alignItems: "center", justifyContent: "center" }}>
-              <Text style={{ color: c.primaryStrong, fontWeight: "800", fontSize: 16 }}>{(me?.name ?? user?.name ?? "?").slice(0, 1).toUpperCase()}</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: c.ink, fontWeight: "700", fontSize: 16 }}>{me?.name ?? user?.name}</Text>
-              <Text style={{ color: c.muted, fontSize: 12 }}>{t(`role.${user?.role}` as Key)}</Text>
-            </View>
-            <Badge tone="ok" label={t("common.active")} dot />
-          </View>
-          <View style={{ borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.sm, gap: 4 }}>
-            <Text style={{ color: c.muted, fontSize: 12 }}>{t("settings.email")}: <Text style={{ color: c.inkSoft, fontWeight: "600" }}>{email ?? "—"}</Text></Text>
-            {user?.role !== "system_admin" ? (
-              <Text style={{ color: c.muted, fontSize: 12 }}>{t("settings.shop")}: <Text style={{ color: c.inkSoft, fontWeight: "600" }}>{shopLabel ?? "—"}</Text></Text>
-            ) : null}
-          </View>
-        </Card>
 
-        <Card style={{ flex: 1, gap: space.md }}>
-          <View style={{ gap: 2 }}>
-            <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("settings.profile")}</Text>
-            <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("settings.profileHelp")}</Text>
+      {/* Always-visible identity summary. The editable details stay inside their own section. */}
+      <Card style={{ gap: space.md }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: space.md, flexWrap: "wrap" }}>
+          <View style={{ width: 46, height: 46, borderRadius: 23, backgroundColor: c.primarySoft, alignItems: "center", justifyContent: "center" }}>
+            <Text style={{ color: c.primaryStrong, fontWeight: "800", fontSize: 18 }}>{(profileName || "?").slice(0, 1).toUpperCase()}</Text>
           </View>
+          <View style={{ flex: 1, minWidth: 160, gap: 2 }}>
+            <Text style={{ color: c.ink, ...type.h2 }} numberOfLines={1}>{profileName}</Text>
+            <Text style={{ color: c.muted, fontSize: 12 }} numberOfLines={1}>
+              {t(`role.${user?.role}` as Key)}{email ? ` · ${email}` : ""}
+            </Text>
+          </View>
+          <Badge tone="ok" label={t("common.active")} dot />
+        </View>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.lg, borderTopWidth: 1, borderTopColor: c.line, paddingTop: space.md }}>
+          <View style={{ flexGrow: 1, flexBasis: 190, gap: 2 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("settings.email")}</Text>
+            <Text style={{ color: c.inkSoft, fontSize: 13, fontWeight: "600" }} numberOfLines={1}>{email ?? "—"}</Text>
+          </View>
+          {user?.role !== "system_admin" ? (
+            <View style={{ flexGrow: 1, flexBasis: 190, gap: 2 }}>
+              <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("settings.shop")}</Text>
+              <Text style={{ color: c.inkSoft, fontSize: 13, fontWeight: "600" }} numberOfLines={1}>{shopLabel ?? "—"}</Text>
+            </View>
+          ) : null}
+          <View style={{ flexGrow: 1, flexBasis: 130, gap: 2 }}>
+            <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("settings.device")}</Text>
+            <Text style={{ color: online ? c.success : c.accent, fontSize: 13, fontWeight: "700" }}>{online ? t("sync.online") : t("sync.offline")}</Text>
+          </View>
+        </View>
+      </Card>
+
+      <View style={{ gap: space.md }}>
+        <CollapsibleSection testID="settings-section-profile" defaultOpen title={t("settings.accountProfile")} icon="users"
+          summary={`${profileName}${email ? ` · ${email}` : ""}`}>
+          <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("settings.profileHelp")}</Text>
           {nameNote ? <Banner tone={nameNote.tone} text={nameNote.text} /> : null}
-          <Field testID="settings-name" label={t("settings.fullName")} value={name} onChangeText={(x) => { setNameNote(null); setName(x); }} maxLength={120} />
+          <Field testID="settings-name" label={t("settings.fullName")} value={name} onChangeText={(x) => { setNameNote(null); setName(x); }} maxLength={120}
+            containerStyle={{ flexGrow: 0, flexBasis: "auto" }} />
           <Button testID="settings-save-name" label={t("common.save")} loading={nameBusy} onPress={() => void saveName()} />
-        </Card>
-      </View>
+        </CollapsibleSection>
 
-      <Card style={{ gap: space.md }}>
-        <View style={{ gap: 2 }}>
-          <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("settings.security")}</Text>
-          <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("settings.securityHelp")}</Text>
-        </View>
-        {pwNote ? <Banner tone={pwNote.tone} text={pwNote.text} /> : null}
-        <View style={{ flexDirection: "row", gap: space.md, flexWrap: "wrap" }}>
-          <PasswordField testID="settings-current-password" label={t("settings.currentPassword")} value={pw.current}
-            onChangeText={(x) => { setPwNote(null); setPw({ ...pw, current: x }); }} autoComplete="current-password" textContentType="password" />
-          <PasswordField testID="settings-new-password" label={t("settings.newPassword")} value={pw.next}
-            onChangeText={(x) => { setPwNote(null); setPw({ ...pw, next: x }); }} autoComplete="new-password" textContentType="newPassword" hint={t("settings.passwordHelp")} />
-          <PasswordField testID="settings-confirm-password" label={t("settings.confirmPassword")} value={pw.confirm}
-            onChangeText={(x) => { setPwNote(null); setPw({ ...pw, confirm: x }); }} autoComplete="new-password" textContentType="newPassword" />
-        </View>
-        <Button testID="settings-save-password" label={t("settings.changePassword")} loading={pwBusy}
-          disabled={!pw.current || !pw.next || !pw.confirm} onPress={() => void savePassword()} />
-      </Card>
+        <CollapsibleSection testID="settings-section-password" title={t("settings.security")} icon="shield"
+          summary={t("settings.securityHelp")}>
+          {pwNote ? <Banner tone={pwNote.tone} text={pwNote.text} /> : null}
+          <View style={{ flexDirection: wide ? "row" : "column", gap: space.md, alignItems: "flex-start" }}>
+            <PasswordField testID="settings-current-password" label={t("settings.currentPassword")} value={pw.current} containerStyle={wide ? undefined : { flexGrow: 0, flexBasis: "auto" }}
+              onChangeText={(x) => { setPwNote(null); setPw({ ...pw, current: x }); }} autoComplete="current-password" textContentType="password" />
+            <PasswordField testID="settings-new-password" label={t("settings.newPassword")} value={pw.next} containerStyle={wide ? undefined : { flexGrow: 0, flexBasis: "auto" }}
+              onChangeText={(x) => { setPwNote(null); setPw({ ...pw, next: x }); }} autoComplete="new-password" textContentType="newPassword" hint={t("settings.passwordHelp")} />
+            <PasswordField testID="settings-confirm-password" label={t("settings.confirmPassword")} value={pw.confirm} containerStyle={wide ? undefined : { flexGrow: 0, flexBasis: "auto" }}
+              onChangeText={(x) => { setPwNote(null); setPw({ ...pw, confirm: x }); }} autoComplete="new-password" textContentType="newPassword" />
+          </View>
+          <Button testID="settings-save-password" label={t("settings.changePassword")} loading={pwBusy}
+            disabled={!pw.current || !pw.next || !pw.confirm} onPress={() => void savePassword()} />
+        </CollapsibleSection>
 
-      <Card style={{ gap: space.md }}>
-        <View style={{ gap: 2 }}>
-          <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("settings.accountSecurity")}</Text>
-          <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("settings.accountSecurityHelp")}</Text>
-        </View>
-        <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
-          <Button testID="settings-security" kind="secondary" label={t("settings.twoFactor")} onPress={() => router.push("/security")} />
-          <Button testID="settings-notifications" kind="secondary" label={t("settings.notifications")} onPress={() => router.push("/notifications")} />
-        </View>
-      </Card>
+        <CollapsibleSection testID="settings-section-security" title={t("settings.accountSecurity")} icon="shield"
+          summary={t("settings.accountSecurityHelp")}>
+          <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
+            <Button testID="settings-security" kind="secondary" label={t("settings.twoFactor")} onPress={() => router.push("/security")} />
+            <Button testID="settings-notifications" kind="secondary" label={t("settings.notifications")} onPress={() => router.push("/notifications")} />
+          </View>
+        </CollapsibleSection>
 
-      {user?.role === "owner" ? (
-        <Card style={{ gap: space.md }}>
-          <View style={{ gap: 2 }}>
-            <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("settings.shopDetails")}</Text>
+        {user?.role === "owner" ? (
+          <CollapsibleSection testID="settings-section-shop" title={t("settings.shopDetails")} icon="box"
+            summary={shopLabel ?? t("settings.shopNameHelp")}>
             <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("settings.shopNameHelp")}</Text>
-          </View>
-          {shopNote ? <Banner tone={shopNote.tone} text={shopNote.text} /> : null}
-          <Field testID="settings-shop-name" label={t("settings.shopName")} value={shopName} onChangeText={(x) => { setShopNote(null); setShopName(x); }} maxLength={120} />
-          <Button testID="settings-save-shop" label={t("common.save")} loading={shopBusy} onPress={() => void saveShop()} />
-        </Card>
-      ) : null}
+            {shopNote ? <Banner tone={shopNote.tone} text={shopNote.text} /> : null}
+            <Field testID="settings-shop-name" label={t("settings.shopName")} value={shopName} onChangeText={(x) => { setShopNote(null); setShopName(x); }} maxLength={120}
+              containerStyle={{ flexGrow: 0, flexBasis: "auto" }} />
+            <Button testID="settings-save-shop" label={t("common.save")} loading={shopBusy} onPress={() => void saveShop()} />
+          </CollapsibleSection>
+        ) : null}
 
-      {user?.role === "owner" ? (
-        <Card style={{ gap: space.md }}>
-          <View style={{ gap: 2 }}>
-            <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("settings.shopPolicy")}</Text>
-            <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("settings.shopPolicyHelp")}</Text>
-          </View>
-          {policyMsg ? <Banner tone={policyMsg.tone} text={policyMsg.text} /> : null}
-          {policy ? (
-            <>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
-                <Switch testID="policy-manager-finance" value={policy.managerFinancialAccess} onValueChange={(v) => setPolicy({ ...policy, managerFinancialAccess: v })} />
-                <View style={{ flex: 1, gap: 1 }}>
-                  <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{t("settings.managerFinance")}</Text>
-                  <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("settings.managerFinanceHelp")}</Text>
+        {user?.role === "owner" ? (
+          <CollapsibleSection testID="settings-section-policy" title={t("settings.shopPolicies")} icon="checkSquare"
+            summary={policy ? `${policy.maxDiscountPercent}% · ${t("settings.shopPolicyHelp")}` : t("settings.shopPolicyHelp")}>
+            {policyMsg ? <Banner tone={policyMsg.tone} text={policyMsg.text} /> : null}
+            {policy ? (
+              <>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
+                  <Switch testID="policy-manager-finance" value={policy.managerFinancialAccess} onValueChange={(v) => setPolicy({ ...policy, managerFinancialAccess: v })} />
+                  <View style={{ flex: 1, gap: 1 }}>
+                    <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{t("settings.managerFinance")}</Text>
+                    <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("settings.managerFinanceHelp")}</Text>
+                  </View>
                 </View>
-              </View>
-              <View style={{ gap: 4 }}>
-                <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{t("settings.belowCost")}</Text>
-                <Segmented<"acknowledge" | "block"> label={t("settings.belowCost")} value={policy.belowCostPolicy}
-                  onChange={(v) => setPolicy({ ...policy, belowCostPolicy: v })}
-                  options={[{ value: "acknowledge", label: t("settings.belowCostAck") }, { value: "block", label: t("settings.belowCostBlock") }]} />
-                <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>
-                  {policy.belowCostPolicy === "block" ? t("settings.belowCostBlockHelp") : t("settings.belowCostAckHelp")}
-                </Text>
-              </View>
-              <Field testID="policy-max-discount" label={t("settings.maxDiscount")} value={discountInput} keyboardType="number-pad" onChangeText={setDiscountInput} hint={t("settings.maxDiscountHelp")} />
-              <View style={{ gap: 4 }}>
-                <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{t("settings.creditPolicy")}</Text>
-                <Segmented<"block" | "owner_approval" | "reason_override"> label={t("settings.creditPolicy")} value={policy.creditLimitPolicy}
-                  onChange={(v) => setPolicy({ ...policy, creditLimitPolicy: v })}
-                  options={[
-                    { value: "block", label: t("settings.creditBlock") },
-                    { value: "owner_approval", label: t("settings.creditApproval") },
-                    { value: "reason_override", label: t("settings.creditReason") },
-                  ]} />
-                <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("settings.creditPolicyHelp")}</Text>
-              </View>
-              <Button testID="policy-save" label={t("common.save")} loading={policyBusy} onPress={() => void savePolicy()} />
-            </>
-          ) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("common.loading")}</Text>}
-        </Card>
-      ) : null}
+                <View style={{ gap: 4 }}>
+                  <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{t("settings.belowCost")}</Text>
+                  <Segmented<"acknowledge" | "block"> label={t("settings.belowCost")} value={policy.belowCostPolicy}
+                    onChange={(v) => setPolicy({ ...policy, belowCostPolicy: v })}
+                    options={[{ value: "acknowledge", label: t("settings.belowCostAck") }, { value: "block", label: t("settings.belowCostBlock") }]} />
+                  <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>
+                    {policy.belowCostPolicy === "block" ? t("settings.belowCostBlockHelp") : t("settings.belowCostAckHelp")}
+                  </Text>
+                </View>
+                <Field testID="policy-max-discount" label={t("settings.maxDiscount")} value={discountInput} keyboardType="number-pad" onChangeText={setDiscountInput} hint={t("settings.maxDiscountHelp")}
+                  containerStyle={{ flexGrow: 0, flexBasis: "auto" }} />
+                <View style={{ gap: 4 }}>
+                  <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>{t("settings.creditPolicy")}</Text>
+                  <Segmented<"block" | "owner_approval" | "reason_override"> label={t("settings.creditPolicy")} value={policy.creditLimitPolicy}
+                    onChange={(v) => setPolicy({ ...policy, creditLimitPolicy: v })}
+                    options={[
+                      { value: "block", label: t("settings.creditBlock") },
+                      { value: "owner_approval", label: t("settings.creditApproval") },
+                      { value: "reason_override", label: t("settings.creditReason") },
+                    ]} />
+                  <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("settings.creditPolicyHelp")}</Text>
+                </View>
+                <Button testID="policy-save" label={t("common.save")} loading={policyBusy} onPress={() => void savePolicy()} />
+              </>
+            ) : <Text style={{ color: c.muted, fontSize: 12 }}>{t("common.loading")}</Text>}
+          </CollapsibleSection>
+        ) : null}
 
-      <View style={{ flexDirection: wide ? "row" : "column", gap: space.lg, alignItems: "stretch" }}>
-        <Card style={{ flex: 1, gap: space.md }}>
-          <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("common.language")}</Text>
+        <CollapsibleSection testID="settings-section-language" title={t("common.language")} icon="more"
+          summary={lang === "en" ? "English" : "Kinyarwanda"}>
           <Segmented value={lang} onChange={set} label={t("common.language")} options={[{ value: "en", label: "English" }, { value: "rw", label: "Kinyarwanda" }]} />
           <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("settings.languageHelp")}</Text>
-        </Card>
+        </CollapsibleSection>
 
-        <Card style={{ flex: 1, gap: space.md }}>
-          <AppearanceSettings />
+        <CollapsibleSection testID="settings-section-appearance" title={t("appearance.title")} icon="sun" summary={appearanceLabel}>
+          <AppearanceSettings embedded />
           <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("appearance.persistHelp")}</Text>
-        </Card>
-      </View>
+        </CollapsibleSection>
 
-      <PwaInstallCard />
-      <Card style={{ gap: space.md }}>
-        <View style={{ gap: 2 }}>
-          <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("nav.offline")}</Text>
+        {Platform.OS === "web" ? (
+          <CollapsibleSection testID="settings-section-install" title={t("pwa.title")} icon="plus" summary={t("pwa.benefit")}>
+            <PwaInstallCard embedded />
+          </CollapsibleSection>
+        ) : null}
+
+        <CollapsibleSection testID="settings-section-offline" title={t("settings.offlineSection")} icon="layers"
+          summary={t("nav.offlineDesc")}>
           <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("offline.center.subtitle")}</Text>
-        </View>
-        <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
           <Button testID="settings-offline-center" label={t("nav.offline")} onPress={() => router.push("/offline")} />
-        </View>
-      </Card>
-      <OfflineDownloadCard />
+          <OfflineDownloadCard embedded />
+        </CollapsibleSection>
 
-      <Card style={{ gap: space.md }}>
-        <View style={{ gap: 2 }}>
-          <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("settings.device")}</Text>
+        <CollapsibleSection testID="settings-section-device" title={t("settings.deviceSync")} icon="monitor"
+          summary={`${storageLabel} · ${pending} ${t("sync.pending")}`}>
           <Text style={{ color: c.muted, fontSize: 12 }}>{t("settings.storageHelp")}</Text>
-        </View>
-        <View style={{ gap: 4 }}>
-          <Text style={{ color: c.muted, fontSize: 12 }}>{t("settings.storage")}: <Text style={{ color: c.inkSoft, fontWeight: "600" }}>{storage === "sqlite" ? t("sync.storageSqlite") : storage === "indexeddb" ? t("sync.storageIdb") : t("sync.storageLs")}</Text></Text>
-          <Text style={{ color: c.muted, fontSize: 12 }}>{t("sync.pending")}: <Text style={{ color: pending ? c.accent : c.inkSoft, fontWeight: "700" }}>{pending}</Text>
-            {issues ? <Text style={{ color: c.danger, fontWeight: "700" }}>{" · "}{t("sync.needsReview")}: {issues}</Text> : null}
-          </Text>
-          <Text style={{ color: c.muted, fontSize: 12 }}>{t("sync.lastSync")}: <Text style={{ color: c.inkSoft, fontWeight: "600" }}>{lastSync ? new Date(lastSync).toLocaleString() : t("common.never")}</Text></Text>
-          <Text style={{ color: online ? c.success : c.accent, fontSize: 12, fontWeight: "600" }}>{online ? t("sync.online") : t("sync.offline")}</Text>
-        </View>
-        <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
-          <Button testID="settings-sync" kind="secondary" label={t("sync.now")} loading={syncing || running} onPress={() => void runSync()} />
-          <Button kind="quiet" label={t("nav.sync")} onPress={() => router.push("/sync")} />
-        </View>
-        {storage !== "sqlite" ? <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("sync.webWarning")}</Text> : null}
-      </Card>
+          <View style={{ gap: 4 }}>
+            <Text style={{ color: c.muted, fontSize: 12 }}>{t("settings.storage")}: <Text style={{ color: c.inkSoft, fontWeight: "600" }}>{storageLabel}</Text></Text>
+            <Text style={{ color: c.muted, fontSize: 12 }}>{t("sync.pending")}: <Text style={{ color: pending ? c.accent : c.inkSoft, fontWeight: "700" }}>{pending}</Text>
+              {issues ? <Text style={{ color: c.danger, fontWeight: "700" }}>{" · "}{t("sync.needsReview")}: {issues}</Text> : null}
+            </Text>
+            <Text style={{ color: c.muted, fontSize: 12 }}>{t("sync.lastSync")}: <Text style={{ color: c.inkSoft, fontWeight: "600" }}>{lastSync ? new Date(lastSync).toLocaleString() : t("common.never")}</Text></Text>
+            <Text style={{ color: online ? c.success : c.accent, fontSize: 12, fontWeight: "600" }}>{online ? t("sync.online") : t("sync.offline")}</Text>
+          </View>
+          <View style={{ flexDirection: "row", gap: space.sm, flexWrap: "wrap" }}>
+            <Button testID="settings-sync" kind="secondary" label={t("sync.now")} loading={syncing || running} onPress={() => void runSync()} />
+            <Button kind="quiet" label={t("nav.sync")} onPress={() => router.push("/sync")} />
+          </View>
+          {storage !== "sqlite" ? <Text style={{ color: c.muted, fontSize: 11, lineHeight: 16 }}>{t("sync.webWarning")}</Text> : null}
+        </CollapsibleSection>
 
-      <Card style={{ gap: space.md }}>
-        <View style={{ gap: 2 }}>
-          <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("settings.signOutTitle")}</Text>
-          <Text style={{ color: c.muted, fontSize: 12 }}>{t("settings.signOutHelp")}</Text>
-        </View>
-        <Button testID="settings-signout" kind="secondary" label={t("common.signOut")} onPress={() => setConfirm(true)} />
-        <Text style={{ color: c.muted, fontSize: 11 }}>{`v${appVersion}`}</Text>
-      </Card>
+        <CollapsibleSection testID="settings-section-signout" title={t("settings.signOutTitle")} icon="arrowRight"
+          summary={t("settings.signOutHelp")}>
+          <Button testID="settings-signout" kind="secondary" label={t("common.signOut")} onPress={() => setConfirm(true)} />
+          <Text style={{ color: c.muted, fontSize: 11 }}>{`v${appVersion}`}</Text>
+        </CollapsibleSection>
+      </View>
 
       <ConfirmDialog open={confirm} title={t("settings.signOutTitle")} message={pending ? t("settings.signOutPending").replace("{n}", String(pending)) : t("settings.signOutHelp")}
         confirmLabel={t("common.signOut")} busy={busy} onCancel={() => setConfirm(false)} onConfirm={async () => {

@@ -552,6 +552,8 @@ export const en = {
   "stock.productSaved": "Product details saved.", "stock.codeHelp": "Must be unique in this shop.",
 
   "settings.email": "Email", "settings.shop": "Shop", "settings.profile": "Your profile",
+  "settings.accountProfile": "Account profile", "settings.shopPolicies": "Shop policies",
+  "settings.deviceSync": "This device & synchronization", "settings.offlineSection": "Offline Center & offline data",
   "settings.profileHelp": "This name appears on every record you save.", "settings.fullName": "Display name",
   "settings.nameSaved": "Name saved.", "settings.nameInvalid": "Enter a name of at least 2 characters.",
   "settings.security": "Password & security",

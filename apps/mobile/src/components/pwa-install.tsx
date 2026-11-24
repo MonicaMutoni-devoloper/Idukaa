@@ -12,16 +12,15 @@ import { space, useTheme } from "../theme/tokens";
  * triggers it; otherwise the same button opens the real browser menu steps, so there is never a
  * button that silently does nothing or an install path the user cannot find.
  */
-export function PwaInstallCard() {
+export function PwaInstallCard({ embedded = false }: { embedded?: boolean }) {
   const t = useT(); const c = useTheme();
   const { available, installed, busy, lastOutcome, promptInstall } = usePwaInstall();
   const [help, setHelp] = useState(false);
 
   if (Platform.OS !== "web") return null;
 
-  return (
+  const body = (
     <>
-      <View testID="pwa-install-card"><Card style={{ gap: space.md }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
           <View style={{ flex: 1, gap: 2 }}>
             <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>
@@ -49,7 +48,14 @@ export function PwaInstallCard() {
             {!available ? <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("pwa.unavailable")}</Text> : null}
           </>
         ) : null}
-      </Card></View>
+    </>
+  );
+
+  return (
+    <>
+      <View testID="pwa-install-card">
+        {embedded ? <View style={{ gap: space.md }}>{body}</View> : <Card style={{ gap: space.md }}>{body}</Card>}
+      </View>
 
       <Modal open={help} onClose={() => setHelp(false)} title={t("pwa.helpTitle")}
         description={t("pwa.helpIntro")} width={520} scroll
