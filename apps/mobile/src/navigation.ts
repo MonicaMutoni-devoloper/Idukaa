@@ -59,6 +59,7 @@ export const NAV: Record<Role, NavGroup[]> = {
   system_admin: [
     { label: "nav.groupSystem", items: [
       { href: "/admin", key: "admin.overview", description: "admin.overviewDesc" },
+      { href: "/admin/access", key: "admin.userShopAccess", description: "admin.userShopAccessDesc" },
       { href: "/admin/applications", key: "admin.applications", description: "admin.applicationsDesc" },
       { href: "/admin/shops", key: "admin.shops", description: "admin.shopsDesc" },
       { href: "/admin/subscriptions", key: "admin.subscriptions", description: "admin.subscriptionsDesc" },

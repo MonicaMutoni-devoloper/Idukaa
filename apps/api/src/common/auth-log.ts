@@ -2,8 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import { originIsCrossSite } from "./http";
 
-/**
- * Correlation id for one HTTP request. Honours an inbound `x-request-id` (so a browser console
+/** Correlation id for one HTTP request. Honours an inbound `x-request-id` (so a browser console
  * entry or a Render log line can be matched end to end) and always echoes it back in the response.
  * The value is validated, so a client cannot inject arbitrary text into the logs.
  */
@@ -15,7 +14,9 @@ export function requestIdMiddleware(req: Request, res: Response, next: NextFunct
   next();
 }
 
-export const requestIdOf = (req: Request | undefined) => (req as { requestId?: string } | undefined)?.requestId;
+export function requestIdOf(req: Request | undefined): string | undefined {
+  return (req as { requestId?: string | undefined }).requestId;
+}
 
 type Field = string | number | boolean | null | undefined;
 export type AuthCategory =
@@ -32,10 +33,10 @@ export type AuthCategory =
   | "subscription_inactive"
   | "role_not_allowed"
   | "database_error"
-  | "ok";
+  | "ok"
+  | "impersonation_invalid"; // impersonation session invalid, expired, or unauthorized
 
-/**
- * One structured line per authentication decision. Fields are curated by the caller: no token,
+/** One structured line per authentication decision. Fields are curated by the caller: no token,
  * cookie, password, authorization header or request body is ever serialized here — only the
  * category, the endpoint, the correlation id and non-secret metadata (counts, booleans, timings).
  */

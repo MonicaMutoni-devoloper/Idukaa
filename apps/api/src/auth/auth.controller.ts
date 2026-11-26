@@ -123,7 +123,18 @@ export class AuthController {
   }
 
   @Get("me")
-  me(@Me() u: AuthUser) { return this.auth.me(u.id); }
+  async me(@Me() u: AuthUser, @Req() req: Request) {
+    // Inside administrative access the authenticated principal is the administrator (all writes and
+    // audit rows use that id), but the interface must show the accessed account or shop.
+    const imp = (req as any).impersonationContext as { targetType: "user" | "shop"; targetUserId: string | null; targetShopId: string | null } | null;
+    const viewedUserId = imp?.targetType === "user" ? imp.targetUserId : u.id;
+    const me = await this.auth.me(viewedUserId ?? u.id);
+    if (imp?.targetType === "shop") {
+      const shop = (req as any).impersonatedShop as { name?: string | null } | null;
+      return { ...me, role: "owner" as const, shopId: imp.targetShopId, shopName: shop?.name ?? null };
+    }
+    return me;
+  }
 
   @Patch("me")
   async updateMe(@Me() u: AuthUser, @Body() body: unknown) {

@@ -5,7 +5,12 @@ import { useT } from "../../../src/localization";
 import { request } from "../../../src/services/api";
 import { space, type, useTheme } from "../../../src/theme/tokens";
 
-interface Entry { id: string; action: string; entity: string; entity_id: string | null; reason: string | null; created_at: string; actor: string | null; actor_email: string | null }
+interface Entry {
+  id: string; action: string; entity: string; entity_id: string | null; reason: string | null;
+  created_at: string; actor: string | null; actor_email: string | null;
+  impersonated: boolean; impersonation_session_id: string | null;
+  on_behalf_of_user_id: string | null; on_behalf_of: string | null; sensitive: boolean;
+}
 
 const LIMIT = 50;
 type Filter = "" | "auth" | "admin" | "application";
@@ -60,9 +65,14 @@ export default function AdminAudit() {
               <View style={{ flex: 1, gap: 2 }}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
                   <Badge tone={tone(e.action) as any} label={e.action} />
+                  {e.impersonated ? <Badge tone="warn" dot label={t("access.impersonated")} /> : null}
+                  {e.sensitive ? <Badge tone="danger" label={t("access.sensitive")} /> : null}
                   <Text style={{ color: c.muted, fontSize: 11 }}>{e.entity}</Text>
                 </View>
                 <Text style={{ color: c.inkSoft, fontSize: 13 }}>{e.actor ? `${e.actor} · ${e.actor_email ?? ""}` : t("admin.systemActor")}</Text>
+                {e.impersonated && e.on_behalf_of ? (
+                  <Text style={{ color: c.accent, fontSize: 12 }}>{t("access.onBehalfOf").replace("{name}", e.on_behalf_of)}</Text>
+                ) : null}
                 {e.reason ? <Text style={{ color: c.accent, fontSize: 12 }}>{t("admin.reasonLabel")}: {e.reason}</Text> : null}
               </View>
               <Text style={{ color: c.muted, fontSize: 11, textAlign: "right", maxWidth: 150 }}>{new Date(e.created_at).toLocaleString()}</Text>

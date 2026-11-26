@@ -7,7 +7,7 @@ import { Banner, Button, SyncBadge, useWide } from "../../src/components/ui";
 import { Icon, navIcon } from "../../src/components/icons";
 import { ThemeSwitcher } from "../../src/components/theme-switcher";
 import { useLang, useT, type Key } from "../../src/localization";
-import { useSession } from "../../src/services/api";
+import { useImpersonation, useSession } from "../../src/services/api";
 import { activeNav, allNav, bottomNav, NAV } from "../../src/navigation";
 import { kvGet, kvSet } from "../../src/database";
 import { motion, radius, space, type, useTheme } from "../../src/theme/tokens";
@@ -52,6 +52,7 @@ function TabIndicator({ active }: { active: boolean }) {
 
 export default function AppLayout() {
   const { user, expired, logout } = useSession();
+  const impersonation = useImpersonation();
   const t = useT(); const c = useTheme(); const wide = useWide(); const path = usePathname(); const router = useRouter();
   const { lang, set } = useLang(); const insets = useSafeAreaInsets();
   const online = useSync((s) => s.online);
@@ -96,6 +97,29 @@ export default function AppLayout() {
       <Text style={{ color: c.inkSoft, fontWeight: "700", fontSize: 11 }}>{lang === "en" ? "RW" : "EN"}</Text>
     </Pressable>
   );
+
+  // Persistent administrative-access banner. It is rendered outside the page slot so navigating
+  // anywhere inside the target account cannot hide it; exiting revokes the server session and
+  // restores the administrator's own identity before returning to the admin dashboard.
+  const adminAccessBanner = impersonation.active ? (
+    <View style={{ paddingHorizontal: wide ? space.xl : space.lg, paddingTop: space.sm }}>
+      <View testID="admin-access-banner" style={{ borderWidth: 1, borderColor: c.warning, backgroundColor: c.warnBg, borderRadius: radius.sm, padding: space.md, flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.md }}>
+        <View style={{ flexGrow: 1, flexBasis: 240, gap: 3 }}>
+          <Text style={{ color: c.warning, fontWeight: "800", fontSize: 12, letterSpacing: 0.6 }}>{t("impersonation.bannerTitle")}</Text>
+          <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>
+            {t("impersonation.bannerUser").replace("{name}",
+              impersonation.targetType === "shop" ? (impersonation.targetShopName ?? "") : (impersonation.targetName || user?.name || ""))}
+          </Text>
+          {impersonation.targetType === "user" && impersonation.targetShopName
+            ? <Text style={{ color: c.inkSoft, fontSize: 12 }}>{t("impersonation.bannerShop").replace("{shop}", impersonation.targetShopName)}</Text>
+            : null}
+          <Text style={{ color: c.muted, fontSize: 11 }}>{t("impersonation.bannerAdmin").replace("{name}", impersonation.adminUser?.name ?? "")}</Text>
+        </View>
+        <Button testID="admin-access-exit" kind="dangerQuiet" label={t("impersonation.exit")}
+          onPress={() => { void impersonation.exit().then(() => router.replace("/admin")); }} />
+      </View>
+    </View>
+  ) : null;
 
   // One recovery point on every screen: the server rejected the refresh credential, so the user has
   // to sign in again. Nothing local is touched — the outbox keeps syncing after the new sign-in.
@@ -213,6 +237,7 @@ export default function AppLayout() {
         </Animated.View>
         <View style={{ flex: 1, minWidth: 0 }}>
           {top}
+          {adminAccessBanner}
           {expiredBanner}
           {updateBanner}
           <Slot />
@@ -225,6 +250,7 @@ export default function AppLayout() {
   return (
     <View style={{ flex: 1, backgroundColor: c.bg }}>
       {top}
+      {adminAccessBanner}
       {expiredBanner}
       {updateBanner}
       <View style={{ flex: 1 }}><Slot /></View>

@@ -53,6 +53,12 @@ export const SYNC_TIMEOUT_MS = 60_000;
 const REFRESH_BACKOFF_MS = 15_000;
 
 let accessToken: string | null = null;
+/**
+ * Present only while an administrator is working inside a user account or shop. It is a session
+ * identifier, never a credential: the server still authenticates the administrator's own JWT and
+ * re-validates this session on every request.
+ */
+let impersonationSessionId: string | null = null;
 let challengeToken: string | null = null;
 let refreshInFlight: Promise<boolean> | null = null;
 /** Definitive rejection from the server: stop automatic refresh until the user signs in again. */
@@ -125,6 +131,7 @@ export interface RequestOptions { method?: string; body?: unknown; auth?: boolea
 async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = o.timeoutMs ?? REQUEST_TIMEOUT_MS): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (o.auth !== false && accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  if (o.auth !== false && impersonationSessionId) headers["x-impersonation-session"] = impersonationSessionId;
   const csrf = WEB ? readCookie("sms_csrf") : null;
   // On a cross-site deployment (web on one domain, API on another) the browser refuses to expose the
   // API's cookie to JavaScript, so its value is unknowable here. The header must still be present:
@@ -155,7 +162,17 @@ async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = o.timeo
   const text = await res.text();
   let body: any = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = null; }
-  if (!res.ok) throw new ApiError(res.status, body);
+  if (!res.ok) {
+    // The server ended or rejected the administrative access session (expiry, revocation, or the
+    // target becoming unavailable). Drop back to the administrator immediately so no screen keeps
+    // showing another account's data under a stale banner.
+    if (res.status === 403 && impersonationSessionId
+        && (body?.message === "impersonation_invalid" || body?.message === "impersonation_target_unavailable"
+          || body?.message === "not_allowed_during_impersonation")) {
+      useImpersonation.getState().expireLocally();
+    }
+    throw new ApiError(res.status, body);
+  }
   return body as T;
 }
 
@@ -364,6 +381,109 @@ export const useSession = create<{
     set((s) => ({ token: p.token ?? s.token, user: p.user ?? s.user, expired: false }));
   },
 }));
+
+export interface ImpersonationTarget {
+  id?: string;
+  name?: string;
+  email?: string;
+  role?: "owner" | "manager";
+  shopId: string;
+  shopName?: string | null;
+}
+
+interface ImpersonationEnterResponse {
+  sessionId: string;
+  expiresAt: string;
+  targetType: "user" | "shop";
+  target: ImpersonationTarget;
+}
+
+/**
+ * Administrative access state. The administrator's own `useSession.user` is swapped to the target
+ * identity for navigation and screen rendering, while `adminUser` is kept aside so exit restores it.
+ * `sessionId` is sent as `x-impersonation-session` on every API call and re-validated server-side.
+ */
+export const useImpersonation = create<{
+  active: boolean;
+  sessionId: string | null;
+  targetType: "user" | "shop" | null;
+  targetUserId: string | null;
+  targetShopId: string | null;
+  targetName: string;
+  targetShopName: string | null;
+  reason: string;
+  expiresAt: string | null;
+  adminUser: SessionUser | null;
+  enterUser: (userId: string, reason: string) => Promise<void>;
+  enterShop: (shopId: string, reason: string) => Promise<void>;
+  exit: () => Promise<void>;
+  expireLocally: () => void;
+}>((set, get) => {
+  const initial = {
+    active: false, sessionId: null, targetType: null, targetUserId: null, targetShopId: null,
+    targetName: "", targetShopName: null, reason: "", expiresAt: null, adminUser: null,
+  } as const;
+
+  async function adopt(r: ImpersonationEnterResponse, adminUser: SessionUser) {
+    impersonationSessionId = r.sessionId;
+    if (r.target.shopId) await bindShop(r.target.shopId);
+    const target: SessionUser = {
+      id: r.target.id ?? adminUser.id,
+      name: r.target.name ?? (r.target.shopName ?? "Shop"),
+      role: r.target.role ?? "owner",
+      shopId: r.target.shopId,
+      shopName: r.target.shopName ?? null,
+    };
+    useSession.setState({ user: target, expired: false });
+    set({
+      active: true, sessionId: r.sessionId, targetType: r.targetType,
+      targetUserId: r.target.id ?? null, targetShopId: r.target.shopId,
+      targetName: r.target.name ?? "", targetShopName: r.target.shopName ?? null,
+      reason: get().reason, expiresAt: r.expiresAt, adminUser,
+    });
+  }
+
+  return {
+    ...initial,
+
+    enterUser: async (userId, reason) => {
+      const adminUser = useSession.getState().user;
+      if (!adminUser) throw new ApiError(401, { error: "session_expired" });
+      set({ reason });
+      const r = await fetchJson<ImpersonationEnterResponse>("/admin/impersonate/user", {
+        method: "POST", body: { targetUserId: userId, reason },
+      });
+      await adopt(r, adminUser);
+    },
+
+    enterShop: async (shopId, reason) => {
+      const adminUser = useSession.getState().user;
+      if (!adminUser) throw new ApiError(401, { error: "session_expired" });
+      set({ reason });
+      const r = await fetchJson<ImpersonationEnterResponse>("/admin/impersonate/shop", {
+        method: "POST", body: { targetShopId: shopId, reason },
+      });
+      await adopt(r, adminUser);
+    },
+
+    exit: async () => {
+      const { sessionId, adminUser } = get();
+      try {
+        if (sessionId) await fetchJson("/admin/impersonate/end", { method: "POST", body: { sessionId } }, 8_000);
+      } catch { /* the local exit below must always happen; the server session also expires */ }
+      impersonationSessionId = null;
+      if (adminUser) useSession.setState({ user: adminUser, expired: false });
+      set({ ...initial });
+    },
+
+    expireLocally: () => {
+      const { adminUser } = get();
+      impersonationSessionId = null;
+      if (adminUser) useSession.setState({ user: adminUser });
+      set({ ...initial });
+    },
+  };
+});
 
 /**
  * Authenticated request. A 401 is answered by one refresh attempt and a single retry; a failed refresh

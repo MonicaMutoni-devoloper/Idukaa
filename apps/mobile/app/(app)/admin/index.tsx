@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Text, View } from "react-native";
+import { useRouter } from "expo-router";
 import { Badge, Banner, Button, Card, ErrorState, Loading, Screen } from "../../../src/components/ui";
 import { useT } from "../../../src/localization";
 import { request } from "../../../src/services/api";
@@ -30,7 +31,7 @@ function Metric({ label, value, hint, testID, tone }: { label: string; value: st
 }
 
 export default function AdminOverview() {
-  const t = useT(); const c = useTheme();
+  const t = useT(); const c = useTheme(); const router = useRouter();
   const [data, setData] = useState<Overview | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -47,7 +48,10 @@ export default function AdminOverview() {
       : <Badge tone="info" label={t("admin.stInfo")} />;
 
   return (
-    <Screen title={t("admin.overview")} subtitle={t("admin.overviewDesc")} actions={<Button kind="secondary" label={t("admin.refresh")} onPress={() => void load()} />}>
+    <Screen title={t("admin.overview")} subtitle={t("admin.overviewDesc")} actions={<>
+      <Button testID="admin-open-access" label={t("admin.userShopAccess")} onPress={() => router.push("/admin/access")} />
+      <Button kind="secondary" label={t("admin.refresh")} onPress={() => void load()} />
+    </>}>
       <Banner tone="warn" title={t("admin.onlyAccounts")} text={t("admin.note")} />
       {failed ? <ErrorState onRetry={() => void load()} /> : !data ? <Loading /> : (
         <>
