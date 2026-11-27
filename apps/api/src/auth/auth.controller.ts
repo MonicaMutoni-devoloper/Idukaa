@@ -136,6 +136,14 @@ export class AuthController {
     return me;
   }
 
+  /**
+   * This account's own sign-in history. Scoped to the authenticated user server-side (a caller can
+   * never ask for another account's events), and recorded per login regardless of which browser or
+   * network the sign-in came from.
+   */
+  @Get("activity")
+  activity(@Me() u: AuthUser) { return this.auth.recentAuthEvents(u.id); }
+
   @Patch("me")
   async updateMe(@Me() u: AuthUser, @Body() body: unknown) {
     const b = ProfilePatch.safeParse(body);

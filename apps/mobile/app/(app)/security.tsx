@@ -9,6 +9,24 @@ import { radius, space, useTheme } from "../../src/theme/tokens";
 
 interface Status { enabled: boolean; recoveryCodesRemaining: number; encryptionConfigured: boolean }
 interface Setup { secret: string; otpauth: string; qrDataUrl: string }
+/** One recorded sign-in/session event for this account, from any device. */
+interface AuthEvent { id: string; at: string; action: string; reason: string | null; deviceId: string | null; userAgent: string | null; ip: string | null }
+
+/** "Chrome · Windows" from the recorded user agent; null when the client sent none. */
+function describeDevice(ua: string | null): string | null {
+  if (!ua) return null;
+  const browser = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Chrome\//.test(ua) ? "Chrome"
+    : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "Browser";
+  const os = /Android/.test(ua) ? "Android" : /iPhone|iPad|iPod/.test(ua) ? "iOS"
+    : /Windows/.test(ua) ? "Windows" : /Mac OS X/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : null;
+  return [browser, os].filter(Boolean).join(" · ");
+}
+const EVENT_LABEL: Record<string, "security.ev.login" | "security.ev.logout" | "security.ev.logoutAll" | "security.ev.failed" | "security.ev.blocked" | "security.ev.twoFactor" | "security.ev.password" | "security.ev.profile"> = {
+  "auth.login": "security.ev.login", "auth.logout": "security.ev.logout", "auth.logout_all": "security.ev.logoutAll",
+  "auth.login.failed": "security.ev.failed", "auth.login.blocked": "security.ev.blocked",
+  "auth.2fa.challenged": "security.ev.twoFactor", "user.password.change": "security.ev.password",
+  "user.profile.update": "security.ev.profile",
+};
 type Note = { tone: "ok" | "danger" | "warn"; text: string } | null;
 
 function reasonText(e: unknown, t: ReturnType<typeof useT>): string {
@@ -31,6 +49,7 @@ export default function Security() {
   const online = useSync((s) => s.online);
   const logoutAll = useSession((s) => s.logoutAll);
   const [status, setStatus] = useState<Status | null>(null);
+  const [history, setHistory] = useState<AuthEvent[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [setup, setSetup] = useState<Setup | null>(null);
   const [codes, setCodes] = useState<string[] | null>(null);
@@ -44,6 +63,9 @@ export default function Security() {
   function load() {
     setFailed(false);
     request<Status>("/auth/2fa").then(setStatus).catch(() => setFailed(true));
+    // Sign-in history is the server's record, not this device's: it shows the browsers and networks
+    // this account was used from, which is exactly what a device-only list could never show.
+    request<AuthEvent[]>("/auth/activity").then(setHistory).catch(() => setHistory(null));
   }
   useEffect(load, []);
 
@@ -183,6 +205,39 @@ export default function Security() {
           <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("security.sessionsHelp")}</Text>
         </View>
         <Button testID="security-logout-all" kind="secondary" label={t("security.logoutAll")} loading={busy === "logout"} onPress={() => setConfirmLogout(true)} />
+      </Card>
+
+      <Card style={{ gap: space.sm }}>
+        <View style={{ gap: 2 }}>
+          <Text style={{ color: c.ink, fontWeight: "700", fontSize: 14 }}>{t("security.history")}</Text>
+          <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("security.historyHelp")}</Text>
+        </View>
+        {history === null ? <Text testID="security-history-empty" style={{ color: c.muted, fontSize: 12 }}>{t("security.historyUnavailable")}</Text>
+          : history.length === 0 ? <Text testID="security-history-empty" style={{ color: c.muted, fontSize: 12 }}>{t("security.historyEmpty")}</Text>
+            : (
+              <View testID="security-history" style={{ gap: 6 }}>
+                {history.map((e) => {
+                  const label = EVENT_LABEL[e.action];
+                  return (
+                  <View key={e.id} style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, alignItems: "center", borderTopWidth: 1, borderTopColor: c.line, paddingTop: 6 }}>
+                    <View style={{ flex: 1, minWidth: 150, gap: 1 }}>
+                      <Text style={{ color: c.ink, fontSize: 13, fontWeight: "600" }}>
+                        {label ? t(label) : e.action}
+                      </Text>
+                      <Text style={{ color: c.muted, fontSize: 11 }}>
+                        {new Date(e.at).toLocaleString()}
+                        {describeDevice(e.userAgent) ? ` · ${describeDevice(e.userAgent)}` : ""}
+                        {e.ip ? ` · ${e.ip}` : ""}
+                      </Text>
+                    </View>
+                    {e.action === "auth.login.failed" || e.action === "auth.login.blocked" ? (
+                      <Badge tone="warn" label={e.reason ?? t("security.ev.failed")} />
+                    ) : null}
+                  </View>
+                  );
+                })}
+              </View>
+            )}
       </Card>
 
       <ConfirmDialog open={confirmDisable} title={t("security.disableTitle")} message={t("security.disableHelp")}

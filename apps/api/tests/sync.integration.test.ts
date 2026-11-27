@@ -747,3 +747,33 @@ test("one operation the server cannot process no longer fails the whole batch", 
   assert.equal(Number((await pool.query("SELECT count(*) FROM products WHERE id=$1", [after])).rows[0].count), 0,
     "later work is not applied out of order");
 });
+
+test("a large mixed backlog is applied once, in order, and a replay changes nothing", { skip }, async () => {
+  const p = await newProduct(1500, 30_000, 1000);
+  const ops: any[] = [];
+  for (let i = 0; i < 20; i++) ops.push(op("sale.create", { saleId: uuid(), soldAt: now(), discount: 0, amountPaid: 1500, paymentMethod: "cash", lines: [{ productId: p, qty: 1000, unitPrice: 1500 }] }));
+  for (let i = 0; i < 10; i++) ops.push(op("purchase.create", { purchaseId: uuid(), supplierId: null, orderedAt: now(), amountPaid: 0, receiveNow: true, lines: [{ productId: p, qty: 1000, unitCost: 1000, sellingPrice: 1500 }] }));
+  for (let i = 0; i < 10; i++) ops.push(op("expense.create", { expenseId: uuid(), category: "transport", amount: 500, paid: true, incurredAt: now(), note: `backlog ${i}` }));
+  ops.push(op("count.submit", { countId: uuid(), countedAt: now(), lines: [{ productId: p, counted: 20_000 }] }));
+
+  const first = await svc.push(mgr, "backlog-device", ops);
+  assert.equal(first.length, ops.length, "every operation in the batch is answered");
+  assert.ok(first.every((r: any) => r.status === "applied"), `all applied, got ${first.map((r: any) => r.status).join(",")}`);
+  assert.equal(await qtyOnHand(p), 20_000, "30 000 opening + 10 000 received − 20 000 sold");
+  const rows = async () => ({
+    sales: Number((await pool.query("SELECT count(*) FROM sales WHERE shop_id=$1 AND status='posted'", [shopA])).rows[0].count),
+    expenses: Number((await pool.query("SELECT count(*) FROM expenses WHERE shop_id=$1", [shopA])).rows[0].count),
+  });
+  const after = await rows();
+  // Every operation is attributed to the person who queued it, in the right shop — the device that
+  // later syncs them never becomes the actor.
+  const attributed = await pool.query(
+    "SELECT DISTINCT actor_id, shop_id FROM audit_log WHERE shop_id=$1 AND action LIKE 'op.%' AND entity_id = ANY($2::text[])",
+    [shopA, ops.map((o) => o.opId)],
+  );
+  assert.deepEqual(attributed.rows, [{ actor_id: mgr.id, shop_id: shopA }], "the whole backlog is the manager's, in this shop");
+  const replayed = await svc.push(mgr, "backlog-device", ops);
+  assert.ok(replayed.every((r: any) => r.status === "duplicate"), "retrying the same batch is idempotent");
+  assert.deepEqual(await rows(), after, "no duplicate sale or expense was created by the retry");
+  assert.equal(await qtyOnHand(p), 20_000, "the ledger did not move twice");
+});

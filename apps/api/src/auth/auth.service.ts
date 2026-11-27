@@ -111,6 +111,36 @@ export class AuthService {
     return { token, refreshToken, expiresIn, user: sessionUser(user) };
   }
 
+  /**
+   * Device, browser and address of a sign-in attempt, stored with the audit row and never a
+   * credential. Without it the login history could only say "someone signed in", which is exactly
+   * the "login activity is missing" report: an owner could not tell which computer it came from.
+   */
+  private static deviceMeta(meta: SessionMeta) {
+    return {
+      method: "password" as const,
+      deviceId: meta.deviceId ?? null,
+      userAgent: meta.userAgent?.slice(0, 200) ?? null,
+      ip: meta.ip ?? null,
+    };
+  }
+
+  /** The caller's own sign-in and session events, newest first (shown on the security screen). */
+  async recentAuthEvents(userId: string) {
+    const rows = await this.db.query<{ id: string; at: string; action: string; reason: string | null; new_value: any }>(
+      `SELECT id, at, action, reason, new_value FROM audit_log
+        WHERE (actor_id=$1 OR (entity='user' AND entity_id=$1::text))
+          AND (action LIKE 'auth.%' OR action IN ('user.password.change','user.profile.update'))
+        ORDER BY id DESC LIMIT 50`, [userId]);
+    return rows.map((r) => {
+      const meta = (r.new_value ?? {}) as { deviceId?: string; userAgent?: string; ip?: string; reason?: string };
+      return {
+        id: r.id, at: r.at, action: r.action, reason: r.reason ?? meta.reason ?? null,
+        deviceId: meta.deviceId ?? null, userAgent: meta.userAgent ?? null, ip: meta.ip ?? null,
+      };
+    });
+  }
+
   async login(email: string, password: string, meta: SessionMeta): Promise<SessionPayload | TwoFactorChallenge> {
     // Checked before the lookup so a locked address cannot be used to probe which accounts exist.
     this.lockout?.assertAllowed(email);
@@ -125,7 +155,7 @@ export class AuthService {
     if (!u || !okPassword) {
       this.lockout?.fail(email);
       if (u) {
-        await audit(this.db.pool, { shopId: u.shop_id, actorId: null, action: "auth.login.failed", entity: "user", entityId: u.id, newValue: { reason: "invalid_credentials" } });
+        await audit(this.db.pool, { shopId: u.shop_id, actorId: null, action: "auth.login.failed", entity: "user", entityId: u.id, newValue: { reason: "invalid_credentials", ...AuthService.deviceMeta(meta) } });
         throw new UnauthorizedException("invalid_credentials");
       }
       // No account for this address yet. It may belong to a shop applicant whose file is still
@@ -197,7 +227,7 @@ export class AuthService {
     }
 
     const session = await this.createSession(u, meta);
-    await audit(this.db.pool, { shopId: u.shop_id, actorId: u.id, action: "auth.login", entity: "user", entityId: u.id });
+    await audit(this.db.pool, { shopId: u.shop_id, actorId: u.id, action: "auth.login", entity: "user", entityId: u.id, newValue: AuthService.deviceMeta(meta) });
     return session;
   }
 

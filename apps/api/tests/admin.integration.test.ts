@@ -318,3 +318,34 @@ test("the second shop stays independent: suspension of A never touches B", { ski
   const ownerB = await auth(OWNER_B);
   assert.equal((await call("GET", "/auth/me", undefined, ownerB)).status, 200, "the other shop's owner still works");
 });
+
+test("a sign-in from another computer is recorded with its device and kept to that account", { skip }, async () => {
+  // Two different browsers on two different addresses: the shape of a second computer.
+  const uaOwner = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/129.0 Safari/537.36";
+  const uaManager = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/17 Safari/605.1.15";
+  const a = await call("POST", "/auth/login", { email: OWNER, password: PASSWORD }, undefined, { "user-agent": uaOwner });
+  assert.ok(a.status < 300, `owner login -> ${a.status}`);
+  const b = await call("POST", "/auth/login", { email: MGR, password: PASSWORD }, undefined, { "user-agent": uaManager });
+  assert.ok(b.status < 300, `manager login -> ${b.status}`);
+
+  // The history is the server's, so a browser that never stored anything still sees it.
+  const mine = await call("GET", "/auth/activity", undefined, a.data.token);
+  assert.equal(mine.status, 200);
+  assert.ok(mine.data.some((e: any) => e.action === "auth.login" && /Chrome/.test(String(e.userAgent)) && e.ip),
+    "the owner's own sign-in is listed with its browser and address");
+  // Chrome's own user agent contains "Safari", so the platform is the discriminator here.
+  assert.ok(!mine.data.some((e: any) => /Macintosh/.test(String(e.userAgent))),
+    "another account's sign-in never appears in this account's history");
+
+  const theirs = await call("GET", "/auth/activity", undefined, b.data.token);
+  assert.ok(theirs.data.some((e: any) => e.action === "auth.login" && /Macintosh/.test(String(e.userAgent))),
+    "the manager sees the sign-in from their own browser");
+  assert.ok(!theirs.data.some((e: any) => /Windows NT/.test(String(e.userAgent))),
+    "the owner's browser is not in the manager's history");
+
+  // The shop trail names the person who signed in, not the device or the shop owner.
+  const log = await call("GET", "/audit/log", undefined, await auth(OWNER));
+  assert.equal(log.status, 200);
+  assert.ok(log.data.some((r: any) => r.action === "auth.login" && r.actor === "Shop Manager"),
+    "the shop activity log attributes the manager's sign-in to the manager");
+});

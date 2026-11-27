@@ -67,6 +67,12 @@ async function bootstrap() {
   // Two misconfigurations that are invisible until a real user is stuck: links that point at a
   // developer's laptop, and a confirmation e-mail that was never sent. Both are warnings, not
   // refusals — the API is still able to serve every other route.
+  // A browser on any network may only call this API if its origin is listed. An empty list is a
+  // silent "no site may use it" that looks like a broken network to every user, so say it at boot.
+  if (!allowedOrigins().length) {
+    console.warn(JSON.stringify({ t: new Date().toISOString(), evt: "cors.origins_missing",
+      message: "CORS_ORIGINS is empty: no browser origin is allowed to call this API (native apps are unaffected)" }));
+  }
   if (!process.env.APP_WEB_URL && !process.env.PASSWORD_RESET_URL) {
     console.warn(JSON.stringify({ t: new Date().toISOString(), evt: "mail.link_base_missing",
       message: "APP_WEB_URL is unset: confirmation and reset links point at http://localhost:8081" }));
