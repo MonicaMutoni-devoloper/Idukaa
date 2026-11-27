@@ -90,6 +90,8 @@ export class SyncService {
       if (!ins.rowCount) { // idempotent replay: return the ORIGINAL outcome
         const { rows: [ex] } = await c.query("SELECT shop_id,status,message FROM operations WHERE op_id=$1", [op.opId]);
         if (ex.shop_id !== shopId) return { opId, status: "rejected", message: "op_id_in_use" } as OpResult;
+        // A replay is still the client's first confirmed answer: it carries the authoritative figure.
+        const replayStock = await this.stockFor(c, shopId, op.payload);
         // A credit sale waiting for the owner can be approved between two sync passes. The client
         // keeps retrying this operation, so resolve the verdict from the sale instead of returning
         // "pending" forever and leaving the manager's outbox permanently stuck.
@@ -97,18 +99,21 @@ export class SyncService {
           const { rows: [sale] } = await c.query("SELECT status FROM sales WHERE shop_id=$1 AND op_id=$2", [shopId, op.opId]);
           if (sale?.status === "posted") {
             await c.query("UPDATE operations SET status='applied', message='approved_after_review' WHERE op_id=$1", [op.opId]);
-            return { opId, status: "duplicate", message: "approved_after_review" } as OpResult;
+            return { opId, status: "duplicate", message: "approved_after_review", stock: replayStock } as OpResult;
           }
           if (sale?.status === "rejected") {
             await c.query("UPDATE operations SET status='rejected', message='credit_rejected' WHERE op_id=$1", [op.opId]);
             return { opId, status: "rejected", message: "credit_rejected" } as OpResult;
           }
         }
-        return { opId, status: ex.status === "applied" ? "duplicate" : ex.status, message: ex.message ?? undefined } as OpResult;
+        return { opId, status: ex.status === "applied" ? "duplicate" : ex.status, message: ex.message ?? undefined, stock: replayStock } as OpResult;
       }
       await c.query("SAVEPOINT op");
       let status: OpResult["status"] = "applied"; let message: string | undefined;
-      try { const r = await this.apply(c, user, shopId, op); if (r) status = r; }
+      // Only an operation that committed reads the ledger: after a rollback to the savepoint the
+      // figure would describe work that never happened.
+      let stock: Record<string, number> | undefined;
+      try { const r = await this.apply(c, user, shopId, op); if (r) status = r; stock = await this.stockFor(c, shopId, op.payload); }
       catch (e: any) {
         await c.query("ROLLBACK TO SAVEPOINT op");
         if (e instanceof BizError) { status = e.kind; message = e.message; }
@@ -118,7 +123,7 @@ export class SyncService {
       }
       if (status !== "applied") await c.query("UPDATE operations SET status=$2, message=$3 WHERE op_id=$1", [op.opId, status, message ?? null]);
       await audit(c, { shopId, actorId: user.id, action: `op.${op.type}`, entity: "operation", entityId: op.opId, newValue: { status, ...(op.payload as object) }, reason: message });
-      return { opId, status, message };
+      return { opId, status, message, stock };
     });
   }
 
@@ -148,6 +153,27 @@ export class SyncService {
   }
   private async onHand(c: PoolClient, productId: string): Promise<number> {
     const { rows: [r] } = await c.query("SELECT COALESCE(SUM(qty),0)::bigint AS q FROM stock_movements WHERE product_id=$1", [productId]); return Number(r.q);
+  }
+  /**
+   * Authoritative on-hand for every product an operation referenced, read inside the operation's
+   * transaction. It rides back with the verdict so the device can replace its optimistic figure at
+   * the moment the write is confirmed: correctness must not depend on the following pull, which can
+   * fail (offline, cold start, server restart) and used to leave a recorded delivery showing zero.
+   */
+  private async stockFor(c: PoolClient, shopId: string, payload: unknown): Promise<Record<string, number> | undefined> {
+    const p = payload as { productId?: string; lines?: { productId?: string }[] } | null;
+    const ids = [...new Set([
+      ...(p?.productId ? [p.productId] : []),
+      ...(Array.isArray(p?.lines) ? p.lines.map((l) => l?.productId).filter((x): x is string => !!x) : []),
+    ])];
+    if (!ids.length) return undefined;
+    const { rows } = await c.query(
+      `SELECT product_id, COALESCE(SUM(qty),0)::bigint AS q
+         FROM stock_movements WHERE shop_id=$1 AND product_id = ANY($2::uuid[]) GROUP BY product_id`,
+      [shopId, ids]);
+    const byId = new Map(rows.map((r: { product_id: string; q: string }) => [r.product_id, Number(r.q)]));
+    // A product with no movements yet is reported as 0 rather than omitted.
+    return Object.fromEntries(ids.map((id) => [id, byId.get(id) ?? 0]));
   }
   /**
    * Perpetual moving weighted average cost per product for the movements already posted, read

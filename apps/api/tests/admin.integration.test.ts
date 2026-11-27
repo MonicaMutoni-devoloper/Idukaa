@@ -36,10 +36,10 @@ const OWNER_B = "ownerB@platform.test";
 let pool: Pool, app: any, base: string;
 let shopA = "", shopB = "", userOwner = "", userMgr = "";
 
-const call = async (method: string, path: string, body?: unknown, token?: string) => {
+const call = async (method: string, path: string, body?: unknown, token?: string, headers: Record<string, string> = {}) => {
   const res = await fetch(base + path, {
     method,
-    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data: any = null;
@@ -132,6 +132,50 @@ test("overview metrics are real database counts", { skip }, async () => {
   assert.equal(r.data.database.status, "ok", "database health is reported");
   assert.ok(r.data.recentApplications.length >= 1, "the pending application is listed");
   assert.ok(typeof r.data.securityEvents30d === "number", "security events are counted, not fabricated");
+});
+
+/**
+ * The console enters support access from a single click, so no reason is typed. The server still
+ * stores one (the session column and the audit view must never be blank), the platform surface
+ * stays closed while access is active, and ending it restores the console. This is the regression
+ * guard for the reason prompt that was removed from the UI and the overview query it broke.
+ */
+test("support access works without a typed reason and never opens the admin surface", { skip }, async () => {
+  const admin = await auth(ADMIN);
+
+  const enter = await call("POST", "/admin/impersonate/shop", { targetShopId: shopB }, admin);
+  assert.equal(enter.status, 201, JSON.stringify(enter.data));
+  const sessionId = enter.data.sessionId as string;
+  const stored = (await pool.query("SELECT reason, status FROM impersonation_sessions WHERE id=$1", [sessionId])).rows[0];
+  assert.equal(stored.status, "active");
+  assert.equal(stored.reason, "Administrative access", "a standard reason is always stored");
+  const audited = (await pool.query(
+    "SELECT new_value FROM audit_log WHERE action='admin.impersonate.shop' AND entity_id=$1", [sessionId])).rows[0];
+  assert.equal(audited?.new_value?.reason, "Administrative access", "the audit row states the same reason");
+
+  // Inside access the caller sees the target shop (never the platform administration).
+  const asTarget = { "x-impersonation-session": sessionId };
+  const me = await call("GET", "/auth/me", undefined, admin, asTarget);
+  assert.equal(me.status, 200);
+  assert.equal(me.data.shopId, shopB);
+  assert.equal((await call("GET", "/reports/inventory", undefined, admin, asTarget)).status, 200,
+    "the shop's own screens work during support access");
+  const blocked = await call("GET", "/admin/overview", undefined, admin, asTarget);
+  assert.equal(blocked.status, 403, "platform administration is closed during support access");
+  assert.equal(msg(blocked.data), "not_allowed_during_impersonation");
+
+  const end = await call("POST", "/admin/impersonate/end", { sessionId }, admin);
+  assert.equal(end.status, 200);
+  assert.equal(end.data.ended, true);
+  assert.equal((await call("GET", "/admin/overview", undefined, admin)).status, 200,
+    "the admin dashboard is available again after access is ended");
+
+  // Impersonating a person (not a shop) is the same one-click path.
+  const asUser = await call("POST", "/admin/impersonate/user", { targetUserId: userOwner }, admin);
+  assert.equal(asUser.status, 201, JSON.stringify(asUser.data));
+  const userSession = (await pool.query("SELECT reason FROM impersonation_sessions WHERE id=$1", [asUser.data.sessionId])).rows[0];
+  assert.equal(userSession.reason, "Administrative access");
+  assert.equal((await call("POST", "/admin/impersonate/end", { sessionId: asUser.data.sessionId }, admin)).status, 200);
 });
 
 test("admin lists are searchable, filtered and bounded", { skip }, async () => {

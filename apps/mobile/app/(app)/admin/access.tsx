@@ -53,9 +53,7 @@ export default function AdminAccess() {
   const [sessions, setSessions] = useState<AccessSession[] | null>(null);
   const [failed, setFailed] = useState(false);
 
-  const [target, setTarget] = useState<Target | null>(null);
-  const [reason, setReason] = useState(""); const [reasonErr, setReasonErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   const [review, setReview] = useState<{ session: AccessSession; rows: AuditAction[] | null } | null>(null);
   const [revoking, setRevoking] = useState<AccessSession | null>(null);
@@ -64,36 +62,37 @@ export default function AdminAccess() {
   const load = useCallback(async () => {
     setFailed(false);
     const suffix = query ? `?q=${encodeURIComponent(query)}` : "";
+    // Same cold-start allowance as the dashboard: the free tier sleeps, and this screen is useless
+    // until the list arrives, so wait and retry once instead of showing an empty/failed list.
+    const fetchAll = () => Promise.all([
+      request<AdminUser[]>(`/admin/users${suffix}`, { timeoutMs: 60_000 }),
+      request<AdminShop[]>(`/admin/shops${suffix}`, { timeoutMs: 60_000 }),
+      request<AccessSession[]>("/admin/impersonation/history", { timeoutMs: 60_000 }),
+    ]);
     try {
-      const [u, s, h] = await Promise.all([
-        request<AdminUser[]>(`/admin/users${suffix}`),
-        request<AdminShop[]>(`/admin/shops${suffix}`),
-        request<AccessSession[]>("/admin/impersonation/history"),
-      ]);
-      setUsers(u); setShops(s); setSessions(h);
+      let r: [AdminUser[], AdminShop[], AccessSession[]];
+      try { r = await fetchAll(); } catch { await new Promise((res) => setTimeout(res, 3_000)); r = await fetchAll(); }
+      setUsers(r[0]); setShops(r[1]); setSessions(r[2]);
     } catch { setFailed(true); }
   }, [query]);
   useEffect(() => { void load(); }, [load]);
 
-  function openTarget(next: Target) {
-    setTarget(next); setReason(""); setReasonErr(null);
-  }
-
-  async function confirmAccess() {
-    if (!target) return;
-    if (reason.trim().length < 3) { setReasonErr(t("admin.reasonRequired")); return; }
-    setReasonErr(null); setBusy(true);
+  /** One click: the server creates the short-lived administrative session immediately. */
+  async function enterTarget(next: Target) {
+    const key = next.kind === "user" ? next.user.id : next.shop.id;
+    if (busyId) return;
+    setBusyId(key);
     try {
-      if (target.kind === "user") {
-        await enterUser(target.user.id, reason.trim());
-        toast(t("access.enteredUser").replace("{name}", target.user.full_name));
+      if (next.kind === "user") {
+        await enterUser(next.user.id);
+        toast(t("access.enteredUser").replace("{name}", next.user.full_name));
       } else {
-        await enterShop(target.shop.id, reason.trim());
-        toast(t("access.enteredShop").replace("{name}", target.shop.name));
+        await enterShop(next.shop.id);
+        toast(t("access.enteredShop").replace("{name}", next.shop.name));
       }
-      setTarget(null);
       router.replace("/");
-    } catch { setReasonErr(t("access.failed")); setBusy(false); }
+    } catch { toast(t("access.failed"), "danger"); }
+    finally { setBusyId(null); }
   }
 
   async function openReview(session: AccessSession) {
@@ -174,8 +173,8 @@ export default function AdminAccess() {
                         : <Badge tone="danger" label={t("admin.stPendingActivation")} />) },
                   { key: "actions", title: "", width: 1.35, align: "right", render: (u) => (
                     <Button size="sm" label={t("access.access")}
-                      disabled={u.role === "system_admin" || !u.active || u.account_status !== "active"}
-                      onPress={() => openTarget({ kind: "user", user: u })} />) },
+                      disabled={u.role === "system_admin" || !u.active || u.account_status !== "active" || busyId === u.id}
+                      onPress={() => void enterTarget({ kind: "user", user: u })} />) },
                 ]}
                 empty={<Empty icon="users" title={t("access.noUsers")} description={t("admin.noUsersDesc")} />} />
             )
@@ -202,8 +201,8 @@ export default function AdminAccess() {
                     ? <Badge tone="ok" label={t("admin.stActive")} />
                     : <Badge tone="danger" label={t("admin.stSuspended")} /> },
                   { key: "actions", title: "", width: 1.2, align: "right", render: (s) => (
-                    <Button size="sm" label={t("access.enterShop")} disabled={s.status !== "active"}
-                      onPress={() => openTarget({ kind: "shop", shop: s })} />) },
+                    <Button size="sm" label={t("access.enterShop")} disabled={s.status !== "active" || busyId === s.id}
+                      onPress={() => void enterTarget({ kind: "shop", shop: s })} />) },
                 ]}
                 empty={<Empty icon="box" title={t("access.noShops")} description={t("admin.noShopsDesc")} />} />
             )
@@ -238,18 +237,6 @@ export default function AdminAccess() {
           ) : null}
         </>
       )}
-
-      <ConfirmDialog open={!!target}
-        title={target?.kind === "shop" ? t("access.shopTitle") : t("access.accessTitle")}
-        message={target ? (target.kind === "shop"
-          ? t("access.shopMessage").replace("{name}", target.shop.name)
-          : t("access.accessMessage").replace("{name}", target.user.full_name)) : ""}
-        confirmLabel={target?.kind === "shop" ? t("access.confirmShop") : t("access.confirm")}
-        busy={busy} onCancel={() => { if (!busy) setTarget(null); }} onConfirm={() => void confirmAccess()}>
-        <Field testID="access-reason" required label={t("access.reason")} value={reason}
-          error={reasonErr} onChangeText={(v) => { setReasonErr(null); setReason(v); }}
-          placeholder={t("admin.reasonPlaceholder")} hint={t("access.reasonHelp")} />
-      </ConfirmDialog>
 
       <ConfirmDialog open={!!revoking} tone="danger"
         title={t("access.revokeTitle")} message={t("access.revokeMessage")}

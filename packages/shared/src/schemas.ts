@@ -236,7 +236,11 @@ export type PricePayload = z.infer<typeof PriceOp>["payload"];
 
 export const PushRequest = z.object({ operations: z.array(Operation).min(1).max(100) });
 export type OpStatus = "applied" | "duplicate" | "conflict" | "rejected" | "pending_approval";
-export interface OpResult { opId: string; status: OpStatus; message?: string; serverRef?: string }
+/** The server's answer to one pushed operation. `stock` is the authoritative on-hand figure for
+ *  every product the operation touched (base units), returned with applied/duplicate verdicts so a
+ *  device can correct its optimistic row immediately instead of waiting for the next pull — a pull
+ *  that fails after the verdict used to leave a recorded receipt looking like empty stock. */
+export interface OpResult { opId: string; status: OpStatus; message?: string; serverRef?: string; stock?: Record<string, number> }
 export interface PullResponse {
   checkpoint: string;
   changes: { entity: string; id: string; data: unknown; deleted?: boolean }[];

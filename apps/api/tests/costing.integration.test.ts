@@ -42,7 +42,8 @@ before(async () => {
   const { SyncService } = await import("../src/sync/sync.service");
   const { FinanceService } = await import("../src/reports/finance.service");
   const { SalesController } = await import("../src/sales/sales.controller");
-  db = new Db(); svc = new SyncService(db); finance = new FinanceService(db); sales = new SalesController(db);
+  const { SalesReversalService } = await import("../src/sales/reversal.service");
+  db = new Db(); svc = new SyncService(db); finance = new FinanceService(db); sales = new SalesController(db, new SalesReversalService());
 
   shop = (await pool.query("INSERT INTO shops(name) VALUES ('Costing shop') RETURNING id")).rows[0].id;
   const u = await pool.query(

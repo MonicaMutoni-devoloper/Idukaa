@@ -37,7 +37,14 @@ export default function AdminOverview() {
 
   const load = useCallback(async () => {
     setFailed(false);
-    try { setData(await request<Overview>("/admin/overview")); } catch { setFailed(true); }
+    // The free hosting tier suspends the API after inactivity: the first request after a quiet
+    // period can take far longer than a normal screen call while the instance wakes. Give it a
+    // cold-start timeout and one retry, so "the dashboard does not load" is never a 503 for a
+    // server that is simply starting.
+    try {
+      try { setData(await request<Overview>("/admin/overview", { timeoutMs: 60_000 })); }
+      catch { await new Promise((r) => setTimeout(r, 3_000)); setData(await request<Overview>("/admin/overview", { timeoutMs: 60_000 })); }
+    } catch { setFailed(true); }
   }, []);
   useEffect(() => { void load(); }, [load]);
 

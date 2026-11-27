@@ -68,6 +68,29 @@ test("sale reduces stock via ledger and is idempotent on replay", { skip }, asyn
   assert.equal(Number((await pool.query("SELECT count(*) FROM sales WHERE op_id=$1", [saleOp.opId])).rows[0].count), 1);
 });
 
+/**
+ * The device replaces its optimistic figure from the verdict, not only from the next pull. A pull
+ * that cannot run (offline, cold start) after a confirmed delivery used to leave the receipt
+ * showing zero on the device even though the server held the stock.
+ */
+test("an applied verdict carries the authoritative on-hand for the product it touched", { skip }, async () => {
+  const before = await onHand();
+  const sale = op("sale.create", { saleId: uuid(), soldAt: now(), discount: 0, amountPaid: 1500, lines: [{ productId: pid, qty: 1000, unitPrice: 1500 }] });
+  const applied = (await svc.push(mgr, "d", [sale]))[0];
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.stock?.[pid], before - 1000, "the verdict states the server figure");
+
+  // A replay answers the same way, so a retried sync still corrects the device.
+  const replay = (await svc.push(mgr, "d", [sale]))[0];
+  assert.equal(replay.status, "duplicate");
+  assert.equal(replay.stock?.[pid], before - 1000);
+
+  // Operations that touch no product carry no stock map at all.
+  const expense = (await svc.push(mgr, "d", [op("expense.create", { expenseId: uuid(), category: "transport", amount: 500, paid: true, incurredAt: now() })]))[0];
+  assert.equal(expense.status, "applied");
+  assert.equal(expense.stock, undefined);
+});
+
 test("selling more than on-hand becomes a conflict, posts nothing, and is kept for owner review", { skip }, async () => {
   const before = await onHand();
   const o = op("sale.create", { saleId: uuid(), soldAt: now(), discount: 0, amountPaid: 0, lines: [{ productId: pid, qty: before + 1000, unitPrice: 1500 }] });
@@ -482,7 +505,8 @@ test("a void returns every item to stock exactly once and keeps the sale for aud
   assert.equal(await qtyOnHand(p), 6000);
 
   const { SalesController } = await import("../src/sales/sales.controller");
-  const sales = new SalesController(db);
+  const { SalesReversalService } = await import("../src/sales/reversal.service");
+  const sales = new SalesController(db, new SalesReversalService());
   await sales.voidSale(owner, saleId, { reason: "duplicated sale" });
   assert.equal(await qtyOnHand(p), 10_000);
   assert.equal((await pool.query("SELECT status, reversal_reason FROM sales WHERE id=$1", [saleId])).rows[0].status, "reversed");
@@ -634,12 +658,14 @@ test("a user can rename themselves and change their password; the old password s
     [shopA, email, await bcrypt.hash("old-password-123", 4)])).rows[0].id;
   const u = { id: userId, role: "manager" as const, shopId: shopA };
 
-  const me = await auth.me(u);
+  // `me()` also reads the request to render an administrative-access view; outside one it is empty.
+  const meReq: any = { headers: {} };
+  const me = await auth.me(u, meReq);
   assert.equal(me.email, email);
   assert.equal(me.name, "Old Name");
   assert.equal(me.shopName, (await pool.query("SELECT name FROM shops WHERE id=$1", [shopA])).rows[0].name);
   assert.equal((await auth.updateMe(u, { fullName: "  New Name  " })).name, "New Name", "the name is trimmed and stored");
-  assert.equal((await auth.me(u)).name, "New Name");
+  assert.equal((await auth.me(u, meReq)).name, "New Name");
   await assert.rejects(() => auth.updateMe(u, { fullName: "" }), /at least 2/);
 
   const req: any = { headers: {}, ip: "127.0.0.1", secure: false };

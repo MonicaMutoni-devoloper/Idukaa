@@ -414,8 +414,8 @@ export const useImpersonation = create<{
   reason: string;
   expiresAt: string | null;
   adminUser: SessionUser | null;
-  enterUser: (userId: string, reason: string) => Promise<void>;
-  enterShop: (shopId: string, reason: string) => Promise<void>;
+  enterUser: (userId: string) => Promise<void>;
+  enterShop: (shopId: string) => Promise<void>;
   exit: () => Promise<void>;
   expireLocally: () => void;
 }>((set, get) => {
@@ -446,22 +446,24 @@ export const useImpersonation = create<{
   return {
     ...initial,
 
-    enterUser: async (userId, reason) => {
+    enterUser: async (userId) => {
       const adminUser = useSession.getState().user;
       if (!adminUser) throw new ApiError(401, { error: "session_expired" });
+      const reason = "Administrative access";
       set({ reason });
       const r = await fetchJson<ImpersonationEnterResponse>("/admin/impersonate/user", {
-        method: "POST", body: { targetUserId: userId, reason },
+        method: "POST", body: { targetUserId: userId },
       });
       await adopt(r, adminUser);
     },
 
-    enterShop: async (shopId, reason) => {
+    enterShop: async (shopId) => {
       const adminUser = useSession.getState().user;
       if (!adminUser) throw new ApiError(401, { error: "session_expired" });
+      const reason = "Administrative access";
       set({ reason });
       const r = await fetchJson<ImpersonationEnterResponse>("/admin/impersonate/shop", {
-        method: "POST", body: { targetShopId: shopId, reason },
+        method: "POST", body: { targetShopId: shopId },
       });
       await adopt(r, adminUser);
     },

@@ -326,12 +326,23 @@ export const outboxCounts = async (userId: string, shopId: string | null) => {
   return { pending: g("pending") + g("retry"), issues: g("conflict") + g("rejected"), awaitingApproval: g("pending_approval") };
 };
 
-/** Apply server verdicts. Whatever the verdict, the optimistic delta is released (server on_hand is canonical on next pull). */
-export async function applyResults(results: { opId: string; status: string; message?: string }[]) {
+/**
+ * Apply server verdicts. Whatever the verdict, the optimistic delta is released, and an
+ * applied/duplicate verdict carries the server's authoritative on-hand for the products the
+ * operation touched. Writing it here (not only on the next pull) is what keeps a recorded delivery
+ * or sale correct when the follow-up pull cannot run; the pull still reconciles everything else.
+ */
+export async function applyResults(results: { opId: string; status: string; message?: string; stock?: Record<string, number> }[]) {
   await mutate((s) => {
     for (const r of results) {
       const row = s.outbox.find((x) => x.op_id === r.opId); if (!row) continue;
       for (const [pid, q] of Object.entries(JSON.parse(row.deltas) as Record<string, number>)) { const p = s.products.find((p) => p.id === pid); if (p) p.pending_delta -= q; }
+      if (r.status === "applied" || r.status === "duplicate") {
+        for (const [pid, onHand] of Object.entries(r.stock ?? {})) {
+          const p = s.products.find((x) => x.id === pid);
+          if (p && typeof onHand === "number" && Number.isFinite(onHand)) p.on_hand = onHand;
+        }
+      }
       // A refused repayment never reached the ledger: restore the optimistic local balance once.
       if ((r.status === "rejected" || r.status === "conflict") && row.type === "credit.payment.create"
         && row.status !== "rejected" && row.status !== "conflict") {

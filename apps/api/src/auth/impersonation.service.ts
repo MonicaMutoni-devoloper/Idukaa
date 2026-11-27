@@ -74,7 +74,9 @@ export class ImpersonationService {
   }
 
   /** Create a new impersonation session.
-   *  Admin must provide: target user id or target shop id, and a mandatory reason.
+   *  Admin must provide: target user id or target shop id. The reason is optional (the console no
+   *  longer asks for one) but a standard reason is always stored, because the column is NOT NULL
+   *  and the accountability view must never show a blank entry.
    *  The session expires DEFAULT_IMPERSONATION_TTL_MINUTES from now,
    *  but may not exceed MAX_IMPERSONATION_TTL_MINUTES.
    */
@@ -82,20 +84,15 @@ export class ImpersonationService {
     adminId: string,
     targetUserId: string | null,
     targetShopId: string | null,
-    reason: string,
+    reason?: string,
     customTtlMinutes?: number,
-  ): Promise<{ sessionId: string; expiresAt: Date }> {
+  ): Promise<{ sessionId: string; expiresAt: Date; reason: string }> {
     if (!targetUserId && !targetShopId) {
       throw new ForbiddenException("must_specify_target_user_or_shop");
     }
-    if (!reason || reason.trim().length < 3) {
-      throw new ForbiddenException("reason_must_be_at_least_3_chars");
-    }
-
-    const trimmedReason = reason.trim();
-    if (trimmedReason.length < 3) {
-      throw new ForbiddenException("reason_must_be_at_least_3_chars");
-    }
+    // Access is one click from the admin console. A reason is still stored (the column is NOT
+    // NULL and the accountability view shows it), but it no longer has to be typed in first.
+    const trimmedReason = (reason ?? "").trim() || "Administrative access";
 
     // Targets are validated here, not only at request time: an administrator can never open an
     // inactive account, a suspended shop, or another platform administrator.
@@ -137,7 +134,7 @@ export class ImpersonationService {
       [sessionId, adminId, targetUserId, targetShopId, trimmedReason, expiresAt]
     );
 
-    return { sessionId, expiresAt };
+    return { sessionId, expiresAt, reason: trimmedReason };
   }
 
   /**

@@ -16,14 +16,15 @@ const Page = z.object({
 });
 const Reason = z.object({ reason: z.string().trim().min(3).max(500) });
 
-/** Impersonation session creation payload */
+/** Impersonation session creation payload. The reason is optional: access is requested with one
+ *  click from the admin console, and the server records a standard reason when none is supplied. */
 const ImpersonateUser = z.object({
   targetUserId: z.string().uuid(),
-  reason: z.string().trim().min(3).max(500),
+  reason: z.string().trim().max(500).optional(),
 });
 const ImpersonateShop = z.object({
   targetShopId: z.string().uuid(),
-  reason: z.string().trim().min(3).max(500),
+  reason: z.string().trim().max(500).optional(),
 });
 
 /** End an impersonation session */
@@ -43,30 +44,28 @@ export class AdminController {
 
   /* ------------------------------------------------------------------ impersonation */
 
-  /** Create an impersonation session for a target user.
-   *  Admin specifies the user and a mandatory reason. The session is short-lived.
-   */
+  /** Create an impersonation session for a target user. The session is short-lived. */
   @Post("impersonate/user") @HttpCode(201)   async impersonateUser(@Me() u: AuthUser, @Body() b: unknown) {
     const n = ImpersonateUser.parse(b);
-    const { sessionId, expiresAt } = await this.impersonation.createSession(u.id, n.targetUserId, null, n.reason);
+    const { sessionId, expiresAt, reason } = await this.impersonation.createSession(u.id, n.targetUserId, null, n.reason);
     const [target] = await this.db.query(
       `SELECT u.id, u.full_name, u.email, u.shop_id, s.name AS shop_name,
               COALESCE((SELECT m.role FROM shop_memberships m
                          WHERE m.user_id=u.id AND m.shop_id=u.shop_id AND m.status='active'), u.role) AS role
          FROM users u LEFT JOIN shops s ON s.id=u.shop_id WHERE u.id=$1`, [n.targetUserId]);
-    await audit(this.db.pool, { shopId: target.shop_id, actorId: u.id, action: "admin.impersonate.user", entity: "impersonation_session", entityId: sessionId, newValue: { targetUserId: n.targetUserId, reason: n.reason } });
+    // Audited with the reason actually stored, not the raw optional input, so the trail and the
+    // session row can never disagree (an omitted reason becomes "Administrative access").
+    await audit(this.db.pool, { shopId: target.shop_id, actorId: u.id, action: "admin.impersonate.user", entity: "impersonation_session", entityId: sessionId, newValue: { targetUserId: n.targetUserId, reason } });
     return { sessionId, expiresAt, targetType: "user",
       target: { id: target.id, name: target.full_name, email: target.email, role: target.role, shopId: target.shop_id, shopName: target.shop_name } };
   }
 
-  /** Create an impersonation session for a target shop.
-   *  Admin specifies the shop and a mandatory reason. The session is short-lived.
-   */
+  /** Create an impersonation session for a target shop. The session is short-lived. */
   @Post("impersonate/shop") @HttpCode(201)   async impersonateShop(@Me() u: AuthUser, @Body() b: unknown) {
     const n = ImpersonateShop.parse(b);
-    const { sessionId, expiresAt } = await this.impersonation.createSession(u.id, null, n.targetShopId, n.reason);
+    const { sessionId, expiresAt, reason } = await this.impersonation.createSession(u.id, null, n.targetShopId, n.reason);
     const [shop] = await this.db.query("SELECT id, name FROM shops WHERE id=$1", [n.targetShopId]);
-    await audit(this.db.pool, { shopId: n.targetShopId, actorId: u.id, action: "admin.impersonate.shop", entity: "impersonation_session", entityId: sessionId, newValue: { targetShopId: n.targetShopId, reason: n.reason } });
+    await audit(this.db.pool, { shopId: n.targetShopId, actorId: u.id, action: "admin.impersonate.shop", entity: "impersonation_session", entityId: sessionId, newValue: { targetShopId: n.targetShopId, reason } });
     return { sessionId, expiresAt, targetType: "shop", target: { shopId: shop.id, shopName: shop.name } };
   }
 
@@ -186,13 +185,48 @@ export class AdminController {
       [prefix, p.limit, p.offset]);
   }
 
+  /** Overview metrics — every number is a real count from the database, never a placeholder. */
   @Get("overview") async overview() {
     const q = async <T = any>(sql: string, params: unknown[] = []): Promise<T> => (await this.db.query<T>(sql, params))[0] as T;
-    const shops = await q(`SELECT count(*)::int AS total, count(*) FILTER (WHERE status='active')::int AS active, count(*) FILTER (WHERE status='suspended')::int AS suspended FROM shops`);
-    const apps = await q(`SELECT count(*)::int AS total, count(*) FILTER (WHERE status='PENDING_REVIEW')::int AS pending, count(*) FILTER (WHERE status='ADDITIONAL_INFORMATION_REQUIRED')::int AS info, count(*) FILTER (WHERE status='APPROVED')::int AS approved, count(*) FILTER (WHERE status='REJECTED')::int AS rejected FROM owner_applications`);
-    const users = await q(`SELECT count(*)::int AS total, count(*) FILTER (WHERE role='owner')::int AS owners, count(*) FILTER (WHERE role='manager')::int AS managers, count(*) FILTER (WHERE role='system_admin')::int AS admins, count(*) FILTER (WHERE active)::int AS active, count(*) FILTER (WHERE account_status='suspended')::int AS suspended FROM users`);
-    const recentApps = await this.db.query(`SELECT id, status, email, full_name, created_at FROM owner_applications ORDER BY created_at DESC LIMIT 5`);
-    return { shops, apps, users, recentApps };
+    const shops = await q(`SELECT count(*)::int AS total,
+        count(*) FILTER (WHERE status='active')::int AS active,
+        count(*) FILTER (WHERE status='suspended')::int AS suspended FROM shops`);
+    const apps = await q(`SELECT count(*)::int AS total,
+        count(*) FILTER (WHERE status='PENDING_REVIEW')::int AS pending,
+        count(*) FILTER (WHERE status='ADDITIONAL_INFORMATION_REQUIRED')::int AS info,
+        count(*) FILTER (WHERE status='APPROVED')::int AS approved,
+        count(*) FILTER (WHERE status='REJECTED')::int AS rejected FROM owner_applications`);
+    const users = await q(`SELECT count(*)::int AS total,
+        count(*) FILTER (WHERE role='owner')::int AS owners,
+        count(*) FILTER (WHERE role='manager')::int AS managers,
+        count(*) FILTER (WHERE role='system_admin')::int AS admins,
+        count(*) FILTER (WHERE active)::int AS active,
+        count(*) FILTER (WHERE account_status='suspended')::int AS suspended FROM users`);
+    const recentApps = await this.db.query(
+      `SELECT id, shop_name, contact_name, status, submitted_at FROM owner_applications ORDER BY submitted_at DESC LIMIT 5`);
+    const recentActions = await this.db.query(
+      `SELECT a.id, a.action, a.entity, a.reason, a.at AS created_at, us.full_name AS actor
+       FROM audit_log a LEFT JOIN users us ON us.id = a.actor_id
+       WHERE a.action LIKE 'admin.%' OR a.action LIKE 'shop.%' OR a.action LIKE 'staff.%' OR a.action LIKE 'application.%'
+       ORDER BY a.id DESC LIMIT 8`);
+    // Recorded security-relevant events (evidence), not a claim that anything was breached.
+    const events = await q(
+      `SELECT count(*)::int AS n FROM audit_log
+       WHERE (action LIKE 'auth.%' OR action = 'admin.user.revoke' OR action = 'admin.shop.suspend')
+         AND at > now() - interval '30 days'`);
+    const health = await this.health();
+    return {
+      shops, applications: apps, users, recentApplications: recentApps, recentActions,
+      securityEvents30d: events.n,
+      openConflicts: health.open_conflicts,
+      database: { status: health.status, time: health.db_time },
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  @Get("health") async health() {
+    const [r] = await this.db.query("SELECT now() AS db_time, (SELECT count(*) FROM operations WHERE status='conflict' AND resolved_at IS NULL)::int AS open_conflicts");
+    return { status: "ok", ...r };
   }
 
   /* ------------------------------------------------------------------ impersonation management */

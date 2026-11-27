@@ -260,13 +260,23 @@ export const outboxCounts = async (userId: string, shopId: string | null) => {
   return { pending: g("pending") + g("retry"), issues: g("conflict") + g("rejected"), awaitingApproval: g("pending_approval") };
 };
 
-/** Apply server verdicts. Whatever the verdict, the optimistic delta is released (server on_hand is canonical on next pull). */
-export async function applyResults(results: { opId: string; status: string; message?: string }[]) {
+/**
+ * Apply server verdicts. Whatever the verdict, the optimistic delta is released, and an
+ * applied/duplicate verdict carries the server's authoritative on-hand for the products the
+ * operation touched. Writing it here (not only on the next pull) is what keeps a recorded delivery
+ * or sale correct when the follow-up pull cannot run; the pull still reconciles everything else.
+ */
+export async function applyResults(results: { opId: string; status: string; message?: string; stock?: Record<string, number> }[]) {
   const d = await db();
   await d.withTransactionAsync(async () => {
     for (const r of results) {
       const row = await d.getFirstAsync<OutboxRow & { type: string; payload: string }>("SELECT deltas, type, payload, status FROM outbox WHERE op_id=?", [r.opId]); if (!row) continue;
       for (const [pid, q] of Object.entries(JSON.parse(row.deltas) as Record<string, number>)) await d.runAsync("UPDATE products SET pending_delta = pending_delta - ? WHERE id=?", [q, pid]);
+      if (r.status === "applied" || r.status === "duplicate") {
+        for (const [pid, onHand] of Object.entries(r.stock ?? {})) {
+          if (typeof onHand === "number" && Number.isFinite(onHand)) await d.runAsync("UPDATE products SET on_hand=? WHERE id=?", [onHand, pid]);
+        }
+      }
       // A refused repayment never reached the ledger: put the optimistic local balance back so the
       // screen does not keep claiming money was received. Only restore once, on the first verdict.
       if ((r.status === "rejected" || r.status === "conflict") && row.type === "credit.payment.create"

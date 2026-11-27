@@ -17,7 +17,7 @@
  * product.upsert operation that registers product + initial stock exactly once, same
  * durable-before-success rule (the SQLite/IndexedDB enqueue commits before the success banner).
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { costPerBaseUnit, formatQty, formatRwf, lineAmount, parseQty, priceBelowCost, profitPerBaseUnit, toBaseQty } from "@sms/shared";
@@ -72,7 +72,20 @@ export default function Stock() {
   const [financialsAllowed, setFinancialsAllowed] = useState(user.role === "owner");
   const params = useLocalSearchParams<{ count?: string }>();
 
-  useEffect(() => { void listProducts(q).then(setRows).catch(() => setRows([])); }, [q, v, msg]);
+  // A device can end up with an empty catalogue while the server still holds the shop's products
+  // (a cache cleared by an older build, a shop re-bound mid-pull, or a pull that failed while the
+  // hosting instance was asleep). The sync pass repairs that only when it is able to pull; opening
+  // the stock screen repairs it immediately: once per mount, forget the incremental cursor and
+  // pull the whole catalogue again. The pull upserts by id and never touches queued work.
+  const healedEmpty = useRef(false);
+  useEffect(() => {
+    void listProducts(q).then((r) => {
+      setRows(r);
+      if (r.length || q || healedEmpty.current) return;
+      healedEmpty.current = true;
+      void kvGet(`cp:${user.id}`).then((cp) => { if (cp) void fullResync(); }).catch(() => undefined);
+    }).catch(() => setRows([]));
+  }, [q, v, msg, user.id]);
   useEffect(() => {
     let live = true;
     if (user.role === "owner") { setFinancialsAllowed(true); return; }
