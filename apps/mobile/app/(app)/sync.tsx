@@ -12,8 +12,18 @@ const tone = (s: string) => (s === "synced" ? "ok" : s === "conflict" || s === "
 
 export default function SyncScreen() {
   const t = useT(); const c = useTheme(); const user = useSession((s) => s.user)!;
-  const { online, live, running, lastSync, lastError, authRequired, pending, issues, awaitingApproval, dataVersion } = useSync();
+  const { online, live, running, lastSync, lastError, lastAttemptAt, retryAt, authRequired, pending, issues, awaitingApproval, dataVersion } = useSync();
   const [rows, setRows] = useState<OutboxRow[]>([]);
+  // Set after a manual retry so the button reports what actually happened instead of only going
+  // back to its idle label, whatever the outcome.
+  const [note, setNote] = useState<"ok" | "failed" | null>(null);
+  const [clock, setClock] = useState(Date.now());
+
+  useEffect(() => {
+    if (!retryAt) return;
+    const timer = setInterval(() => setClock(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [retryAt]);
 
   useEffect(() => {
     const load = () => void listOutbox(user.id, user.shopId).then(setRows).catch(() => setRows([]));
@@ -25,15 +35,36 @@ export default function SyncScreen() {
   // this screen; name it once, above the queue, instead of leaving a bare `server_503` in a row.
   const stale = rows.map((r) => schemaOutOfDate(r.message)).find((s) => s !== null) ?? null;
   const statusLabel = (s: string): Key => (s === "synced" ? "sync.synced" : s === "conflict" || s === "rejected" ? "sync.conflict" : s === "pending_approval" ? "appr.pending" : "sync.pending");
+  // Name the cause the engine recorded. "The server could not answer" for every failure is what hid
+  // a timeout, a throttle and an expired session behind the same sentence for days.
+  const cause = (code: string): Key =>
+    code === "network" ? "sync.errNetwork"
+      : code === "timeout" ? "sync.errTimeout"
+        : code === "storage" ? "sync.errStorage"
+          : code === "auth" ? "sync.errAuth"
+            : code === "rate_limited" ? "sync.errRateLimited"
+              : code === "unavailable" ? "sync.errUnavailable"
+                : code === "unexpected" ? "sync.errUnexpected"
+                  : "sync.errServer";
+  const retryIn = retryAt ? Math.max(0, Math.ceil((retryAt - clock) / 1000)) : 0;
+  const retry = async () => {
+    setNote(null);
+    await syncNow(true);
+    const s = useSync.getState();
+    setNote(s.lastError || s.pending || s.authRequired ? "failed" : "ok");
+  };
 
   return (
     <Screen title={t("nav.sync")} subtitle={t("sync.subtitle")}
-      actions={<Button testID="sync-now" label={running ? t("common.loading") : t("sync.now")} disabled={!online} onPress={() => void syncNow(true)} />}>
+      actions={<Button testID="sync-now" label={running ? t("common.loading") : t("sync.now")} disabled={!online || running} onPress={() => void retry()} />}>
       {authRequired ? <Banner tone="danger" title={t("sync.failed")} text={t("sync.authRequired")} /> : null}
+      {note ? (
+        <Banner tone={note === "ok" ? "ok" : "warn"} text={note === "ok" ? t("sync.retryOk") : t("sync.retryFailed")} />
+      ) : null}
       {lastError && !authRequired ? (
         <Banner tone="warn" title={t("sync.lastErrorTitle")}
-          text={lastError === "network" ? t("sync.errNetwork") : lastError === "storage" ? t("sync.errStorage") : t("sync.errServer")}
-          action={<Button size="sm" kind="secondary" label={t("sync.reloadCatalogue")} onPress={() => void fullResync()} />} />
+          text={`${t(cause(lastError))}${retryIn > 0 ? ` ${t("sync.retryIn").replace("{seconds}", String(retryIn))}` : ""}`}
+          action={<Button size="sm" kind="secondary" label={t("sync.retryNow")} disabled={!online || running} onPress={() => void retry()} />} />
       ) : null}
       {stale ? (
         <Banner tone="warn" title={t("sync.schemaOutOfDateTitle")}
@@ -47,6 +78,8 @@ export default function SyncScreen() {
           <Text style={{ color: c.muted, ...type.caption, textTransform: "uppercase" }}>{t("sync.connection")}</Text>
           <Badge dot tone={online ? "ok" : "warn"} label={online ? (live ? t("sync.live") : t("sync.online")) : t("sync.offline")} />
           <Text style={{ color: c.muted, fontSize: 12 }}>{t("sync.lastSync")}: {lastSync ? new Date(lastSync).toLocaleString() : t("common.never")}</Text>
+          {lastAttemptAt ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("sync.lastAttempt")}: {new Date(lastAttemptAt).toLocaleTimeString()}</Text> : null}
+          {retryIn > 0 ? <Text style={{ color: c.warning, fontSize: 12 }}>{t("sync.retryIn").replace("{seconds}", String(retryIn))}</Text> : null}
           {online && live ? <Text style={{ color: c.muted, fontSize: 12 }}>{t("sync.liveHelp")}</Text> : null}
         </Card>
         <Card style={{ flexGrow: 1, flexBasis: 150, gap: 4 }}>
@@ -84,6 +117,10 @@ export default function SyncScreen() {
         <Text style={{ color: c.ink, fontWeight: "700", fontSize: 13 }}>{t("sync.howItWorks")}</Text>
         <Text style={{ color: c.muted, fontSize: 12, lineHeight: 18 }}>{t("sync.help")}</Text>
         {Platform.OS === "web" ? <Text style={{ color: c.accent, fontSize: 12, lineHeight: 18 }}>{t("sync.webWarning")}</Text> : null}
+        {/* The heavier hammer for a device whose catalogue is empty or stale; it never touches the
+            outbox, so it is safe while work is still waiting. */}
+        <Button testID="sync-reload-catalogue" size="sm" kind="quiet" label={t("sync.reloadCatalogue")}
+          disabled={!online || running} onPress={() => void fullResync()} />
       </Card>
     </Screen>
   );

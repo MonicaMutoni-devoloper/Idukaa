@@ -1,6 +1,8 @@
 import * as SQLite from "expo-sqlite";
 import { Paths } from "expo-file-system";
 import { lineAmount } from "@sms/shared";
+import { retryDelay } from "../synchronization/backoff";
+import { SERVER_OP_ERROR } from "../synchronization/failure";
 
 /**
  * Local persistent store. Every operation is saved here in ONE SQLite transaction (with its optimistic stock delta)
@@ -270,7 +272,22 @@ export async function applyResults(results: { opId: string; status: string; mess
   const d = await db();
   await d.withTransactionAsync(async () => {
     for (const r of results) {
-      const row = await d.getFirstAsync<OutboxRow & { type: string; payload: string }>("SELECT deltas, type, payload, status FROM outbox WHERE op_id=?", [r.opId]); if (!row) continue;
+      const row = await d.getFirstAsync<OutboxRow & { type: string; payload: string; seq: number }>("SELECT deltas, type, payload, status, seq FROM outbox WHERE op_id=?", [r.opId]); if (!row) continue;
+      // The server failed on this operation (not a business rule): nothing was applied, so the
+      // optimistic figure stays and the operation AND everything queued behind it are held for a
+      // later retry. Work is never turned into a conflict just because the server had a bad moment.
+      if (r.status === "conflict" && r.message === SERVER_OP_ERROR) {
+        const held = await d.getAllAsync<{ op_id: string; attempts: number }>(
+          "SELECT op_id, attempts FROM outbox WHERE seq>=? AND status IN ('pending','retry','pending_approval') ORDER BY seq", [row.seq]);
+        // One shared retry time: the held operation and everything behind it become due together,
+        // so they are pushed in their original order rather than racing each other.
+        const at = Date.now() + retryDelay((held[0]?.attempts ?? 0) + 1);
+        for (const h of held) {
+          await d.runAsync("UPDATE outbox SET status='retry', attempts=?, next_attempt_at=?, message=? WHERE op_id=?",
+            [(h.attempts ?? 0) + 1, at, SERVER_OP_ERROR, h.op_id]);
+        }
+        continue;
+      }
       for (const [pid, q] of Object.entries(JSON.parse(row.deltas) as Record<string, number>)) await d.runAsync("UPDATE products SET pending_delta = pending_delta - ? WHERE id=?", [q, pid]);
       if (r.status === "applied" || r.status === "duplicate") {
         for (const [pid, onHand] of Object.entries(r.stock ?? {})) {

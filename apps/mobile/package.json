@@ -16,7 +16,7 @@
     "test:policy": "node --test tests/session-policy.test.mts",
     "test:sections": "node --test tests/report-sections.test.mts",
     "test:roles": "node --test tests/permissions.test.mts",
-    "test:sync": "node --test tests/schema-out-of-date.test.mts",
+    "test:sync": "node --test tests/schema-out-of-date.test.mts tests/sync-recovery.test.mts",
     "test:update": "node --test tests/app-update.test.mts",
     "test:catalogue": "node --test tests/catalogue.test.mts",
     "test:pwa": "node --test tests/pwa.test.mts",

@@ -12,6 +12,14 @@
  */
 export const SCHEMA_OUT_OF_DATE = "schema_out_of_date";
 
+/**
+ * Verdict for an operation the server could not process at all (an unexpected error inside its own
+ * transaction, not a business rejection). The work is valid and nothing was applied, so the client
+ * must keep it queued and retry it later instead of filing it under "needs review" and releasing
+ * the optimistic stock figure as if the server had refused it.
+ */
+export const SERVER_OP_ERROR = "server_error";
+
 /** The `message` stored on outbox rows that will be retried after this failure. */
 export function failureMessage(status: number, body: unknown): string {
   const b = body as { error?: unknown; migration?: unknown } | null;

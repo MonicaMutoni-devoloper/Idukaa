@@ -31,7 +31,10 @@ test("a response that actually carries products is never treated as stale", () =
 test("failures keep a stable, translatable code instead of leaking an HTTP status as prose", () => {
   const network = Object.assign(new Error("offline"), { name: "NetworkError" });
   assert.equal(syncFailureCode(network), "network");
-  assert.equal(syncFailureCode(new Error("boom"), 503), "server_503");
+  // A gateway 502/503 is how a sleeping or restarting API looks, so it gets its own sentence
+  // ("temporarily unavailable") instead of being folded into "the server could not answer".
+  assert.equal(syncFailureCode(new Error("boom"), 503), "unavailable");
+  assert.equal(syncFailureCode(new Error("boom"), 502), "unavailable");
   assert.equal(syncFailureCode(new Error("boom"), 500), "server_500");
   assert.equal(syncFailureCode(new Error("boom")), "unexpected");
 });

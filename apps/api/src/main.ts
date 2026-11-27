@@ -3,6 +3,7 @@ import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { JwtService } from "@nestjs/jwt";
 import helmet from "helmet";
+import { json, urlencoded } from "express";
 import { Db } from "./db/db.service";
 import { attachRealtime } from "./realtime/hub";
 import { AppModule } from "./app.module";
@@ -26,7 +27,16 @@ async function bootstrap() {
       process.exit(1);
     }
   }
-  const app = await NestFactory.create(AppModule);
+  // A sync push is a batch of up to 100 queued operations, and a purchase with many lines is a few
+  // kilobytes on its own. Express's 100 kB default is smaller than a full offline backlog, and an
+  // oversized body is not a partial success: every retry sent the same batch and failed the same
+  // way, so the queue could never drain and the device only said "the server could not answer".
+  // Two megabytes covers the largest batch the client can legally send, with headroom. The default
+  // parsers are disabled so there is exactly one JSON parser with this limit, not a 100 kB one in
+  // front of it.
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.use(json({ limit: "2mb" }));
+  app.use(urlencoded({ extended: true, limit: "2mb" }));
   app.use(helmet());
   // Every request gets a correlation id that is echoed back and attached to auth diagnostics.
   app.use(requestIdMiddleware);

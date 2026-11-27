@@ -32,15 +32,32 @@ export function needsFullRepull(state: CatalogueState): boolean {
 /**
  * Stable, translatable code for the last failed sync attempt. The UI renders words; the store keeps
  * a code so a failure is never shown as a bare HTTP status and never invented.
+ *
+ * The code has to separate causes the user can act on differently: a sleeping server (wait), an
+ * expired session (sign in), a slow response (wait), a throttle (wait), a rejection (review) or a
+ * device that cannot write (free space). All of them used to read "the server could not answer",
+ * which is why a fixable problem looked like a server that had been down for days.
  */
-export function syncFailureCode(error: unknown, apiStatus?: number): "network" | "storage" | `server_${number}` | "unexpected" {
+export type SyncFailureCode =
+  | "network" | "timeout" | "storage" | "auth" | "rate_limited" | "unavailable" | "unexpected" | `server_${number}`;
+
+export function syncFailureCode(error: unknown, apiStatus?: number): SyncFailureCode {
   if (apiStatus !== undefined) {
     // `server_503` also covers an out-of-date server database; the sync screen names that case
     // through the stored outbox message, so this code stays the generic answer for pull failures.
+    if (apiStatus === 401 || apiStatus === 403) return "auth";
+    if (apiStatus === 429) return "rate_limited";
+    if (apiStatus === 408 || apiStatus === 504) return "timeout";
+    // 502/503 from the gateway are how a sleeping or restarting instance looks; 500 is not, because
+    // the server answered and the failure is ours to fix.
+    if (apiStatus === 502 || apiStatus === 503) return "unavailable";
     return `server_${apiStatus}`;
   }
   const e = error as { name?: string; code?: string; message?: string } | null;
-  if (e?.name === "NetworkError") return "network";
+  if (e?.name === "NetworkError") return e.message === "timeout" ? "timeout" : "network";
+  // The browser refusing a write because the origin is out of quota looks exactly like "no
+  // internet" to a user, but waiting never helps and reloading loses what was just downloaded.
+  if (e?.name === "QuotaExceededError" || /quota|storage full/i.test(`${e?.name ?? ""} ${e?.message ?? ""}`)) return "storage";
   // A failed write on this device is NOT a server problem, and saying so sends the user (and the
   // next debugging session) after the wrong cause. SQLite reports statement errors as
   // ERR_INTERNAL_SQLITE_ERROR with the reason in the message (e.g. "13 values for 14 columns").

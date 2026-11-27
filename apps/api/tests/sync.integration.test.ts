@@ -700,3 +700,50 @@ test("the shop can be renamed by its owner and the role metadata protects the re
   assert.equal(Number((await pool.query("SELECT count(*) FROM audit_log WHERE action='shop.profile.update' AND entity_id=$1", [shopA])).rows[0].count), 1);
   await assert.rejects(() => shop.updateProfile(owner, { name: "x" }), /at least 2/);
 });
+
+test("a cursor this build cannot read starts the pull over instead of failing for ever", { skip }, async () => {
+  // A device can hold a cursor written by an older build, a truncated write, or a value PostgreSQL
+  // rejects as a timestamp/uuid. That used to throw on every pull, so the device could never catch
+  // up again and the only cure was clearing its storage — the one recovery the app must never need.
+  const broken = [
+    "not-json-at-all",
+    "{}",
+    JSON.stringify({ p: "2026-01-01T00:00:00.000000Z" }),
+    JSON.stringify({ p: ["yesterday", "abc"], s: [null, 7], c: 42 }),
+  ];
+  for (const cursor of broken) {
+    const r = await svc.pull(mgr, cursor);
+    assert.ok(
+      r.changes.some((c: any) => c.entity === "product" && c.id === pid),
+      `cursor ${cursor} still returns the catalogue`,
+    );
+    assert.doesNotThrow(() => JSON.parse(r.checkpoint));
+  }
+
+  // The cursor the API answers with really is incremental: replaying it returns no product rows.
+  const first = await svc.pull(mgr);
+  const replay = await svc.pull(mgr, first.checkpoint);
+  assert.equal(replay.changes.filter((c: any) => c.entity === "product").length, 0);
+});
+
+test("one operation the server cannot process no longer fails the whole batch", { skip }, async () => {
+  const before = uuid(), after = uuid();
+  const good = (id: string) => op("product.upsert", {
+    productId: id, code: `ISO-${id.slice(0, 8)}`, name: "Isolation product", unit: "pcs", sellingPrice: 1000, lowStockThreshold: 0,
+  });
+  // Fault injection: reading the payload throws before validation, which is the shape of an
+  // unexpected error `pushOne` cannot map to a business verdict (a database blip, an unmapped
+  // constraint, a bug on one operation type). It used to propagate and fail the entire request,
+  // so every retry of the same batch hit it first and nothing behind it could ever sync.
+  const poison: any = { opId: uuid(), deviceId: "test-device", createdAt: now(), type: "product.upsert" };
+  Object.defineProperty(poison, "payload", { get() { throw new Error("simulated server fault"); } });
+
+  const results = await svc.push(mgr, "test-device", [good(before), poison, good(after)]);
+  assert.equal(results.length, 2, "the work after the failure is left for the next pass, not discarded");
+  assert.equal(results[0].status, "applied", "the operation before the failure is still applied");
+  assert.equal(results[1].status, "conflict");
+  assert.equal(results[1].message, "server_error", "the client keeps this one queued and retries it");
+  assert.equal(Number((await pool.query("SELECT count(*) FROM products WHERE id=$1", [before])).rows[0].count), 1);
+  assert.equal(Number((await pool.query("SELECT count(*) FROM products WHERE id=$1", [after])).rows[0].count), 0,
+    "later work is not applied out of order");
+});

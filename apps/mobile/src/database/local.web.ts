@@ -11,6 +11,8 @@
 // state under the lock, so two tabs cannot clobber each other's queued operations. Other tabs are
 // notified through BroadcastChannel and drop their read cache.
 import { lineAmount } from "@sms/shared";
+import { retryDelay } from "../synchronization/backoff";
+import { SERVER_OP_ERROR } from "../synchronization/failure";
 import type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot } from "./local";
 
 export type { LocalProduct, LocalRecord, OutboxRow, OutboxStatus, StorageBackend, StorageUsageEntry, StorageUsageSnapshot };
@@ -336,6 +338,22 @@ export async function applyResults(results: { opId: string; status: string; mess
   await mutate((s) => {
     for (const r of results) {
       const row = s.outbox.find((x) => x.op_id === r.opId); if (!row) continue;
+      // The server failed on this operation (not a business rule): nothing was applied, so the
+      // optimistic figure stays and the operation AND everything queued behind it are held for a
+      // later retry. Work is never turned into a conflict just because the server had a bad moment.
+      if (r.status === "conflict" && r.message === SERVER_OP_ERROR) {
+        // One shared retry time: the held operation and everything behind it become due together,
+        // so they are pushed in their original order rather than racing each other.
+        const at = Date.now() + retryDelay(row.attempts + 1);
+        for (const h of s.outbox) {
+          if (h.seq < row.seq || (h.status !== "pending" && h.status !== "retry" && h.status !== "pending_approval")) continue;
+          h.attempts += 1;
+          h.status = "retry";
+          h.next_attempt_at = at;
+          h.message = SERVER_OP_ERROR;
+        }
+        continue;
+      }
       for (const [pid, q] of Object.entries(JSON.parse(row.deltas) as Record<string, number>)) { const p = s.products.find((p) => p.id === pid); if (p) p.pending_delta -= q; }
       if (r.status === "applied" || r.status === "duplicate") {
         for (const [pid, onHand] of Object.entries(r.stock ?? {})) {

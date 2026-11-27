@@ -56,6 +56,33 @@ export class SyncService {
     return { ...o, payload: { ...p, initialQty: p.initialQty ?? p.openingQty, initialUnitCost: p.initialUnitCost ?? p.openingUnitCost } };
   }
 
+  /**
+   * One operation the server cannot process must not take the whole queue with it.
+   *
+   * `pushOne` only maps the failures it understands; anything else (a database blip, an unmapped
+   * constraint, a bug on an operation type) used to propagate and fail the ENTIRE request. The
+   * client then retried the same batch, hit the same operation first, and failed again — so one
+   * poisonous operation stopped every sale, expense and delivery behind it, on that device, for
+   * as long as the row stayed in the outbox. The verdict below is deliberately `conflict` with a
+   * named message: the client keeps the operation queued (see `applyResults`), holds the ones
+   * behind it so ordering survives, and retries everything with backoff — nothing is discarded.
+   * Operations after the failure are simply not answered here; the next pass includes them.
+   */
+  private unexpected(opId: string, raw: unknown, e: unknown): OpResult {
+    const err = e as { name?: string; message?: string; code?: string; detail?: string } | null;
+    console.error(JSON.stringify({
+      t: new Date().toISOString(),
+      evt: "sync.op.failed",
+      opId,
+      type: (raw as { type?: unknown } | null)?.type,
+      error: err?.name ?? "Error",
+      pgCode: err?.code,
+      message: err?.message?.slice(0, 300),
+      pgDetail: err?.detail?.slice(0, 300),
+    }));
+    return { opId, status: "conflict", message: "server_error" };
+  }
+
   async push(user: AuthUser, device: string, raws: unknown[]): Promise<OpResult[]> {
     // A suspended shop cannot write anything: the whole batch is refused with the reason, and the
     // client keeps its queued work visible instead of it being silently applied or dropped.
@@ -64,7 +91,13 @@ export class SyncService {
       if (sh?.status === "suspended") return raws.map((raw) => ({ opId: String((raw as any)?.opId ?? ""), status: "rejected" as const, message: "shop_suspended" }));
     }
     const out: OpResult[] = [];
-    for (const raw of raws) out.push(await this.pushOne(user, raw)); // sequential: preserves client order
+    for (const raw of raws) { // sequential: preserves client order
+      try { out.push(await this.pushOne(user, raw)); }
+      catch (e) {
+        out.push(this.unexpected(String((raw as { opId?: unknown } | null)?.opId ?? ""), raw, e));
+        break; // keep ordering: later operations wait for a pass that can get past this one
+      }
+    }
     // One push = one notification for the shop, after the transactions have committed. A
     // pending_approval result is a visible change too (the owner's approvals desk must wake up),
     // even though no stock or money moved yet. Clients answer with their normal pull, so nobody
@@ -529,13 +562,35 @@ export class SyncService {
     return rows[0]?.revision ?? "0";
   }
 
+  /**
+   * Decode a pull cursor, falling back to "start from the beginning".
+   *
+   * The cursor is opaque to the client and saved verbatim, so a device can present a value written
+   * by an older build, a truncated write, or a hand-edited one. Parsing that used to throw (or reach
+   * PostgreSQL as an invalid timestamp/uuid), which made EVERY pull from that device answer 500 —
+   * a device could never catch up again, and the only cure was clearing its storage, the one
+   * recovery this app must never require. Starting over is always safe: the pull upserts by id and
+   * the outbox is untouched.
+   */
+  private static cursor(raw?: string) {
+    const epoch = "1970-01-01T00:00:00.000000Z", nil = "00000000-0000-0000-0000-000000000000";
+    const TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+    const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const pair = (v: unknown): [string, string] => Array.isArray(v) && typeof v[0] === "string" && typeof v[1] === "string"
+      && TS.test(v[0]) && ID.test(v[1]) ? [v[0], v[1]] : [epoch, nil];
+    let parsed: unknown = {};
+    try { parsed = raw ? JSON.parse(raw) : {}; } catch { parsed = {}; }
+    const c = (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}) as Record<string, unknown>;
+    return { p: pair(c.p), s: pair(c.s), c: pair(c.c) };
+  }
+
   /** Incremental pull. Checkpoint is an opaque JSON cursor: {p:[ts,id], s:[ts,id]} using (updated_at,id) row comparison. */
   async pull(user: AuthUser, checkpoint?: string, limit = 200) {
     // Scheduled prices that have come due are promoted here too: an idle shop that only pulls still
     // sees the price it must charge from today, without waiting for the next sale.
     if (user.shopId) await this.db.tx((c) => this.pricing.applyDuePrices(c, user.shopId!));
-    const cur = checkpoint ? JSON.parse(checkpoint) : {}; const epoch = "1970-01-01T00:00:00.000000Z", nil = "00000000-0000-0000-0000-000000000000";
-    const [pt, pid] = cur.p ?? [epoch, nil]; const [st, sid] = cur.s ?? [epoch, nil]; const [ct, cid] = cur.c ?? [epoch, nil];
+    const cur = SyncService.cursor(checkpoint);
+    const [pt, pid] = cur.p; const [st, sid] = cur.s; const [ct, cid] = cur.c;
     const ts = `to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
     const products = await this.db.query(`SELECT p.*, ${ts} AS ts, COALESCE((SELECT SUM(qty) FROM stock_movements m WHERE m.product_id=p.id),0)::bigint AS on_hand
       FROM products p WHERE shop_id=$1 AND (updated_at,id) > ($2::timestamptz,$3::uuid) ORDER BY updated_at,id LIMIT $4`, [user.shopId, pt, pid, limit]);

@@ -140,7 +140,12 @@ async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = o.timeo
   else if (WEB) headers["x-csrf-token"] = "1";
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // A timeout and a caller cancellation both abort the same signal, but they mean opposite things
+  // to the user: "the server did not answer" versus "this download was cancelled". Without the
+  // distinction every slow cold start was reported as a cancellation, or every cancellation as a
+  // network outage, on the sync screen.
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const forwardAbort = () => controller.abort();
   o.signal?.addEventListener("abort", forwardAbort);
   let res: Response;
@@ -153,7 +158,7 @@ async function fetchJson<T>(path: string, o: RequestOptions, timeoutMs = o.timeo
       credentials: WEB ? "include" : "omit",
     });
   } catch {
-    throw new NetworkError(o.signal?.aborted ? "download_cancelled" : "network_unavailable");
+    throw new NetworkError(timedOut ? "timeout" : o.signal?.aborted ? "download_cancelled" : "network_unavailable");
   } finally {
     clearTimeout(timer);
     o.signal?.removeEventListener("abort", forwardAbort);
