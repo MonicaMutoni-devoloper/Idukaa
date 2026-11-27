@@ -126,7 +126,11 @@ async function runPass(force: boolean): Promise<PassOutcome> {
   // bypassing the per-request backoff because this is a single attempt per pass.
   if (!(await ensureSession(true))) {
     if (sessionRejected()) { useSync.setState({ authRequired: true }); return "ok"; }
-    // The session may still be perfectly valid: the server was unreachable while getting a token.
+    // The session may still be perfectly valid: getting a token failed because the server was
+    // unreachable (asleep, restarting, connection dropped). Returning silently here left the sync
+    // screen showing queued work with no explanation at all — exactly the "retry does nothing"
+    // report — so this is reported and backed off like any other failed pass.
+    useSync.setState({ lastError: useSync.getState().online ? "unavailable" : "network" });
     return "failed";
   }
   useSync.setState({ running: true, authRequired: false, lastAttemptAt: Date.now() });
